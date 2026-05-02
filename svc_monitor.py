@@ -2847,13 +2847,27 @@ class MonitorSvc(threading.Thread):
                 dx = min(fw, int(reg.dx * scx + ox + 5))
                 dy = min(fh, int(reg.dy * scy + oy + 5))
 
-                if reg.sx == reg.dx and reg.sy == reg.dy:
+                # hp_trig/mp_trig are point-style ROIs in config (often dx<=sx, dy<=sy).
+                is_point = (reg.dx <= reg.sx) and (reg.dy <= reg.sy)
+                if is_point:
                     try:
-                        pixel = img_np[int(reg.sy * scy + oy), int(reg.sx * scx + ox)]
-                        is_dark = all(int(c) < 55 for c in pixel)
-                        if name == "hp_trig": h_trig_active = is_dark
-                        elif name == "mp_trig": m_trig_active = is_dark
-                    except IndexError: pass
+                        px = int(reg.sx * scx + ox)
+                        py = int(reg.sy * scy + oy)
+                        # Sample a tiny neighborhood for stability (vs. a single pixel).
+                        r = 2
+                        x0 = max(0, px - r)
+                        x1 = min(fw - 1, px + r)
+                        y0 = max(0, py - r)
+                        y1 = min(fh - 1, py + r)
+                        patch = img_np[y0:y1 + 1, x0:x1 + 1]
+                        dark = (patch[:, :, 0] < 55) & (patch[:, :, 1] < 55) & (patch[:, :, 2] < 55)
+                        is_dark = float(dark.mean()) >= 0.60
+                        if name == "hp_trig":
+                            h_trig_active = is_dark
+                        elif name == "mp_trig":
+                            m_trig_active = is_dark
+                    except Exception:
+                        pass
                     continue
 
                 crop = img_np[sy:dy, sx:dx]
@@ -2995,6 +3009,15 @@ class MonitorSvc(threading.Thread):
                             _monitor_log("[Warn] 인식 실패, 이전 값 유지")
                             self._map_fail_count += 1
                     continue
+
+            # Trigger flags must update even when no other ROI changed.
+            try:
+                if getattr(self.state, "hp_trig_active", False) != h_trig_active:
+                    self.state.hp_trig_active = h_trig_active
+                if getattr(self.state, "mp_trig_active", False) != m_trig_active:
+                    self.state.mp_trig_active = m_trig_active
+            except Exception:
+                pass
 
             # ── [최종 업데이트 및 제어] ──────────────────────
             # 인식된 모든 변화를 GameState에 일괄 반영

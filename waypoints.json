@@ -2,17 +2,14 @@
     "\ubcf5\uac74\ucc9c\ub9ac\ub9c8\uad74": {
         "1": {
             "points": [
-                "6",
-                "11",
-                "15",
-                "15",
-                "10",
-                "2"
+                "AG41",
+                "AP37",
+                "AS19"
             ],
             "entry": {
-                "x": 1,
-                "y": 17,
-                "direction": "right",
+                "x": 32,
+                "y": 47,
+                "direction": "down",
                 "reverse_action": ""
             },
             "exit": {

@@ -1,11 +1,8 @@
 ﻿Map,Floor,Type,X,Y,Direction,ReverseAction,Grid
-복건천리마굴,1,Entry,1,17,right,,
-복건천리마굴,1,Hunt,0,0,,,6
-복건천리마굴,1,Hunt,0,0,,,11
-복건천리마굴,1,Hunt,0,0,,,15
-복건천리마굴,1,Hunt,0,0,,,15
-복건천리마굴,1,Hunt,0,0,,,10
-복건천리마굴,1,Hunt,0,0,,,2
+복건천리마굴,1,Entry,32,47,down,,
+복건천리마굴,1,Hunt,0,0,,,AG41
+복건천리마굴,1,Hunt,0,0,,,AP37
+복건천리마굴,1,Hunt,0,0,,,AS19
 복건천리마굴,1,Exit,19,128,down,,
 복건성,1,Entry,74,135,left,,
 복건성,1,Hunt,0,0,,,BX131
