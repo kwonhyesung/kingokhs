@@ -1,0 +1,78 @@
+{
+    "기본맵": {
+        "grid_size": 32,
+        "play_area": {
+            "sx": 100,
+            "sy": 100,
+            "ex": 700,
+            "ey": 500
+        },
+        "walls": [
+            [
+                5,
+                5
+            ],
+            [
+                5,
+                6
+            ],
+            [
+                10,
+                10
+            ]
+        ],
+        "waypoints": []
+    },
+    "흉가1": {
+        "grid_size": 32,
+        "play_area": {
+            "sx": 50,
+            "sy": 50,
+            "ex": 750,
+            "ey": 550
+        },
+        "walls": [
+            [
+                2,
+                2
+            ],
+            [
+                2,
+                3
+            ],
+            [
+                15,
+                12
+            ]
+        ]
+    },
+    "복건천리마굴": {
+        "grid_cols": 24,
+        "grid_rows": 17,
+        "walls": [],
+        "waypoints": [
+            {"type": "Entry", "x": 1, "y": 17, "direction": "right"},
+            {"type": "Hunt", "grid_x": 6, "grid_y": 12},
+            {"type": "Hunt", "grid_x": 11, "grid_y": 13},
+            {"type": "Hunt", "grid_x": 15, "grid_y": 17},
+            {"type": "Hunt", "grid_x": 15, "grid_y": 6},
+            {"type": "Hunt", "grid_x": 10, "grid_y": 6},
+            {"type": "Hunt", "grid_x": 2, "grid_y": 3},
+            {"type": "Exit", "x": 19, "y": 128, "direction": "down"}
+        ]
+    },
+    "복건성": {
+        "grid_cols": 24,
+        "grid_rows": 17,
+        "walls": [],
+        "waypoints": [
+            {"type": "Entry", "x": 74, "y": 135, "direction": "up"},
+            {"type": "Hunt", "grid_x": 1, "grid_y": 130},
+            {"type": "Hunt", "grid_x": 1, "grid_y": 112},
+            {"type": "Hunt", "grid_x": 1, "grid_y": 110},
+            {"type": "Hunt", "grid_x": 1, "grid_y": 100},
+            {"type": "Hunt", "grid_x": 1, "grid_y": 81},
+            {"type": "Exit", "x": 89, "y": 80, "direction": "up"}
+        ]
+    }
+}

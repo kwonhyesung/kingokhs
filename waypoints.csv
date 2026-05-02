@@ -1,0 +1,16 @@
+﻿Map,Floor,Type,X,Y,Direction,ReverseAction,Grid
+복건천리마굴,1,Entry,1,17,right,,
+복건천리마굴,1,Hunt,0,0,,,6
+복건천리마굴,1,Hunt,0,0,,,11
+복건천리마굴,1,Hunt,0,0,,,15
+복건천리마굴,1,Hunt,0,0,,,15
+복건천리마굴,1,Hunt,0,0,,,10
+복건천리마굴,1,Hunt,0,0,,,2
+복건천리마굴,1,Exit,19,128,down,,
+복건성,1,Entry,74,135,left,,
+복건성,1,Hunt,0,0,,,BX131
+복건성,1,Hunt,0,0,,,CL110
+복건성,1,Hunt,0,0,,,CL110
+복건성,1,Hunt,0,0,,,CL101
+복건성,1,Hunt,0,0,,,CM101
+복건성,1,Exit,89,80,down,,

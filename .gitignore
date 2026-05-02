@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtual envs
+.venv/
+venv/
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+
+# Runtime logs / generated artifacts
+game_log*.csv
+debug_*
+debug_analysis/
+debug_crops/
+ocr_debug/
+scratch/
+
+# Local UI state
+gui_state.json
+
+# Secrets (do not commit)
+token.json
+credentials.json
+
