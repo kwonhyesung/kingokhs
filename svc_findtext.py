@@ -480,63 +480,62 @@ class FindTextEngine:
                 sim1, sim0 = s1_v / np.sum(t1), s0_v / (th*tw - np.sum(t1))
                 
                 score_map = np.minimum(sim1, sim0)
-                
-                # 숫자 4 템플릿별 매칭 점수 디버깅 - 모든 필드 확장 + 강제 출력
-                dprint(f"[DEBUG] 모든 숫자 템플릿 확인 - {debug_name} 필드: 숫자 {digit} 처리 중...")
+
                 # 다중 템플릿 키 처리 (예: "4_0", "4_1" 등)
                 digit_base = digit.split('_')[0]  # "4_0" -> "4"
-                if digit_base == '4':
-                    dprint(f"[DEBUG] 숫자 4 템플릿 발견! - {debug_name} 필드 처리 중...")
-                    # 최고 점수 찾기
-                    max_score = np.max(score_map)
-                    max_pos = np.unravel_index(np.argmax(score_map), score_map.shape)
-                    max_sim1 = sim1[max_pos]
-                    max_sim0 = sim0[max_pos]
-                    dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 최고 점수: {max_score:.3f}, sim1: {max_sim1:.3f}, sim0: {max_sim0:.3f}, 위치: {max_pos}")
-                    
-                    # x,y 필드는 항상 상세 출력 + 강제 출력
-                    if debug_name in ['x', 'y']:
-                        dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드 강제 디버그 시작")
-                        dprint(f"[DEBUG] 실제 값: x:0144, y:0044 (사용자 제공)")
-                        dprint(f"[DEBUG] 시스템 인식: x:1, y:3 (문제 발생)")
-                        # 상위 5개 매칭 점수 출력
-                        top_indices = np.unravel_index(np.argpartition(score_map.flatten(), -5)[-5:], score_map.shape)
-                        dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 상위 5개 점수:")
-                        for i in range(5):
-                            y_pos, x_pos = top_indices[0][i], top_indices[1][i]
-                            score = score_map[y_pos, x_pos]
-                            sim1_val = sim1[y_pos, x_pos]
-                            sim0_val = sim0[y_pos, x_pos]
-                            dprint(f"  {i+1}: 위치({x_pos}, {y_pos}) 점수:{score:.3f} sim1:{sim1_val:.3f} sim0:{sim0_val:.3f}")
+
+                # NOTE: 아래 디버그 분석은 연산량이 커서, verbose일 때만 수행한다.
+                if getattr(self, "verbose", False):
+                    dprint(f"[DEBUG] 모든 숫자 템플릿 확인 - {debug_name} 필드: 숫자 {digit} 처리 중...")
+                    if digit_base == '4':
+                        dprint(f"[DEBUG] 숫자 4 템플릿 발견! - {debug_name} 필드 처리 중...")
+                        # 최고 점수 찾기
+                        max_score = np.max(score_map)
+                        max_pos = np.unravel_index(np.argmax(score_map), score_map.shape)
+                        max_sim1 = sim1[max_pos]
+                        max_sim0 = sim0[max_pos]
+                        dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 최고 점수: {max_score:.3f}, sim1: {max_sim1:.3f}, sim0: {max_sim0:.3f}, 위치: {max_pos}")
                         
-                        # 임계값 통과 여부 확인
-                        threshold_mask = (sim1 >= 0.75) & (sim0 >= 0.7)
-                        if np.any(threshold_mask):
-                            threshold_positions = np.where(threshold_mask)
-                            dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 임계값 통과 위치 수: {len(threshold_positions[0])}")
-                            if len(threshold_positions[0]) > 0:
-                                # 임계값 통과한 최고 점수
-                                threshold_scores = score_map[threshold_mask]
-                                max_threshold_idx = np.argmax(threshold_scores)
-                                ty, tx = threshold_positions[0][max_threshold_idx], threshold_positions[1][max_threshold_idx]
-                                dprint(f"[DEBUG] 임계값 통과 최고 점수: {threshold_scores[max_threshold_idx]:.3f} at ({tx}, {ty})")
-                        else:
-                            dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 임계값 미통과")
-                        
-                        # 추가 정보: 템플릿과 화면 크기 비교
-                        dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 템플릿 크기: {t1.shape}, 화면 크기: {s_bin.shape}")
-                        
-                        # 최저 점수도 확인
-                        min_score = np.min(score_map)
-                        min_pos = np.unravel_index(np.argmin(score_map), score_map.shape)
-                        min_sim1 = sim1[min_pos]
-                        min_sim0 = sim0[min_pos]
-                        dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 최저 점수: {min_score:.3f}, sim1: {min_sim1:.3f}, sim0: {min_sim0:.3f}, 위치: {min_pos}")
-                        dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드 강제 디버그 종료")
-                else:
-                    # 다른 숫자들도 x,y 필드에서는 출력
-                    if debug_name in ['x', 'y']:
-                        dprint(f"[DEBUG] 다른 숫자({digit}) - {debug_name} 필드: 최고 점수: {np.max(score_map):.3f}")
+                        # x,y 필드는 상세 출력
+                        if debug_name in ['x', 'y']:
+                            dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드 디버그 시작")
+                            # 상위 5개 매칭 점수 출력
+                            top_indices = np.unravel_index(np.argpartition(score_map.flatten(), -5)[-5:], score_map.shape)
+                            dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 상위 5개 점수:")
+                            for i in range(5):
+                                y_pos, x_pos = top_indices[0][i], top_indices[1][i]
+                                score = score_map[y_pos, x_pos]
+                                sim1_val = sim1[y_pos, x_pos]
+                                sim0_val = sim0[y_pos, x_pos]
+                                dprint(f"  {i+1}: 위치({x_pos}, {y_pos}) 점수:{score:.3f} sim1:{sim1_val:.3f} sim0:{sim0_val:.3f}")
+                            
+                            # 임계값 통과 여부 확인
+                            threshold_mask = (sim1 >= 0.75) & (sim0 >= 0.7)
+                            if np.any(threshold_mask):
+                                threshold_positions = np.where(threshold_mask)
+                                dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 임계값 통과 위치 수: {len(threshold_positions[0])}")
+                                if len(threshold_positions[0]) > 0:
+                                    threshold_scores = score_map[threshold_mask]
+                                    max_threshold_idx = np.argmax(threshold_scores)
+                                    ty, tx = threshold_positions[0][max_threshold_idx], threshold_positions[1][max_threshold_idx]
+                                    dprint(f"[DEBUG] 임계값 통과 최고 점수: {threshold_scores[max_threshold_idx]:.3f} at ({tx}, {ty})")
+                            else:
+                                dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 임계값 미통과")
+                            
+                            # 추가 정보: 템플릿과 화면 크기 비교
+                            dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 템플릿 크기: {t1.shape}, 화면 크기: {s_bin.shape}")
+                            
+                            # 최저 점수도 확인
+                            min_score = np.min(score_map)
+                            min_pos = np.unravel_index(np.argmin(score_map), score_map.shape)
+                            min_sim1 = sim1[min_pos]
+                            min_sim0 = sim0[min_pos]
+                            dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드: 최저 점수: {min_score:.3f}, sim1: {min_sim1:.3f}, sim0: {min_sim0:.3f}, 위치: {min_pos}")
+                            dprint(f"[DEBUG] 숫자 4 템플릿 - {debug_name} 필드 디버그 종료")
+                    else:
+                        # 다른 숫자들도 x,y 필드에서는 출력
+                        if debug_name in ['x', 'y']:
+                            dprint(f"[DEBUG] 다른 숫자({digit}) - {debug_name} 필드: 최고 점수: {np.max(score_map):.3f}")
                 
                 # 숫자별 개별 임계값 적용
                 # 템플릿 키가 "4_0"처럼 올 수 있으므로 digit_base 기준으로 적용한다.

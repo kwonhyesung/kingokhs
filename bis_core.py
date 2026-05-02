@@ -8,6 +8,13 @@ import csv
 import queue
 
 VERBOSE_STATE_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
+VERBOSE_HW_LOGS = os.environ.get("SVC_HW_LOGS", "0") == "1"
+
+
+def _hw_log(*args, **kwargs):
+    """Hardware logging is extremely spammy; keep it opt-in."""
+    if VERBOSE_HW_LOGS:
+        print(*args, **kwargs)
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -455,7 +462,7 @@ class BisHardware:
             if not is_focused:
                 # 키 떼기(U:) 명령은 비상 정지 및 사후 처리를 위해 무조건 허용
                 if not cmd.startswith("U:"):
-                    print(f"[Hardware] 차단: {cmd} (포커스 아님, hwnd={current_hwnd}, state.hwnd={self.state.hwnd if self.state else None})")
+                    _hw_log(f"[Hardware] 차단: {cmd} (포커스 아님, hwnd={current_hwnd}, state.hwnd={self.state.hwnd if self.state else None})")
                     return
 
             if self.ser and self.ser.is_open:
@@ -464,11 +471,11 @@ class BisHardware:
                     padding = ' ' * random.randint(1, 16)
                     payload = f"{cmd}{padding}\n".encode('ascii')
                     self.ser.write(payload)
-                    print(f"[Hardware] 전송: {cmd} ({len(payload)}바이트)")
+                    _hw_log(f"[Hardware] 전송: {cmd} ({len(payload)}바이트)")
                 except Exception as e:
-                    print(f"[Hardware] 전송 실패: {cmd} - {e}")
+                    _hw_log(f"[Hardware] 전송 실패: {cmd} - {e}")
             else:
-                print(f"[Hardware] 미전송: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
+                _hw_log(f"[Hardware] 미전송: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
             # 소프트웨어 폴백(pydirectinput)은 보안상 완전히 제거됨
 
     def send_force(self, cmd: str):
@@ -479,14 +486,14 @@ class BisHardware:
                     padding = ' ' * random.randint(1, 16)
                     payload = f"{cmd}{padding}\n".encode('ascii')
                     self.ser.write(payload)
-                    print(f"[Hardware] 강제전송: {cmd} ({len(payload)}바이트)")
+                    _hw_log(f"[Hardware] 강제전송: {cmd} ({len(payload)}바이트)")
                 except Exception as e:
-                    print(f"[Hardware] 강제전송 실패: {cmd} - {e}")
+                    _hw_log(f"[Hardware] 강제전송 실패: {cmd} - {e}")
             else:
-                print(f"[Hardware] 강제전송 불가: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
+                _hw_log(f"[Hardware] 강제전송 불가: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
 
-    def panic_release(self):
-        """강제 정지 시 파이썬 측 통신 버퍼를 싹 비우고 아두이노에 키보드 즉시 해제 명령 강제 전송. (락 무시)"""
+    def _reset_serial_buffers(self):
+        """Best-effort: clear buffered serial I/O to reduce stuck input risk."""
         if self.ser and self.ser.is_open:
             try:
                 # 이미 쌓인 D:left, D:right 등의 발송 대기열 삭제
@@ -508,6 +515,15 @@ class BisHardware:
         humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
         self.send(f"U:{key}")
 
+    def fast_press(self, key: str, variance: float = 0.15):
+        """
+        Ultra-fast key press (ft.ahk-style): no HumanBehaviorSimulator pause.
+        Use this for trigger reactions where speed matters.
+        """
+        self.send(f"D:{key}")
+        humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
+        self.send(f"U:{key}")
+
     def press_with_gap(self, key: str, variance: float = 0.15):
         self.humanized_press(key, variance)
         # HumanBehaviorSimulator로 타이핑 동작 간 휴식 시간 시뮬레이션
@@ -522,7 +538,12 @@ class BisHardware:
 
     def panic_release(self):
         """모든 하드웨어 신호를 즉시 소거 (비상 정지용)"""
-        print("[Hardware] 모든 신호 강제 해제 (Panic Release)")
+        # Combine: clear buffers + release keys.
+        try:
+            self._reset_serial_buffers()
+        except Exception:
+            pass
+        _hw_log("[Hardware] 모든 신호 강제 해제 (Panic Release)")
         keys = ["left", "right", "up", "down", "shift", "ctrl", "alt", "esc", "space", "enter"]
         for k in keys:
             self.send(f"U:{k}")
@@ -533,7 +554,7 @@ class BisHardware:
         pause = HumanBehaviorSimulator.simulate_pause('move')
         time.sleep(pause)
         
-        print(f"[Move] 방향키: {direction}")
+        _hw_log(f"[Move] 방향키: {direction}")
         try:
             self.send_force(f"D:{direction}")
             humanized_sleep(TIMING_CONFIG[hold_key], variance)
@@ -555,7 +576,7 @@ class BisHardware:
             pixel_pos = grid_manager.to_pixel(grid_x, grid_y)
             if pixel_pos:
                 px, py = pixel_pos
-                print(f"[Click] Grid({grid_x}, {grid_y}) -> Pixel({px}, {py})")
+                _hw_log(f"[Click] Grid({grid_x}, {grid_y}) -> Pixel({px}, {py})")
                 # 마우스 클릭 구현 (win32api 사용)
                 try:
                     import win32api
@@ -566,11 +587,11 @@ class BisHardware:
                     time.sleep(0.05)
                     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
                 except Exception as e:
-                    print(f"[Click] 마우스 클릭 실패: {e}")
+                    _hw_log(f"[Click] 마우스 클릭 실패: {e}")
             else:
-                print(f"[Click] Grid 좌표 변환 실패: ({grid_x}, {grid_y})")
+                _hw_log(f"[Click] Grid 좌표 변환 실패: ({grid_x}, {grid_y})")
         else:
-            print(f"[Click] GridManager가 없어 클릭 불가: ({grid_x}, {grid_y})")
+            _hw_log(f"[Click] GridManager가 없어 클릭 불가: ({grid_x}, {grid_y})")
 
 hw = BisHardware()
 

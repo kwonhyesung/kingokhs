@@ -33,6 +33,9 @@ class LogicSvc(threading.Thread):
         self.current_state = AppStatus.IDLE
         self.last_load_time = time.time()
         self.task_active   = False  # 서비스 활성화 플래그
+        # Trigger reaction rate-limit (prevents input spam while keeping fast response).
+        self._last_hp_recover_time = 0.0
+        self._last_mp_recover_time = 0.0
 
     # ----------------------------------------------------------
     # ── 내부 헬퍼: 힐 시퀀스 ─────────────────────────────────
@@ -47,24 +50,95 @@ class LogicSvc(threading.Thread):
         hw.humanized_press("enter")
         skill.last_cast_time = time.time()
 
+    def _press_fast(self, key: str, variance: float = 0.15):
+        """
+        Trigger reactions need to be fast (ft.ahk 스타일). If fast_press is available use it,
+        otherwise fall back to humanized_press.
+        """
+        try:
+            hw.fast_press(key, variance=variance)
+        except Exception:
+            hw.humanized_press(key, variance=variance)
+
+    def _resolve_recovery_key(self, selected: str, default_key: str):
+        """
+        GUI에서 선택된 recovery_*_spell(스킬 이름)을 hotkey로 해석한다.
+        - 스킬 DB에 있으면 hotkey 사용
+        - selected 자체가 한 글자(숫자키 등)면 그대로 사용
+        - 그 외는 default_key로 폴백
+        """
+        skill = None
+        key = None
+        try:
+            if selected:
+                skill = next((s for s in self.state.spells if getattr(s, "name", "") == selected), None)
+                if skill is not None and getattr(skill, "hotkey", None):
+                    key = skill.hotkey
+                elif isinstance(selected, str) and len(selected) == 1:
+                    key = selected
+        except Exception:
+            skill = None
+            key = None
+
+        if not key:
+            key = default_key
+        return key, skill
+
     def _recover_hp(self):
-        heal_name  = self.state.recovery_hp_spell
-        if not heal_name or heal_name == "사용 안 함": return
-        heal_skill = next((s for s in self.state.spells if s.name == heal_name), None)
-        if not heal_skill: return
-        if self.state.hp_trig_active:
-            self._execute_v3_heal(heal_skill)
-            humanized_sleep(TIMING_CONFIG["heal_gap"])
+        if not getattr(self.state, "hp_trig_active", False):
+            return
+
+        # hp_trig: 검정색 감지 시 즉시 회복 (esc -> key -> home -> enter)
+        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="3")
+
+        now = time.time()
+        min_interval = max(0.05, float(TIMING_CONFIG.get("spell_confirm", 0.20)) * 0.80)
+        if now - self._last_hp_recover_time < min_interval:
+            return
+
+        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
+            return
+
+        self._last_hp_recover_time = now
+        self._press_fast("esc")
+        humanized_sleep(TIMING_CONFIG["key_gap"])
+        self._press_fast(key)
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+        self._press_fast("home")
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+        self._press_fast("enter")
+
+        if skill is not None:
+            try:
+                skill.last_cast_time = now
+            except Exception:
+                pass
+        humanized_sleep(TIMING_CONFIG["heal_gap"])
 
     def _recover_mp(self):
-        mana_name  = self.state.recovery_mp_spell
-        if not mana_name or mana_name == "사용 안 함": return
-        mana_skill = next((s for s in self.state.spells if s.name == mana_name), None)
-        if not mana_skill: return
-        if self.state.mp_trig_active:
-            print(f"[MP] MP 부족 감지 - {mana_name} 시전 중...")
-            self._execute_v3_heal(mana_skill)
-            humanized_sleep(TIMING_CONFIG["mp_recover_wait"])
+        if not getattr(self.state, "mp_trig_active", False):
+            return
+
+        # mp_trig: 검정색 감지 시 '2'(또는 설정 키) 연타, 사라지면 즉시 중단
+        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
+
+        now = time.time()
+        min_interval = max(0.03, float(TIMING_CONFIG.get("key_gap", 0.05)) * 0.70)
+        if now - self._last_mp_recover_time < min_interval:
+            return
+
+        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
+            return
+
+        self._last_mp_recover_time = now
+        self._press_fast(key)
+        if skill is not None:
+            try:
+                skill.last_cast_time = now
+            except Exception:
+                pass
+        # 매우 짧게만 대기: 트리거가 꺼지면 다음 루프에서 즉시 멈출 수 있게 함
+        humanized_sleep(min(0.02, float(TIMING_CONFIG.get("key_gap", 0.05))))
 
     # ----------------------------------------------------------
     # ── 보무(Buff) 자동 관리 ─────────────────────────────────
