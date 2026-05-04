@@ -23,6 +23,7 @@ from typing import Optional
 
 import win32gui
 from svc_stealth import HumanBehaviorSimulator
+from config_profiles import load_profiled_config
 
 # ============================================================
 # ① TIMING_CONFIG  ─  시스템 딜레이 제어 테이블 (config.json에서 로드)
@@ -75,24 +76,19 @@ GAME_HOTKEY_ALIAS: dict[str, str] = {
 GAME_HOTKEY_DISPLAY_ALIAS: dict[str, str] = {v: k for k, v in GAME_HOTKEY_ALIAS.items()}
 
 def load_timing_config():
-    """config.json에서 TIMING_CONFIG 로드"""
+    """Load timing configuration from layered config files."""
     global TIMING_CONFIG
     try:
-        config_file = os.path.join(os.path.dirname(__file__), "config.json")
-        if os.path.exists(config_file):
-            with open(config_file, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                timing = config.get("timing", {})
-                if timing:
-                    TIMING_CONFIG.update(timing)
-                    print(f"[Config] TIMING_CONFIG 로드 완료: {len(timing)}개 항목")
+        config = load_profiled_config()
+        timing = config.get("timing", {})
+        if timing:
+            TIMING_CONFIG.update(timing)
+            print(f"[Config] TIMING_CONFIG loaded: {len(timing)} items")
     except Exception as e:
-        print(f"[Config] TIMING_CONFIG 로드 실패: {e}")
+        print(f"[Config] TIMING_CONFIG load failed: {e}")
 
-# 초기 로드
+# Initial load
 load_timing_config()
-
-
 def normalize_game_hotkey(key: str | None) -> str:
     """게임 내부 단축키 체계 기준으로 숫자 별칭을 a~j로 정규화한다."""
     normalized = str(key or "").strip()
@@ -250,7 +246,7 @@ class GameState:
     follow_anchor_offset: Tuple[int, int] = (0, 0)
     safe_spot: Optional[Tuple[int, int]] = None
     battle_spot: Optional[Tuple[int, int]] = None
-    network_role: str = "도사"
+    network_role: str = "\uB3C4\uC0AC"
     network_server_ip: str = "192.168.137.1"
     network_bind_host: str = "0.0.0.0"
     network_telemetry_port: int = 5555
@@ -326,7 +322,7 @@ class GameState:
     shield_expire_time: float = 0.0
     
     # 역할 관리
-    role: str = "기본"
+    role: str = "\uAE30\uBCF8"
     priest_engage_range: int = 2
     priest_test_attack_key: str = "0"
     priest_test_attack_min_interval: float = 0.8
@@ -388,29 +384,21 @@ class GameState:
         self._load_runtime_settings()
     
     def _load_thresholds(self):
-        """OCR 임계값 로드"""
+        """Load OCR thresholds from the layered config files."""
         try:
-            import json
-            import os
-            config_file = os.path.join(os.path.dirname(__file__), "config.json")
-            if os.path.exists(config_file):
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    saved = json.load(f).get("ocr_thresholds", {})
-                    if isinstance(saved, dict):
-                        for k, v in saved.items():
-                            if k in self.ocr_thresholds:
-                                self.ocr_thresholds[k] = float(v)
+            saved = load_profiled_config().get("ocr_thresholds", {})
+            if isinstance(saved, dict):
+                for k, v in saved.items():
+                    if k in self.ocr_thresholds:
+                        self.ocr_thresholds[k] = float(v)
         except Exception:
             pass
 
-    def _load_runtime_settings(self):
-        """config.json에서 전투/테스트 관련 런타임 설정 로드"""
+    def _load_runtime_settings(self, role: Optional[str] = None):
+        """Load combat/test/network settings from layered config files."""
         try:
-            config_file = os.path.join(os.path.dirname(__file__), "config.json")
-            if not os.path.exists(config_file):
-                return
-            with open(config_file, "r", encoding="utf-8") as f:
-                conf = json.load(f)
+            role_name = role or (self.role if self.role and self.role != "\uAE30\uBCF8" else None)
+            conf = load_profiled_config(role_name)
 
             combat = conf.get("combat", {})
             if isinstance(combat, dict):
@@ -440,7 +428,7 @@ class GameState:
                 self.network_local_port = int(network.get("local_port", self.network_local_port) or self.network_local_port)
         except Exception:
             pass
-    
+
     def load_whitelist_csv(self):
         """whitelist.csv에서 닉네임 목록을 읽어 whitelist_names에 저장."""
         path = WHITELIST_CSV
@@ -687,7 +675,7 @@ class GameState:
                 pass
 
     def set_game_scale(self, scale: float):
-        """게임 창 배율 설정 (1.0 또는 2.0)"""
+        """Game scale setup (1.0 or 2.0)."""
         with self._lock:
             self.game_scale = scale
             base_w, base_h = 854, 480
@@ -697,17 +685,13 @@ class GameState:
             return new_w, new_h
 
     def _load_thresholds(self):
-        """config.json에서 숫자별 OCR 임계값을 로드"""
+        """Load OCR thresholds from the layered config files."""
         try:
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    conf = json.load(f)
-                    saved = conf.get("ocr_thresholds")
-                    if isinstance(saved, dict):
-                        for k, v in saved.items():
-                            if k in self.ocr_thresholds:
-                                self.ocr_thresholds[k] = float(v)
+            saved = load_profiled_config().get("ocr_thresholds", {})
+            if isinstance(saved, dict):
+                for k, v in saved.items():
+                    if k in self.ocr_thresholds:
+                        self.ocr_thresholds[k] = float(v)
         except Exception:
             pass
 

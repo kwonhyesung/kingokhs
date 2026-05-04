@@ -62,6 +62,7 @@ from enum import Enum, auto
 
 # 而ㅻ꼸 ?대옒???꾪룷??
 from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
+from config_profiles import load_profiled_config, load_local_config, save_local_config, LOCAL_CONFIG_FILE
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
@@ -85,30 +86,29 @@ LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
 LOG_FILE_STR = os.path.join(SCRIPT_DIR, "game_log_str.csv")
 
 DEFAULT_NETWORK_CONFIG = {
-    "role": "?꾩궗",
+    "role": "\uB3C4\uC0AC",
     "server_ip": "192.168.137.1",
     "bind_host": "0.0.0.0",
     "telemetry_port": 5555,
     "local_port": 5556,
 }
 
-CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+LOCAL_CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.local.json")
+CONFIG_FILE = LOCAL_CONFIG_FILE
 GUI_STATE_FILE = os.path.join(SCRIPT_DIR, "gui_state.json")
 TEMPLATE_DIGIT_DIR = os.path.join(SCRIPT_DIR, "temple", "digits")
 
-def load_network_config() -> dict:
+def load_network_config(role: Optional[str] = None) -> dict:
     cfg = dict(DEFAULT_NETWORK_CONFIG)
     try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            net = data.get("network", {})
-            if isinstance(net, dict):
-                cfg["role"] = str(net.get("role", cfg["role"]) or cfg["role"])
-                cfg["server_ip"] = str(net.get("server_ip", cfg["server_ip"]) or cfg["server_ip"])
-                cfg["bind_host"] = str(net.get("bind_host", cfg["bind_host"]) or cfg["bind_host"])
-                cfg["telemetry_port"] = int(net.get("telemetry_port", cfg["telemetry_port"]) or cfg["telemetry_port"])
-                cfg["local_port"] = int(net.get("local_port", cfg["local_port"]) or cfg["local_port"])
+        profile = load_profiled_config(role)
+        net = profile.get("network", {})
+        if isinstance(net, dict):
+            cfg["role"] = str(net.get("role", cfg["role"]) or cfg["role"])
+            cfg["server_ip"] = str(net.get("server_ip", cfg["server_ip"]) or cfg["server_ip"])
+            cfg["bind_host"] = str(net.get("bind_host", cfg["bind_host"]) or cfg["bind_host"])
+            cfg["telemetry_port"] = int(net.get("telemetry_port", cfg["telemetry_port"]) or cfg["telemetry_port"])
+            cfg["local_port"] = int(net.get("local_port", cfg["local_port"]) or cfg["local_port"])
     except Exception as e:
         print(f"[Net] config load failed: {e}")
     return cfg
@@ -127,30 +127,22 @@ def dict_to_region(data: dict) -> Region:
     raise ValueError(f"Invalid data type for Region: {type(data)}")
 
 def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            conf = json.load(f)
-            # 醫뚰몴 ?곸뿭留?怨⑤씪??蹂??(dict?닿퀬 'sx'媛 ?덈뒗 寃쎌슦留?
-            return {k: dict_to_region(v) for k, v in conf.items()
-                    if isinstance(v, dict) and 'sx' in v}
-    # DEFAULT_REGIONS??Region 媛앹껜濡?蹂??
+    conf = load_local_config()
+    if conf:
+        return {k: dict_to_region(v) for k, v in conf.items() if isinstance(v, dict) and 'sx' in v}
     return {k: dict_to_region(v) for k, v in DEFAULT_REGIONS.items()}
 
 def save_config(regions_dict):
-    # Region 媛앹껜瑜?dict濡?蹂?섑븯?????(Grid 醫뚰몴 蹂묓뻾 ???
     serializable_dict = {}
     for k, v in regions_dict.items():
         if isinstance(v, Region):
-            # 湲곗〈 ?쎌? 醫뚰몴 ?좎??섎㈃??Grid 醫뚰몴?????
             region_dict = asdict(v)
-            # Grid 醫뚰몴媛 ?놁쑝硫?鍮?媛믪쑝濡?珥덇린??
             region_dict["grid_start"] = region_dict.get("grid_start", [0, 0])
             region_dict["grid_end"] = region_dict.get("grid_end", [0, 0])
             serializable_dict[k] = region_dict
         else:
             serializable_dict[k] = v
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(serializable_dict, f, indent=4)
+    save_local_config(serializable_dict)
 
 def load_gui_state():
     default_state = {"geometry": "600x680", "ui_scale": 1.0, "calibration_geometry": "420x270+180+180"}
@@ -405,8 +397,8 @@ class GridIndicator(tk.Toplevel):
         self.visible = False
         self.grid_size = 48.2  # float (?꾩쟻?ㅼ감 諛⑹?)
         
-        # config.json?먯꽌 ?ㅽ봽??遺덈윭?ㅺ린
-        config_file = os.path.join(SCRIPT_DIR, "config.json")
+        # config.local.json?먯꽌 ?ㅽ봽??遺덈윭?ㅺ린
+        config_file = os.path.join(SCRIPT_DIR, "config.local.json")
         self.offset_x = 0  # 湲곕낯媛?
         self.offset_y = 0  # 湲곕낯媛?
         if os.path.exists(config_file):
@@ -463,7 +455,7 @@ class GridIndicator(tk.Toplevel):
         try:
             # ?? ?뺤젙 ?ㅽ봽?? sx=276, sy=32 / 寃⑹옄 ?ш린 48.2 ??
             # 怨듭떇: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
-            config_file = os.path.join(SCRIPT_DIR, "config.json")
+            config_file = os.path.join(SCRIPT_DIR, "config.local.json")
             play_area_sx = 276  # ?뺤젙 ?ㅽ봽??
             play_area_sy = 32   # ?뺤젙 ?ㅽ봽??
             grid_size = 48.2    # float (?꾩쟻?ㅼ감 諛⑹?)
@@ -544,7 +536,7 @@ class GridIndicator(tk.Toplevel):
 
             # ?? ?뺤젙 ?ㅽ봽?? sx=276, sy=32 / 寃⑹옄 ?ш린 48.2 ??
             # 怨듭떇: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
-            config_file = os.path.join(SCRIPT_DIR, "config.json")
+            config_file = os.path.join(SCRIPT_DIR, "config.local.json")
             play_area_sx = 276  # ?뺤젙 ?ㅽ봽??
             play_area_sy = 32   # ?뺤젙 ?ㅽ봽??
             grid_size = 48.2    # float (?꾩쟻?ㅼ감 諛⑹?)
@@ -1383,17 +1375,12 @@ class AppView:
         self.save_timing_config()
     
     def save_timing_config(self):
-        """Load timing values from config.json."""
+        """Save timing values into config.local.json."""
         try:
             from bis_core import TIMING_CONFIG
-            config_file = os.path.join(os.path.dirname(__file__), "config.json")
-            with open(config_file, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            config["timing"] = TIMING_CONFIG
-            with open(config_file, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=4, ensure_ascii=False)
+            save_local_config({"timing": TIMING_CONFIG})
         except Exception as e:
-            print(f"[Config] TIMING_CONFIG ????ㅽ뙣: {e}")
+            print(f"[Config] TIMING_CONFIG save failed: {e}")
 
     def update_calibration_preview(self):
         print("[DEBUG] 罹섎━釉뚮젅?댁뀡 ?꾨━酉??낅뜲?댄듃 ?쒖옉")
@@ -1994,33 +1981,27 @@ class AppView:
         self.grid_sx_lbl.configure(text=str(sx))
         self.grid_sy_lbl.configure(text=str(sy))
         self.grid_size_lbl.configure(text=f"{gs:.1f}")
-        # config.json 利됱떆 ???
+        # config.local.json 利됱떆 ???
         self._save_grid_tune()
 
     def _save_grid_tune(self):
-        """Save grid tuning values into config.json."""
+        """Save grid tuning values into config.local.json."""
         try:
             sx = int(self.grid_sx_var.get())
             sy = int(self.grid_sy_var.get())
             gs = round(float(self.grid_size_var.get()), 1)
-            config_file = os.path.join(SCRIPT_DIR, "config.json")
-            conf = {}
-            if os.path.exists(config_file):
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    conf = json.load(f)
+            conf = load_local_config()
             if "play_area" not in conf:
                 conf["play_area"] = {}
             conf["play_area"]["sx"] = sx
             conf["play_area"]["sy"] = sy
             conf["play_area"]["grid_size"] = gs
-            with open(config_file, 'w', encoding='utf-8') as f:
-                json.dump(conf, f, indent=4, ensure_ascii=False)
-            # GridIndicator?먮룄 利됱떆 諛섏쁺
+            save_local_config(conf)
             if hasattr(self, 'grid_indicator') and self.grid_indicator:
                 self.grid_indicator.grid_size = gs
                 self.show_toast("Grid tuning updated")
         except Exception as e:
-            print(f"[GridTune] ????ㅽ뙣: {e}")
+            print(f"[GridTune] save failed: {e}")
 
     # ?? ?붿씠?몃━?ㅽ듃 愿由??ы띁 ??????????????????????????????
     def _wl_refresh_listbox(self):
@@ -2596,7 +2577,7 @@ class AppView:
 
             # ?? ?뺤젙 ?ㅽ봽?? sx=276, sy=32 / 寃⑹옄 ?ш린 48.2 ??
             # 怨듭떇: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
-            config_file = os.path.join(SCRIPT_DIR, "config.json")
+            config_file = os.path.join(SCRIPT_DIR, "config.local.json")
             play_area_sx = 276  # ?뺤젙 ?ㅽ봽??
             play_area_sy = 32   # ?뺤젙 ?ㅽ봽??
             grid_size = 48.2    # float (?꾩쟻?ㅼ감 諛⑹?)
@@ -2725,24 +2706,17 @@ class AppView:
             pass
 
     def save_triggers(self):
-        config_file = os.path.join(SCRIPT_DIR, "config.json")
-        if os.path.exists(config_file):
-            with open(config_file, 'r', encoding='utf-8') as f:
-                conf = json.load(f)
-        else:
-            conf = {}
-        
+        conf = load_local_config()
         conf["recovery_hp_spell"] = self.cb_hp_trig.get()
         conf["recovery_mp_spell"] = self.cb_mp_trig.get()
         conf["recovery_debuff_spell"] = self.cb_debuff_trig.get()
         conf["auto_debuff_enabled"] = self.state.auto_debuff_enabled
-        
+
         self.state.recovery_hp_spell = self.cb_hp_trig.get()
         self.state.recovery_mp_spell = self.cb_mp_trig.get()
         self.state.recovery_debuff_spell = self.cb_debuff_trig.get()
-        
-        with open(config_file, 'w', encoding='utf-8') as f:
-            json.dump(conf, f, indent=4)
+
+        save_local_config(conf)
         self.show_toast("Spell settings saved")
 
     def get_dynamic_font_size(self, text, max_width=34):
@@ -3025,26 +2999,18 @@ class AppView:
         self.lbl_grid_offset.configure(text=f"OFFSET: ({self.grid_indicator.offset_x}, {self.grid_indicator.offset_y})")
         self.grid_indicator.update_position()
         
-        # ?ㅽ봽?뗭쓣 config.json?????
+        # ?ㅽ봽?뗭쓣 config.local.json?????
         self.save_grid_offset()
     
     def save_grid_offset(self):
-        """Save the grid indicator offset into config.json."""
+        """Save the grid indicator offset into config.local.json."""
         if not hasattr(self, "grid_indicator"):
             return
-        config_file = os.path.join(SCRIPT_DIR, "config.json")
         try:
-            if os.path.exists(config_file):
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    conf = json.load(f)
-            else:
-                conf = {}
-            
+            conf = load_local_config()
             conf["grid_offset_x"] = self.grid_indicator.offset_x
             conf["grid_offset_y"] = self.grid_indicator.offset_y
-            
-            with open(config_file, 'w', encoding='utf-8') as f:
-                json.dump(conf, f, indent=4)
+            save_local_config(conf)
         except Exception:
             pass
 
@@ -4003,12 +3969,12 @@ def main(
     preset_network_role: Optional[str] = None,
     preset_auto_hunt: Optional[bool] = None,
 ):
-    # 0. Validate config.json first.
-    print("[Config] Validating config.json...")
-    config_file = os.path.join(os.path.dirname(__file__), "config.json")
+    # 0. Validate config.local.json first.
+    print("[Config] Validating config.local.json...")
+    config_file = LOCAL_CONFIG_FILE
     
     if not os.path.exists(config_file):
-        messagebox.showerror("Error", f"config.json not found:\n{config_file}")
+        messagebox.showerror("Error", f"config.local.json not found:\n{config_file}")
         return
     
     try:
@@ -4025,7 +3991,7 @@ def main(
         if sx == 0 or sy == 0 or dx == 0 or dy == 0:
             messagebox.showerror(
                 "Error",
-                f"config.json play_area coordinates are invalid.\n"
+                f"config.local.json play_area coordinates are invalid.\n"
                 f"sx: {sx}, sy: {sy}, dx: {dx}, dy: {dy}\n"
                 f"All coordinates must be non-zero."
             )
@@ -4034,7 +4000,7 @@ def main(
         if sx >= dx or sy >= dy:
             messagebox.showerror(
                 "Error",
-                f"config.json play_area coordinates are inverted.\n"
+                f"config.local.json play_area coordinates are inverted.\n"
                 f"sx({sx}) >= dx({dx}) or sy({sy}) >= dy({dy})\n"
                 f"The start coordinate must be smaller than the end coordinate."
             )
@@ -4043,7 +4009,7 @@ def main(
         print(f"[Config] play_area validated: ({sx}, {sy}) -> ({dx}, {dy})")
         
     except Exception as e:
-        messagebox.showerror("Error", f"Failed to load config.json:\n{e}")
+        messagebox.showerror("Error", f"Failed to load config.local.json:\n{e}")
         return
     
     # 1. Environment safety check (anti-cheat bypass remains disabled)
@@ -4082,6 +4048,9 @@ def main(
     state = GameState()
     if preset_role:
         state.role = preset_role
+        state._load_runtime_settings(preset_role)
+    else:
+        state._load_runtime_settings()
     if preset_network_role is None:
         preset_network_role = preset_role
     if preset_auto_hunt is not None:
@@ -4099,8 +4068,8 @@ def main(
     atexit.register(_cleanup_hardware_on_exit)
     
     # 媛??뚯빱 ?ㅻ젅??珥덇린??(bootstrap.py 湲곕뒫 ?듯빀)
-    config_file = os.path.join(SCRIPT_DIR, "config.json")
-    network_cfg = load_network_config()
+    config_file = os.path.join(SCRIPT_DIR, "config.local.json")
+    network_cfg = load_network_config(preset_network_role or preset_role)
     if preset_network_role:
         network_cfg["role"] = preset_network_role
     state.network_role = network_cfg.get("role", state.network_role)

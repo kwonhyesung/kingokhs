@@ -72,7 +72,7 @@ def match_bitmap(screen_bin, template_bin):
     return results
 
 def run_test():
-    with open("config.json", "r", encoding="utf-8") as f:
+    with open("config.local.json", "r", encoding="utf-8") as f:
         config = json.load(f)
         
     cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)

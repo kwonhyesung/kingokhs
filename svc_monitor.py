@@ -630,7 +630,7 @@ class PatternMatcher:
                                     import json
                                     import os
                                     SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                                    config_file = os.path.join(SCRIPT_DIR, "config.json")
+                                    config_file = os.path.join(SCRIPT_DIR, "config.local.json")
                                     pa_sx, pa_sy = 276, 32
                                     grid_size = 48.2  # float (누적오차 방지)
                                     if os.path.exists(config_file):
@@ -2270,7 +2270,7 @@ class SentinelThread(threading.Thread):
                 # config.json에서 grid_size 읽어오기
                 try:
                     import json as _cfg_json
-                    _cfg_file = os.path.join(os.path.dirname(self.config_file), "config.json")
+                    _cfg_file = os.path.join(os.path.dirname(self.config_file), "config.local.json")
                     with open(_cfg_file, 'r', encoding='utf-8') as _cfg_f:
                         grid_pixel_size = float(_cfg_json.load(_cfg_f).get("play_area", {}).get("grid_size", 48.2))
                 except Exception:
@@ -2817,7 +2817,7 @@ class MonitorSvc(threading.Thread):
         import json
         import os
         SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_file = os.path.join(SCRIPT_DIR, "config.json")
+        config_file = os.path.join(SCRIPT_DIR, "config.local.json")
         # 확정 오프셋 기본값: sx=272, sy=28
         pa_sx, pa_sy = 272, 28
         grid_size = 48
@@ -2944,7 +2944,7 @@ class MonitorSvc(threading.Thread):
                 
                 # ── 확정 오프셋: sx=276, sy=32 / 고정 48.2 ──
                 # GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
-                config_file_grid = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+                config_file_grid = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.local.json")
                 grid_start_x = 276  # 확정 오프셋
                 grid_start_y = 32   # 확정 오프셋
                 tile_size = 48.2    # float (누적오차 방지)
@@ -3124,7 +3124,7 @@ class MonitorSvc(threading.Thread):
                     grid_sz = float(map_data.get("grid_size", 48.2))
                     try:
                         import json as _jg
-                        _cf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+                        _cf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.local.json")
                         if os.path.exists(_cf):
                             with open(_cf, 'r', encoding='utf-8') as _fg:
                                 grid_sz = float(_jg.load(_fg).get("play_area", {}).get("grid_size", 48.2))
@@ -3361,7 +3361,7 @@ class MonitorSvc(threading.Thread):
         try:
             import json, os
             SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            config_file = os.path.join(SCRIPT_DIR, "config.json")
+            config_file = os.path.join(SCRIPT_DIR, "config.local.json")
             if os.path.exists(config_file):
                 with open(config_file, 'r', encoding='utf-8') as f:
                     conf = json.load(f)

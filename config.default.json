@@ -1,0 +1,62 @@
+{
+    "timing": {
+        "key_down_hold": 0.035,
+        "key_gap": 0.05,
+        "tab_wait": 0.04,
+        "up_wait": 0.04,
+        "enter_wait": 0.035,
+        "spell_cast_gap": 0.03,
+        "spell_confirm": 0.2,
+        "ocr_wait": 0.1,
+        "ocr_fast": 0.05,
+        "heal_gap": 0.035,
+        "mp_recover_wait": 0.1,
+        "mp_recover_interval": 2.0,
+        "bomu_spell_gap": 0.2,
+        "bomu_interval": 185.0,
+        "debuff_key_wait": 0.035,
+        "debuff_up_wait": 0.1,
+        "debuff_ocr_wait": 0.15,
+        "move_hold": 0.15,
+        "nav_loop": 0.01,
+        "idle_sleep": 0.1,
+        "stuck_time": 2.0,
+        "stuck_back_hold": 0.1,
+        "stuck_side_hold": 0.1,
+        "combat_timeout": 12.0,
+        "action_loop": 0.04,
+        "esc_gap": 0.035,
+        "entry_hold": 1.0,
+        "exit_hold": 1.0
+    },
+    "combat": {
+        "danger_hp": 10000,
+        "priest_engage_range": 2,
+        "good_hp": 0,
+        "good_mp": 0
+    },
+    "priest_test": {
+        "attack_key": "0",
+        "attack_interval_min": 0.8,
+        "attack_interval_max": 1.1
+    },
+    "network": {
+        "role": "도사",
+        "server_ip": "192.168.137.1",
+        "bind_host": "0.0.0.0",
+        "telemetry_port": 5555,
+        "local_port": 5556
+    },
+    "ocr_thresholds": {
+        "0": 0.35,
+        "1": 0.35,
+        "2": 0.35,
+        "3": 0.35,
+        "4": 0.35,
+        "5": 0.35,
+        "6": 0.35,
+        "7": 0.35,
+        "8": 0.35,
+        "9": 0.35
+    }
+}

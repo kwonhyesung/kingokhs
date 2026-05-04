@@ -1,0 +1,13 @@
+{
+    "network": {
+        "role": "격수"
+    },
+    "combat": {
+        "good_hp": 60000,
+        "good_mp": 30000,
+        "priest_engage_range": 2
+    },
+    "priest_test": {
+        "attack_key": "0"
+    }
+}

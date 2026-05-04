@@ -36,7 +36,7 @@ except Exception as e:
 # ③ 경로 및 설정 상수
 # ============================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.local.json")
 MAPS_FILE = os.path.join(SCRIPT_DIR, "maps.json")
 WAYPOINTS_FILE = os.path.join(SCRIPT_DIR, "waypoints.json")
 SPELL_DB_FILE = os.path.join(SCRIPT_DIR, "spells.json")
@@ -2178,7 +2178,7 @@ def main():
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     state = GameState()
     
-    config_file = os.path.join(SCRIPT_DIR, "config.json")
+    config_file = os.path.join(SCRIPT_DIR, "config.local.json")
     maps_file = os.path.join(SCRIPT_DIR, "maps.json")
     
     reader_thread = MonitorSvc(state, config_file, maps_file)

@@ -22,7 +22,7 @@ class OCRTesterApp:
         
         # 상태 및 엔진 초기화
         self.state = GameState()
-        self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.local.json")
         self.tmpl_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temple")
         self.matcher = PatternMatcher(self.tmpl_root, self.state)
         

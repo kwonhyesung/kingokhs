@@ -20,8 +20,8 @@ scratch/
 
 # Local UI state
 gui_state.json
+config.local.json
 
 # Secrets (do not commit)
 token.json
 credentials.json
-

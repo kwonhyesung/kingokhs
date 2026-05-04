@@ -378,7 +378,7 @@ class GameState:
     def _load_thresholds(self):
         """config.json에서 숫자별 OCR 임계값을 로드"""
         try:
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.local.json")
             if os.path.exists(config_path):
                 with open(config_path, "r", encoding="utf-8") as f:
                     conf = json.load(f)

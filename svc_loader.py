@@ -16,7 +16,7 @@ import win32gui
 import mss
 
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.local.json")
 OUT_DIR     = os.path.join(SCRIPT_DIR, "templates", "default")
 
 def find_game_window(substring):
