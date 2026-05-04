@@ -6,6 +6,7 @@ import os
 import json
 import csv
 import queue
+import re
 
 VERBOSE_STATE_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
 VERBOSE_HW_LOGS = os.environ.get("SVC_HW_LOGS", "0") == "1"
@@ -38,6 +39,7 @@ DEFAULT_TIMING_CONFIG: dict = {
     "ocr_fast"       : 0.050,
     "heal_gap"       : 0.035,    # 35ms
     "mp_recover_wait": 0.100,
+    "mp_recover_interval": 2.0,  # mp_trig active -> press once every 2 seconds
     "bomu_spell_gap" : 0.200,
     "bomu_interval"  : 185.0,
     "debuff_key_wait": 0.035,    # 35ms
@@ -58,6 +60,20 @@ DEFAULT_TIMING_CONFIG: dict = {
 
 TIMING_CONFIG: dict = DEFAULT_TIMING_CONFIG.copy()
 
+GAME_HOTKEY_ALIAS: dict[str, str] = {
+    "1": "a",
+    "2": "b",
+    "3": "c",
+    "4": "d",
+    "5": "e",
+    "6": "f",
+    "7": "g",
+    "8": "h",
+    "9": "i",
+    "0": "j",
+}
+GAME_HOTKEY_DISPLAY_ALIAS: dict[str, str] = {v: k for k, v in GAME_HOTKEY_ALIAS.items()}
+
 def load_timing_config():
     """config.json에서 TIMING_CONFIG 로드"""
     global TIMING_CONFIG
@@ -75,6 +91,22 @@ def load_timing_config():
 
 # 초기 로드
 load_timing_config()
+
+
+def normalize_game_hotkey(key: str | None) -> str:
+    """게임 내부 단축키 체계 기준으로 숫자 별칭을 a~j로 정규화한다."""
+    normalized = str(key or "").strip()
+    if not normalized:
+        return ""
+    return GAME_HOTKEY_ALIAS.get(normalized, normalized)
+
+
+def display_game_hotkey(key: str | None) -> str:
+    """내부 a~j 키를 게임 표기 1~0으로 되돌린다."""
+    normalized = str(key or "").strip()
+    if not normalized:
+        return ""
+    return GAME_HOTKEY_DISPLAY_ALIAS.get(normalized, normalized)
 
 def humanized_sleep(base_time: float, variance: float = 0.15) -> None:
     sigma  = base_time * variance * 0.5
@@ -149,6 +181,26 @@ def find_game_window(substring: str) -> Optional[int]:
         pass
     return found_hwnd
 
+
+def split_map_name_floor(map_text: str) -> tuple[str, str]:
+    """
+    Map OCR 결과를 (map_name, floor)로 분리한다.
+    - "흉가 입구" -> ("흉가 입구", "")
+    - "흉가01" -> ("흉가", "01")
+    - "흉가 1층" -> ("흉가", "1")
+    """
+    text = str(map_text or "").strip()
+    if not text:
+        return "", ""
+
+    match = re.match(r"^(.*?)(\d+)\s*층?$", text)
+    if match:
+        name = match.group(1).strip()
+        floor = match.group(2).strip()
+        return name or text, floor
+
+    return text, ""
+
 # ============================================================
 # ③ GameState -> SysEnv (환경 정보 은닉)
 # ============================================================
@@ -175,6 +227,8 @@ class GameState:
     money: int = 0
     x: int = 0
     y: int = 0
+    good_hp: int = 0
+    good_mp: int = 0
     # OCR 원문(또는 누락 포함) 문자열. x/y는 4자리 고정, 누락은 'x'로 채움.
     hp_str: str = ""
     mp_str: str = ""
@@ -182,6 +236,32 @@ class GameState:
     money_str: str = ""
     x_str: str = ""
     y_str: str = ""
+    map_name: str = ""
+    map_floor: str = ""
+    current_floor: str = ""
+    red_tab_enabled: bool = False
+    target_info_text: str = ""
+    user_info_text: str = ""
+    target_kind: str = "UNKNOWN"
+    user_kind: str = "UNKNOWN"
+    heal_request: bool = False
+    mp_request: bool = False
+    debuff_request: bool = False
+    follow_anchor_offset: Tuple[int, int] = (0, 0)
+    safe_spot: Optional[Tuple[int, int]] = None
+    battle_spot: Optional[Tuple[int, int]] = None
+    network_role: str = "도사"
+    network_server_ip: str = "192.168.137.1"
+    network_bind_host: str = "0.0.0.0"
+    network_telemetry_port: int = 5555
+    network_local_port: int = 5556
+    network_sequence: int = 0
+    remote_sequences: Dict[str, int] = field(default_factory=dict)
+    last_network_rx_ts: float = 0.0
+    last_network_rx_sender: str = ""
+    last_network_rx_role: str = ""
+    last_network_rx_kind: str = ""
+    last_network_rx_seq: int = 0
     
     # 타겟 관리
     target_locked: bool = False
@@ -218,9 +298,9 @@ class GameState:
     win_y: Optional[int] = None
     
     # 네비게이션 설정
-    nav_follow_enabled: bool = True
-    nav_route_enabled: bool = True
-    nav_avoid_enabled: bool = True
+    nav_follow_enabled: bool = False
+    nav_route_enabled: bool = False
+    nav_avoid_enabled: bool = False
     reverse_mode: bool = False
     waypoints_db: Dict[str, Any] = field(default_factory=dict)
     current_map: str = "기본맵"
@@ -247,10 +327,21 @@ class GameState:
     
     # 역할 관리
     role: str = "기본"
+    priest_engage_range: int = 2
+    priest_test_attack_key: str = "0"
+    priest_test_attack_min_interval: float = 0.8
+    priest_test_attack_max_interval: float = 1.1
+    priest_test_active: bool = False
+    service_active: bool = False
+    automation_paused: bool = False
+    control_mode: str = "NONE"
+    f1_route_active: bool = False
     
     # 네트워크 관리
     is_connected: bool = False
     other_pc_data: Dict[str, Any] = field(default_factory=dict)
+    network_peer_name: str = field(default_factory=lambda: os.environ.get("COMPUTERNAME", "LOCAL"))
+    network_outbox: 'queue.Queue' = field(default_factory=lambda: queue.Queue(maxsize=256), init=False, repr=False)
     
     # 공유 메모리 (성능 최적화)
     shared_frame: Optional[np.ndarray] = None
@@ -294,6 +385,7 @@ class GameState:
     def __post_init__(self):
         """초기화 후 추가 설정"""
         self._load_thresholds()
+        self._load_runtime_settings()
     
     def _load_thresholds(self):
         """OCR 임계값 로드"""
@@ -308,6 +400,44 @@ class GameState:
                         for k, v in saved.items():
                             if k in self.ocr_thresholds:
                                 self.ocr_thresholds[k] = float(v)
+        except Exception:
+            pass
+
+    def _load_runtime_settings(self):
+        """config.json에서 전투/테스트 관련 런타임 설정 로드"""
+        try:
+            config_file = os.path.join(os.path.dirname(__file__), "config.json")
+            if not os.path.exists(config_file):
+                return
+            with open(config_file, "r", encoding="utf-8") as f:
+                conf = json.load(f)
+
+            combat = conf.get("combat", {})
+            if isinstance(combat, dict):
+                engage_range = combat.get("priest_engage_range", self.priest_engage_range)
+                self.priest_engage_range = max(0, int(engage_range))
+                self.good_hp = max(0, int(combat.get("good_hp", self.good_hp) or 0))
+                self.good_mp = max(0, int(combat.get("good_mp", self.good_mp) or 0))
+
+            priest_test = conf.get("priest_test", {})
+            if isinstance(priest_test, dict):
+                attack_key = str(priest_test.get("attack_key", self.priest_test_attack_key) or "0").strip() or "0"
+                self.priest_test_attack_key = attack_key
+
+                attack_min = float(priest_test.get("attack_interval_min", self.priest_test_attack_min_interval))
+                attack_max = float(priest_test.get("attack_interval_max", self.priest_test_attack_max_interval))
+                if attack_max < attack_min:
+                    attack_min, attack_max = attack_max, attack_min
+                self.priest_test_attack_min_interval = max(0.05, attack_min)
+                self.priest_test_attack_max_interval = max(self.priest_test_attack_min_interval, attack_max)
+
+            network = conf.get("network", {})
+            if isinstance(network, dict):
+                self.network_role = str(network.get("role", self.network_role) or self.network_role)
+                self.network_server_ip = str(network.get("server_ip", self.network_server_ip) or self.network_server_ip)
+                self.network_bind_host = str(network.get("bind_host", self.network_bind_host) or self.network_bind_host)
+                self.network_telemetry_port = int(network.get("telemetry_port", self.network_telemetry_port) or self.network_telemetry_port)
+                self.network_local_port = int(network.get("local_port", self.network_local_port) or self.network_local_port)
         except Exception:
             pass
     
@@ -365,19 +495,196 @@ class GameState:
                 if hasattr(self, k):
                     setattr(self, k, v)
 
+
+    def _refresh_support_request_flags_unlocked(self) -> tuple[bool, bool]:
+        # Refresh local support-request flags from current hp/mp state.
+        self.heal_request = bool(self.good_hp > 0 and self.hp > 0 and self.hp <= self.good_hp)
+        self.mp_request = bool(self.good_mp > 0 and self.mp > 0 and self.mp <= self.good_mp)
+        return self.heal_request, self.mp_request
+
     def get_all(self) -> dict:
         with self._lock:
+            self._refresh_support_request_flags_unlocked()
             return {
                 "hp": self.hp, "mp": self.mp,
                 "exp": self.exp, "money": self.money,
                 "x": self.x, "y": self.y,
+                "good_hp": self.good_hp, "good_mp": self.good_mp,
                 "hp_str": self.hp_str, "mp_str": self.mp_str,
                 "exp_str": self.exp_str, "money_str": self.money_str,
                 "x_str": self.x_str, "y_str": self.y_str,
+                "map_name": self.map_name,
+                "map_floor": self.map_floor,
+                "current_map": self.current_map,
+                "current_floor": self.current_floor,
+                "red_tab_enabled": self.red_tab_enabled,
+                "target_info_text": self.target_info_text,
+                "user_info_text": self.user_info_text,
+                "target_kind": self.target_kind,
+                "user_kind": self.user_kind,
+                "heal_request": self.heal_request,
+                "mp_request": self.mp_request,
+                "debuff_request": self.debuff_request,
+                "follow_anchor_offset": self.follow_anchor_offset,
+                "safe_spot": self.safe_spot,
+                "battle_spot": self.battle_spot,
+                "network_role": self.network_role,
                 "target_locked": self.target_locked,
                 "last_move_dir": self.last_move_dir,
-                "nav_follow_enabled": self.nav_follow_enabled
+                "nav_follow_enabled": self.nav_follow_enabled,
+                "nav_route_enabled": self.nav_route_enabled,
+                "nav_avoid_enabled": self.nav_avoid_enabled,
+                "service_active": self.service_active,
+                "automation_paused": self.automation_paused,
+                "control_mode": self.control_mode,
             }
+
+    def build_share_payload(self) -> dict:
+        """
+        UDP 상태 스냅샷.
+        local telemetry를 보내되, 서버 hub가 peer 상태를 함께 묶어 재전송할 수 있게 구성한다.
+        """
+        with self._lock:
+            self._refresh_support_request_flags_unlocked()
+            self.network_sequence += 1
+            status = {
+                "hp": self.hp,
+                "mp": self.mp,
+                "exp": self.exp,
+                "x": self.x,
+                "y": self.y,
+                "good_hp": self.good_hp,
+                "good_mp": self.good_mp,
+                "hp_str": self.hp_str,
+                "mp_str": self.mp_str,
+                "exp_str": self.exp_str,
+                "x_str": self.x_str,
+                "y_str": self.y_str,
+                "map_name": self.map_name,
+                "map_floor": self.map_floor,
+                "current_map": self.current_map,
+                "current_floor": self.current_floor,
+                "red_tab_enabled": self.red_tab_enabled,
+                "target_info_text": self.target_info_text,
+                "user_info_text": self.user_info_text,
+                "target_kind": self.target_kind,
+                "user_kind": self.user_kind,
+                "heal_request": self.heal_request,
+                "mp_request": self.mp_request,
+                "debuff_request": self.debuff_request,
+                "follow_anchor_offset": self.follow_anchor_offset,
+                "safe_spot": self.safe_spot,
+                "battle_spot": self.battle_spot,
+                "network_role": self.network_role,
+                # Existing follow logic still needs these fields.
+                "last_move_dir": self.last_move_dir,
+                "nav_follow_enabled": self.nav_follow_enabled,
+                "nav_route_enabled": self.nav_route_enabled,
+                "nav_avoid_enabled": self.nav_avoid_enabled,
+                "service_active": self.service_active,
+                "automation_paused": self.automation_paused,
+                "control_mode": self.control_mode,
+                "target_locked": self.target_locked,
+            }
+            return {
+                "schema": "bis-state-v2",
+                "sender": self.network_peer_name,
+                "seq": self.network_sequence,
+                "sent_at": time.time(),
+                "status": status,
+                "peers": {
+                    name: dict(data)
+                    for name, data in self.other_pc_data.items()
+                    if isinstance(data, dict)
+                },
+            }
+
+    def apply_remote_payload(self, payload: dict) -> tuple[str, dict]:
+        """
+        UDP payload를 정규화해서 저장한다.
+        """
+        sender = "LAPTOP"
+        snapshot: dict = {}
+
+        if isinstance(payload, dict) and isinstance(payload.get("status"), dict):
+            sender = str(payload.get("sender") or sender)
+            snapshot = dict(payload.get("status") or {})
+            snapshot["_sent_at"] = payload.get("sent_at")
+            snapshot["_schema"] = payload.get("schema", "bis-state-v2")
+            snapshot["_seq"] = payload.get("seq", 0)
+            snapshot["_sender"] = sender
+            peers = payload.get("peers")
+            if isinstance(peers, dict):
+                for peer_name, peer_data in peers.items():
+                    if isinstance(peer_data, dict):
+                        self.update_other(str(peer_name), dict(peer_data))
+        elif isinstance(payload, dict):
+            snapshot = dict(payload)
+
+        seq = int(snapshot.get("_seq", payload.get("seq", 0) if isinstance(payload, dict) else 0) or 0)
+        snapshot["_received_at"] = time.time()
+        self.last_network_rx_ts = float(snapshot["_received_at"] or 0.0)
+        self.last_network_rx_sender = sender
+        self.last_network_rx_role = str(snapshot.get("role") or snapshot.get("network_role") or "")
+        self.last_network_rx_kind = str(payload.get("kind", "") if isinstance(payload, dict) else "")
+        self.last_network_rx_seq = seq
+        if seq:
+            last_seq = int(self.remote_sequences.get(sender, 0) or 0)
+            if seq <= last_seq:
+                return sender, snapshot
+            self.remote_sequences[sender] = seq
+        self.update_other(sender, snapshot)
+        return sender, snapshot
+
+    def get_remote_data(self, preferred_name: str = "LAPTOP") -> Optional[dict]:
+        """원격 상태 조회. preferred가 없으면 첫 peer를 반환한다."""
+        with self._lock:
+            if preferred_name and preferred_name in self.other_pc_data:
+                return dict(self.other_pc_data[preferred_name])
+            for _name, data in self.other_pc_data.items():
+                return dict(data)
+        return None
+
+    def get_remote_data_by_role(self, role: str) -> Optional[dict]:
+        with self._lock:
+            for _name, data in self.other_pc_data.items():
+                if not isinstance(data, dict):
+                    continue
+                remote_role = str(data.get("role") or data.get("network_role") or "").strip()
+                if remote_role == role:
+                    return dict(data)
+        return self.get_remote_data()
+
+    def queue_network_event(self, event_type: str, payload: Optional[dict] = None, repeat: int = 1) -> bool:
+        """UDP ??? ?? ???? ???."""
+        event = {
+            "event_type": str(event_type or "").strip(),
+            "payload": dict(payload or {}),
+            "repeat": max(1, int(repeat or 1)),
+            "queued_at": time.time(),
+        }
+        try:
+            self.network_outbox.put_nowait(event)
+            return True
+        except queue.Full:
+            return False
+
+    def stop_all_inputs(self, repeat: int = 2, delay: float = 0.05, disconnect: bool = False):
+        """Best-effort hardware cleanup for GUI close / panic / pause transitions."""
+        tries = max(1, int(repeat or 1))
+        pause = max(0.0, float(delay or 0.0))
+        for idx in range(tries):
+            try:
+                self.panic_release()
+            except Exception:
+                pass
+            if idx + 1 < tries and pause:
+                time.sleep(pause)
+        if disconnect:
+            try:
+                self.disconnect()
+            except Exception:
+                pass
 
     def set_game_scale(self, scale: float):
         """게임 창 배율 설정 (1.0 또는 2.0)"""
@@ -524,6 +831,12 @@ class BisHardware:
         humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
         self.send(f"U:{key}")
 
+    def force_press(self, key: str, variance: float = 0.15):
+        """포커스 체크 없이 1회 키 입력. 이동 중 테스트 마법처럼 강제 전송이 필요할 때 사용."""
+        # 단발 입력은 아두이노의 K,<key> 경로가 가장 안정적이다.
+        # D/U 분리보다 전송 횟수가 적고, 키업 타이밍이 짧아지는 문제를 피한다.
+        self.send_force(f"K,{key}")
+
     def press_with_gap(self, key: str, variance: float = 0.15):
         self.humanized_press(key, variance)
         # HumanBehaviorSimulator로 타이핑 동작 간 휴식 시간 시뮬레이션
@@ -549,7 +862,8 @@ class BisHardware:
             self.send(f"U:{k}")
         self.send("U:all")
 
-    def hold_move(self, direction: str, hold_key: str = "move_hold", variance: float = 0.15):
+    def hold_move(self, direction: str, hold_key: str = "move_hold",
+                  variance: float = 0.15, duration: float = None):
         # HumanBehaviorSimulator로 이동 동작 간 휴식 시간 시뮬레이션
         pause = HumanBehaviorSimulator.simulate_pause('move')
         time.sleep(pause)
@@ -557,7 +871,10 @@ class BisHardware:
         _hw_log(f"[Move] 방향키: {direction}")
         try:
             self.send_force(f"D:{direction}")
-            humanized_sleep(TIMING_CONFIG[hold_key], variance)
+            if duration is not None:
+                humanized_sleep(float(duration), variance)
+            else:
+                humanized_sleep(TIMING_CONFIG[hold_key], variance)
         finally:
             self.send_force(f"U:{direction}")
 

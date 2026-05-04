@@ -5,6 +5,8 @@ import random
 import os
 import json
 import csv
+import re
+import queue
 
 VERBOSE_STATE_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
 
@@ -121,6 +123,18 @@ def find_game_window(substring: str) -> Optional[int]:
         pass
     return found_hwnd
 
+
+def split_map_name_floor(map_text: str) -> tuple[str, str]:
+    text = str(map_text or "").strip()
+    if not text:
+        return "", ""
+    match = re.match(r"^(.*?)(\d+)\s*층?$", text)
+    if match:
+        name = match.group(1).strip()
+        floor = match.group(2).strip()
+        return name or text, floor
+    return text, ""
+
 # ============================================================
 # ③ GameState -> SysEnv (환경 정보 은닉)
 # ============================================================
@@ -137,6 +151,8 @@ class GameState:
         self.money   = 0
         self.x       = 0
         self.y       = 0
+        self.good_hp = 0
+        self.good_mp = 0
         # OCR 원문(또는 누락 포함) 문자열. x/y는 4자리 고정, 누락은 'x'로 채움.
         self.hp_str = ""
         self.mp_str = ""
@@ -144,6 +160,20 @@ class GameState:
         self.money_str = ""
         self.x_str = ""
         self.y_str = ""
+        self.map_name = ""
+        self.map_floor = ""
+        self.current_floor = ""
+        self.red_tab_enabled = False
+        self.target_info_text = ""
+        self.user_info_text = ""
+        self.target_kind = "UNKNOWN"
+        self.user_kind = "UNKNOWN"
+        self.heal_request = False
+        self.mp_request = False
+        self.debuff_request = False
+        self.follow_anchor_offset = (0, 0)
+        self.safe_spot = None
+        self.battle_spot = None
         self.target_locked = False
         self.last_update_time = time.time()
         self.running          = True
@@ -206,6 +236,15 @@ class GameState:
         self.char_grid = (0, 0)
         self.detected_item_grid = None
         self.detected_item_name = ""
+        self.network_role = "도사"
+        self.network_server_ip = "192.168.137.1"
+        self.network_bind_host = "0.0.0.0"
+        self.network_telemetry_port = 5555
+        self.network_local_port = 5556
+        self.network_peer_name = os.environ.get("COMPUTERNAME", "LOCAL")
+        self.network_outbox = queue.Queue(maxsize=256)
+        self.network_sequence = 0
+        self.remote_sequences = {}
         
         # 해상도 관련 속성
         self.game_resolution = (854, 480)  # 기본 해상도
@@ -297,12 +336,30 @@ class GameState:
                 "hp": self.hp, "mp": self.mp,
                 "exp": self.exp, "money": self.money,
                 "x": self.x, "y": self.y,
+                "good_hp": self.good_hp,
+                "good_mp": self.good_mp,
                 "hp_str": getattr(self, "hp_str", ""),
                 "mp_str": getattr(self, "mp_str", ""),
                 "exp_str": getattr(self, "exp_str", ""),
                 "money_str": getattr(self, "money_str", ""),
                 "x_str": getattr(self, "x_str", ""),
                 "y_str": getattr(self, "y_str", ""),
+                "map_name": getattr(self, "map_name", ""),
+                "map_floor": getattr(self, "map_floor", ""),
+                "current_map": getattr(self, "current_map", ""),
+                "current_floor": getattr(self, "current_floor", ""),
+                "red_tab_enabled": getattr(self, "red_tab_enabled", False),
+                "target_info_text": getattr(self, "target_info_text", ""),
+                "user_info_text": getattr(self, "user_info_text", ""),
+                "target_kind": getattr(self, "target_kind", "UNKNOWN"),
+                "user_kind": getattr(self, "user_kind", "UNKNOWN"),
+                "heal_request": getattr(self, "heal_request", False),
+                "mp_request": getattr(self, "mp_request", False),
+                "debuff_request": getattr(self, "debuff_request", False),
+                "follow_anchor_offset": getattr(self, "follow_anchor_offset", (0, 0)),
+                "safe_spot": getattr(self, "safe_spot", None),
+                "battle_spot": getattr(self, "battle_spot", None),
+                "network_role": getattr(self, "network_role", "도사"),
                 "target_locked": self.target_locked,
                 "last_move_dir": self.last_move_dir,
                 "nav_follow_enabled": self.nav_follow_enabled

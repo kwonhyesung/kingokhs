@@ -22,6 +22,7 @@ import threading
 import os
 import json
 import random
+import re
 import cv2
 import numpy as np
 import win32gui
@@ -2420,6 +2421,14 @@ class MonitorSvc(threading.Thread):
         self.last_frame = None
         self.last_frame_time = 0
 
+        # Red-tab tracker state. The selection box is only visible in play_area.
+        self._red_tab_state = False
+        self._red_tab_hit_streak = 0
+        self._red_tab_miss_streak = 0
+        self._red_tab_last_bbox = None
+        self._red_tab_last_candidate = None
+        self._red_tab_last_log_time = 0.0
+
     def _recognize_with_findtext(self, crop):
         """findtext_wrapper의 _template_match_native를 사용하여 숫자 인식"""
         # 모든 숫자 패턴에 대해 검색
@@ -2568,6 +2577,183 @@ class MonitorSvc(threading.Thread):
             _monitor_log(f"[Map] maps.json 로드 ?료 ({len(self.state.maps_db)}??.")
         else:
             _monitor_log("[Warn] maps.json 없음 ??Grid 기능 비활??")
+
+    @staticmethod
+    def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        a2x, a2y = ax + aw, ay + ah
+        b2x, b2y = bx + bw, by + bh
+        ix1 = max(ax, bx)
+        iy1 = max(ay, by)
+        ix2 = min(a2x, b2x)
+        iy2 = min(a2y, b2y)
+        if ix2 <= ix1 or iy2 <= iy1:
+            return 0.0
+        inter = float((ix2 - ix1) * (iy2 - iy1))
+        union = float(max(1, aw * ah + bw * bh - int(inter)))
+        return inter / union
+
+    def _find_red_tab_candidates(
+        self,
+        play_area_rgb: np.ndarray,
+        region: Optional[tuple[int, int, int, int]] = None,
+    ) -> list[dict]:
+        """Return red-tab box candidates within play_area or a clipped sub-region."""
+        if play_area_rgb is None or play_area_rgb.size == 0:
+            return []
+
+        full_h, full_w = play_area_rgb.shape[:2]
+        if region is not None:
+            x1, y1, x2, y2 = region
+            x1 = max(0, min(full_w, int(x1)))
+            y1 = max(0, min(full_h, int(y1)))
+            x2 = max(0, min(full_w, int(x2)))
+            y2 = max(0, min(full_h, int(y2)))
+            if x2 <= x1 or y2 <= y1:
+                return []
+            crop = play_area_rgb[y1:y2, x1:x2]
+        else:
+            x1 = y1 = 0
+            crop = play_area_rgb
+
+        if crop is None or crop.size == 0:
+            return []
+
+        try:
+            hsv = cv2.cvtColor(crop, cv2.COLOR_RGB2HSV)
+        except Exception:
+            return []
+
+        red1 = cv2.inRange(hsv, np.array([0, 70, 70]), np.array([14, 255, 255]))
+        red2 = cv2.inRange(hsv, np.array([166, 70, 70]), np.array([180, 255, 255]))
+        mask = cv2.bitwise_or(red1, red2)
+
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.GaussianBlur(mask, (3, 3), 0)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+        mask = cv2.dilate(mask, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates: list[dict] = []
+        for c in contours:
+            area = float(cv2.contourArea(c))
+            if area < 20.0:
+                continue
+
+            x, y, w, h = cv2.boundingRect(c)
+            if w < 12 or h < 12:
+                continue
+            if w > 420 or h > 420:
+                continue
+
+            aspect = w / float(max(1, h))
+            if aspect < 0.35 or aspect > 3.50:
+                continue
+
+            bbox_area = float(max(1, w * h))
+            roi = mask[y:y + h, x:x + w]
+            red_pixels = float(cv2.countNonZero(roi))
+            if red_pixels < 18.0:
+                continue
+
+            fill_ratio = red_pixels / bbox_area
+            if fill_ratio < 0.008:
+                continue
+
+            perimeter = float(max(1, 2 * (w + h)))
+            edge_density = red_pixels / perimeter
+            rectangularity = min(1.0, area / bbox_area)
+
+            score = (
+                red_pixels * 1.0
+                + edge_density * 14.0
+                + fill_ratio * 120.0
+                + rectangularity * 20.0
+            )
+
+            candidates.append({
+                "x": int(x1 + x),
+                "y": int(y1 + y),
+                "w": int(w),
+                "h": int(h),
+                "cx": int(x1 + x + (w // 2)),
+                "cy": int(y1 + y + (h // 2)),
+                "area": area,
+                "red_pixels": red_pixels,
+                "fill_ratio": fill_ratio,
+                "score": score,
+            })
+
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        return candidates
+
+    def _detect_red_tab(self, play_area_rgb: np.ndarray) -> bool:
+        """Detect the red-tab target box directly from play_area."""
+        if play_area_rgb is None or play_area_rgb.size == 0:
+            return self._red_tab_state
+
+        full_h, full_w = play_area_rgb.shape[:2]
+        search_regions: list[tuple[int, int, int, int]] = []
+
+        if self._red_tab_last_bbox:
+            lx, ly, lw, lh = self._red_tab_last_bbox
+            pad_x = max(40, int(lw * 0.80))
+            pad_y = max(40, int(lh * 0.80))
+            search_regions.append((lx - pad_x, ly - pad_y, lx + lw + pad_x, ly + lh + pad_y))
+
+        search_regions.append((0, 0, full_w, full_h))
+
+        best = None
+        for region in search_regions:
+            candidates = self._find_red_tab_candidates(play_area_rgb, region)
+            if not candidates:
+                continue
+            best = candidates[0]
+            break
+
+        now = time.time()
+        if best:
+            bbox = (best["x"], best["y"], best["w"], best["h"])
+            if self._red_tab_last_bbox:
+                prev = self._red_tab_last_bbox
+                prev_cx = prev[0] + (prev[2] / 2.0)
+                prev_cy = prev[1] + (prev[3] / 2.0)
+                dist = ((best["cx"] - prev_cx) ** 2 + (best["cy"] - prev_cy) ** 2) ** 0.5
+                prev_diag = max(1.0, (prev[2] ** 2 + prev[3] ** 2) ** 0.5)
+                iou = self._bbox_iou(bbox, prev)
+                if dist <= max(28.0, prev_diag * 0.9) or iou >= 0.10:
+                    self._red_tab_hit_streak += 1
+                else:
+                    self._red_tab_hit_streak = 1
+            else:
+                self._red_tab_hit_streak = 1
+
+            self._red_tab_miss_streak = 0
+            self._red_tab_last_bbox = bbox
+            self._red_tab_last_candidate = best
+
+            if self._red_tab_hit_streak >= 2:
+                if not self._red_tab_state and now - self._red_tab_last_log_time >= 0.5:
+                    _monitor_log(
+                        f"[RedTab] ON bbox={bbox} score={best['score']:.1f} "
+                        f"red={best['red_pixels']:.0f}"
+                    )
+                    self._red_tab_last_log_time = now
+                self._red_tab_state = True
+            return self._red_tab_state
+
+        self._red_tab_hit_streak = 0
+        self._red_tab_miss_streak += 1
+        if self._red_tab_miss_streak >= 2:
+            if self._red_tab_state and now - self._red_tab_last_log_time >= 0.5:
+                _monitor_log("[RedTab] OFF")
+                self._red_tab_last_log_time = now
+            self._red_tab_state = False
+            self._red_tab_last_bbox = None
+            self._red_tab_last_candidate = None
+        return self._red_tab_state
 
     def _build_gps_debug_mask(self, play_area_rgb: np.ndarray) -> np.ndarray:
         """my_arrow 탐색 실패 원인 파악용 이진 마스크 생성."""
@@ -2885,10 +3071,40 @@ class MonitorSvc(threading.Thread):
                     continue
                 self.last_hashes[name] = cur_hash
 
-                # [타겟 정보 인식] - 초고속 비트맵 XOR 매칭
+                # [타겟 정보 인식] - 몬스터/유저 판정 + red-tab 색상 감지
                 if name == "target_info":
-                    matched, _ = self.matcher.recognize_entity_bitwise(crop, "monsters")
-                    res_updates["target_name"] = matched
+                    monster_name, monster_score = self.matcher.recognize_entity_bitwise(crop, "monsters")
+                    user_name, user_score = self.matcher.recognize_entity_bitwise(crop, "users")
+
+                    if monster_name:
+                        res_updates["target_kind"] = "MONSTER"
+                        res_updates["target_name"] = monster_name
+                        res_updates["target_info_text"] = monster_name
+                        res_updates["target_score"] = monster_score
+                    elif user_name:
+                        res_updates["target_kind"] = "USER"
+                        res_updates["target_name"] = user_name
+                        res_updates["target_info_text"] = user_name
+                        res_updates["target_score"] = user_score
+                    else:
+                        res_updates["target_kind"] = "UNKNOWN"
+                        res_updates["target_name"] = ""
+                        res_updates["target_info_text"] = ""
+                        res_updates["target_score"] = 0.0
+
+                    res_updates["red_tab_enabled"] = red_tab_enabled
+                    continue
+
+                if name == "user_info":
+                    user_name, user_score = self.matcher.recognize_entity_bitwise(crop, "users")
+                    if user_name:
+                        res_updates["user_name"] = user_name
+                        res_updates["user_info_text"] = user_name
+                        res_updates["user_kind"] = "USER"
+                        res_updates["user_score"] = user_score
+                        res_updates["is_user_detected"] = True
+                    else:
+                        res_updates["is_user_detected"] = False
                     continue
 
                 # ════════════════════════════════════════════════
@@ -2897,6 +3113,8 @@ class MonitorSvc(threading.Thread):
                 if name.lower() == "play_area":
                     # SentinelThread를 위해 원본 크롭 저장
                     self.state.last_play_area_rgb = crop.copy()
+                    red_tab_enabled = self._detect_red_tab(crop)
+                    res_updates["red_tab_enabled"] = red_tab_enabled
                     
                     play_area_overlay = self.state.ocr_preview_img
                     map_data = self.state.maps_db.get(self.state.current_map, {}) or {}
@@ -2998,13 +3216,29 @@ class MonitorSvc(threading.Thread):
                 # ?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═
                 if name == "map_info":
                     matched_map = self.matcher.recognize(crop, "maps")
-                    if matched_map and matched_map != self.state.current_map:
-                        _monitor_log(f"[Map] 맵 변경됨: {matched_map}")
-                        self.state.current_map = matched_map
-                        self.load_maps()  # ????이??로드
-                    elif not matched_map:
-                        # 인식 실패 메시지 3?만 출력
-                        if not hasattr(self, '_map_fail_count'): self._map_fail_count = 0
+                    if matched_map:
+                        map_text = str(matched_map).strip()
+                        match = re.match(r"^(.*?)(\d+)\s*층?$", map_text)
+                        if match:
+                            map_name = match.group(1).strip() or map_text
+                            map_floor = match.group(2).strip()
+                        else:
+                            map_name = map_text
+                            map_floor = ""
+
+                        if map_text != self.state.current_map:
+                            _monitor_log(f"[Map] 맵 변경됨: {map_text}")
+                            self.state.current_map = map_text
+                            self.load_maps()
+
+                        res_updates["current_map"] = map_text
+                        res_updates["map_name"] = map_name
+                        res_updates["map_floor"] = map_floor
+                        res_updates["current_floor"] = map_floor
+                        res_updates["map_info_text"] = map_text
+                    else:
+                        if not hasattr(self, '_map_fail_count'):
+                            self._map_fail_count = 0
                         if self._map_fail_count < 3:
                             _monitor_log("[Warn] 인식 실패, 이전 값 유지")
                             self._map_fail_count += 1

@@ -1,4 +1,4 @@
-"""
+﻿"""
 bis_logic.py  ─  BIS Logic Engine (우선순위 기반 FSM)
 ──────────────────────────────────────────────────────────────
 ▸ 우선순위 체계: Emergency -> Combat -> Moving
@@ -36,6 +36,8 @@ class LogicSvc(threading.Thread):
         # Trigger reaction rate-limit (prevents input spam while keeping fast response).
         self._last_hp_recover_time = 0.0
         self._last_mp_recover_time = 0.0
+        self._last_target_search_time = 0.0
+        self._last_monster_seen_time = 0.0
 
     # ----------------------------------------------------------
     # ── 내부 헬퍼: 힐 시퀀스 ─────────────────────────────────
@@ -84,11 +86,112 @@ class LogicSvc(threading.Thread):
             key = default_key
         return key, skill
 
+    def _get_visible_monsters(self) -> list[dict]:
+        monsters = self.state.entities.get("monsters", [])
+        return monsters if isinstance(monsters, list) else []
+
+    def _get_good_hp_threshold(self) -> int:
+        try:
+            return max(0, int(getattr(self.state, "good_hp", 0) or 0))
+        except Exception:
+            return 0
+
+    def _get_good_mp_threshold(self) -> int:
+        try:
+            return max(0, int(getattr(self.state, "good_mp", 0) or 0))
+        except Exception:
+            return 0
+
+    def _needs_hp_recovery(self) -> bool:
+        current_hp = max(0, int(getattr(self.state, "hp", 0) or 0))
+        good_hp = self._get_good_hp_threshold()
+        if good_hp > 0 and current_hp < good_hp:
+            return True
+        return bool(getattr(self.state, "hp_trig_active", False))
+
+    def _needs_mp_recovery(self) -> bool:
+        current_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
+        good_mp = self._get_good_mp_threshold()
+        if good_mp > 0 and current_mp < good_mp:
+            return True
+        return bool(getattr(self.state, "mp_trig_active", False))
+
+    def _get_support_target_data(self) -> dict | None:
+        """Return the ally snapshot that the dosa should support, if available."""
+        remote = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
+        return remote if isinstance(remote, dict) and remote else None
+
+    def _needs_hp_recovery_for(self, snapshot: dict | None) -> bool:
+        if not snapshot:
+            return self._needs_hp_recovery()
+        if not snapshot.get("heal_request", False):
+            return False
+        if not snapshot.get("red_tab_enabled", False):
+            return False
+        current_hp = max(0, int(snapshot.get("hp", 0) or 0))
+        good_hp = max(0, int(snapshot.get("good_hp", self._get_good_hp_threshold()) or 0))
+        if good_hp > 0 and current_hp <= good_hp:
+            return True
+        return current_hp <= 10000
+
+    def _needs_mp_recovery_for(self, snapshot: dict | None) -> bool:
+        if not snapshot:
+            return self._needs_mp_recovery()
+        if not snapshot.get("mp_request", False):
+            return False
+        if not snapshot.get("red_tab_enabled", False):
+            return False
+        current_mp = max(0, int(snapshot.get("mp", 0) or 0))
+        good_mp = max(0, int(snapshot.get("good_mp", self._get_good_mp_threshold()) or 0))
+        if good_mp > 0 and current_mp <= good_mp:
+            return True
+        return current_mp <= 10000
+
+    def _clear_target_state(self, reset_combat_timer: bool = True):
+        self.state.target_locked = False
+        self.state.target_name = ""
+        if reset_combat_timer:
+            self.state.combat_start_time = 0.0
+
+    def _set_combat_busy(self, active: bool):
+        self.state.is_combat_busy = bool(active)
+        if not active and not self.state.target_locked:
+            self.state.combat_start_time = 0.0
+
+    def _should_handle_combat(self) -> bool:
+        """
+        이동과 전투를 분리하기 위한 전투 진입 판정.
+        - 화면에 몬스터가 있으면 전투 우선
+        - target_locked는 OCR 응답 대기 시간까지만 유지
+        - 아무 몬스터도 없고 타겟도 없으면 즉시 이동으로 복귀
+        """
+        monsters = self._get_visible_monsters()
+        now = time.time()
+        if monsters:
+            self._last_monster_seen_time = now
+
+        if self.state.target_locked:
+            acquire_grace = max(0.30, float(TIMING_CONFIG.get("ocr_wait", 0.10)) * 3.0)
+            if self.state.target_name:
+                return True
+            if monsters and (now - self._last_target_search_time) <= max(acquire_grace, 0.50):
+                return True
+            if (now - self._last_target_search_time) <= acquire_grace:
+                return True
+            self._clear_target_state()
+            return False
+
+        if self.state.role == "술사":
+            _me_grid, close_infos, _dense_count = self._get_priest_engage_metrics()
+            return bool(close_infos)
+
+        return bool(monsters)
+
     def _recover_hp(self):
-        if not getattr(self.state, "hp_trig_active", False):
+        if not self._needs_hp_recovery():
             return
 
-        # hp_trig: 검정색 감지 시 즉시 회복 (esc -> key -> home -> enter)
+        # HP 임계값 또는 검정 트리거가 켜졌을 때 즉시 회복 (esc -> key -> home -> enter)
         key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="3")
 
         now = time.time()
@@ -116,14 +219,14 @@ class LogicSvc(threading.Thread):
         humanized_sleep(TIMING_CONFIG["heal_gap"])
 
     def _recover_mp(self):
-        if not getattr(self.state, "mp_trig_active", False):
+        if not self._needs_mp_recovery():
             return
 
-        # mp_trig: 검정색 감지 시 '2'(또는 설정 키) 연타, 사라지면 즉시 중단
+        # MP 임계값 또는 검정 트리거가 켜졌을 때 설정 키를 2초 간격으로 입력
         key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
 
         now = time.time()
-        min_interval = max(0.03, float(TIMING_CONFIG.get("key_gap", 0.05)) * 0.70)
+        min_interval = max(0.10, float(TIMING_CONFIG.get("mp_recover_interval", 2.0)))
         if now - self._last_mp_recover_time < min_interval:
             return
 
@@ -137,8 +240,57 @@ class LogicSvc(threading.Thread):
                 skill.last_cast_time = now
             except Exception:
                 pass
-        # 매우 짧게만 대기: 트리거가 꺼지면 다음 루프에서 즉시 멈출 수 있게 함
-        humanized_sleep(min(0.02, float(TIMING_CONFIG.get("key_gap", 0.05))))
+        humanized_sleep(min(0.05, float(TIMING_CONFIG.get("key_gap", 0.05))))
+
+    def _recover_party_hp(self, snapshot: dict | None):
+        """Cast the configured HP heal for the currently supported warrior snapshot."""
+        if not snapshot or not self._needs_hp_recovery_for(snapshot):
+            return
+        if not snapshot.get("red_tab_enabled", False):
+            return
+
+        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="3")
+        now = time.time()
+        min_interval = max(0.05, float(TIMING_CONFIG.get("spell_confirm", 0.20)) * 0.80)
+        if now - self._last_hp_recover_time < min_interval:
+            return
+        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
+            return
+
+        self._last_hp_recover_time = now
+        self._press_fast(key)
+        if skill is not None:
+            try:
+                skill.last_cast_time = now
+            except Exception:
+                pass
+        print(f"[Support] HP heal cast on warrior: key={key}, hp={int(snapshot.get('hp', 0) or 0)}")
+        humanized_sleep(TIMING_CONFIG["heal_gap"])
+
+    def _recover_party_mp(self, snapshot: dict | None):
+        """Cast the configured MP recovery for the currently supported warrior snapshot."""
+        if not snapshot or not self._needs_mp_recovery_for(snapshot):
+            return
+        if not snapshot.get("red_tab_enabled", False):
+            return
+
+        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
+        now = time.time()
+        min_interval = max(0.10, float(TIMING_CONFIG.get("mp_recover_interval", 2.0)))
+        if now - self._last_mp_recover_time < min_interval:
+            return
+        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
+            return
+
+        self._last_mp_recover_time = now
+        self._press_fast(key)
+        if skill is not None:
+            try:
+                skill.last_cast_time = now
+            except Exception:
+                pass
+        print(f"[Support] MP heal cast on warrior: key={key}, mp={int(snapshot.get('mp', 0) or 0)}")
+        humanized_sleep(min(0.05, float(TIMING_CONFIG.get("key_gap", 0.05))))
 
     # ----------------------------------------------------------
     # ── 보무(Buff) 자동 관리 ─────────────────────────────────
@@ -215,6 +367,10 @@ class LogicSvc(threading.Thread):
     # ----------------------------------------------------------
     def _search_target_v3(self):
         """Tab → Up → Enter (모두 humanized_sleep 경유)."""
+        now = time.time()
+        min_interval = max(0.15, float(TIMING_CONFIG.get("ocr_wait", 0.10)) * 1.5)
+        if now - self._last_target_search_time < min_interval:
+            return False
         hw.humanized_press("tab")
         humanized_sleep(TIMING_CONFIG["tab_wait"])
         hw.humanized_press("up")
@@ -222,6 +378,8 @@ class LogicSvc(threading.Thread):
         hw.humanized_press("enter")
         humanized_sleep(TIMING_CONFIG["ocr_wait"])
         self.state.target_locked = True
+        self._last_target_search_time = time.time()
+        return True
 
     # ----------------------------------------------------------
     # ── 사전 검증 ─────────────────────────────────────────────
@@ -233,13 +391,15 @@ class LogicSvc(threading.Thread):
         """
         name = self.state.target_name
         if not name:
+            acquire_grace = max(0.30, float(TIMING_CONFIG.get("ocr_wait", 0.10)) * 3.0)
+            if time.time() - self._last_target_search_time > acquire_grace:
+                self._clear_target_state()
             return False
 
         # ① '걸리지 않음' 즉시 취소
         if "걸리지 않습니다" in name:
             hw.humanized_press("esc")
-            self.state.target_locked = False
-            self.state.target_name   = ""
+            self._clear_target_state()
             return False
 
         # ② 몬스터 화이트리스트 검증
@@ -249,8 +409,7 @@ class LogicSvc(threading.Thread):
         # ③ 그 외 (유저, NPC 등) → ESC
         print(f"[Misc] 비몬스터 타겟: '{name}' -> ESC.")
         hw.humanized_press("esc")
-        self.state.target_locked = False
-        self.state.target_name   = ""
+        self._clear_target_state()
         return False
 
     # ----------------------------------------------------------
@@ -313,7 +472,6 @@ class LogicSvc(threading.Thread):
                 print(f"[Priority3] MONSTER 감지 (ID={m.get('id','?')}) "
                       f"{m.get('name','')} @ {m.get('grid','?')} → 사냥 루틴")
                 self.state.combat_start_time = 0.0
-                self._search_target_v3()
             return False   # 사냥은 메인 루프에서 계속 처리
 
         # --- Priority 4: 아이템 → 루팅 (비전투 중에만) ---
@@ -371,22 +529,46 @@ class LogicSvc(threading.Thread):
     # ── 메인 FSM 루프 (우선순위 체계) ─────────────────────────
     # ----------------------------------------------------------
     def run(self):
-        print(f"[Logic] BIS Logic Engine 시작... (역할: {self.state.role})")
-        print(f"[Logic] 우선순위 체계: Emergency -> Combat -> Moving")
+        print(f"[Logic] BIS Logic Engine started (role: {self.state.role})")
+        print("[Logic] Priority: Emergency -> Combat -> Moving")
         while self.state.running:
+            if getattr(self.state, "automation_paused", False):
+                self._clear_nav_context()
+                self._was_in_combat = False
+                self._advance_waypoint_after_combat = False
+                self._combat_resume_context = None
+                humanized_sleep(0.02)
+                continue
+
+            if not getattr(self.state, "service_active", False):
+                if self.state.is_combat_busy:
+                    self._set_combat_busy(False)
+                self.state.last_bomu_time = 0.0
+                self.state.combat_start_time = 0.0
+                humanized_sleep(0.02)
+                continue
 
             # Hot-Reload
             if self.state.last_update_time > self.last_load_time:
                 self.last_load_time = time.time()
-                print("[Sync] [Logic] 마법 설정 실시간 동기화.")
+                print("[Sync] [Logic] Reloading shared settings...")
+
+            # 이동 중 자동사냥은 Sentinel 기반 감지가 전제다.
+            if self.state.auto_hunt and not self.state.sentinel_enabled:
+                self.state.sentinel_enabled = True
 
             # ── 0순위: Emergency (비상 상황) ─────────────────────
-            if self._check_emergency():
-                self._handle_emergency()
+            support_target = self._get_support_target_data() if self.state.role == "도사" else None
+            if self.state.role == "도사" and self._run_dosa_service_cycle(support_target):
+                continue
+            if self._check_emergency(support_target):
+                self._handle_emergency(support_target)
                 continue
 
             # ── 1순위: Combat (전투) ───────────────────────────
-            if self.state.is_combat_busy or self.state.target_locked:
+            combat_needed = self._should_handle_combat()
+            self._set_combat_busy(combat_needed)
+            if combat_needed:
                 self._handle_combat()
                 continue
 
@@ -398,25 +580,30 @@ class LogicSvc(threading.Thread):
             # ── 대기 상태 (최소화하여 빠른 반응) ─────────────────────────────────────
             humanized_sleep(0.001)  # 1ms만 대기하여 빠른 반응 속도 확保
 
-    def _check_emergency(self) -> bool:
-        """비상 상황 확인 (HP/MP 위급, 유저 감지 등)"""
-        # HP/MP 위급
-        if self.state.hp_trig_active or self.state.mp_trig_active:
+    def _check_emergency(self, snapshot: dict | None = None) -> bool:
+        """비상 상황 확인 (HP/MP 임계값, 유저 감지, 채팅)"""
+        if self._needs_hp_recovery_for(snapshot) or self._needs_mp_recovery_for(snapshot):
             return True
         # 미확인 유저 감지
-        if self.state.is_user_detected:
+        if snapshot is None and self.state.is_user_detected:
             return True
         # 채팅 활성화
-        if self.state.is_chat_active:
+        if snapshot is None and self.state.is_chat_active:
             return True
         return False
 
-    def _handle_emergency(self):
+    def _handle_emergency(self, snapshot: dict | None = None):
         """비상 상황 처리"""
-        # HP/MP 회복
-        if self.state.hp_trig_active:
+        if snapshot is not None:
+            if self._needs_hp_recovery_for(snapshot):
+                self._recover_party_hp(snapshot)
+            if self._needs_mp_recovery_for(snapshot):
+                self._recover_party_mp(snapshot)
+            return
+
+        if self._needs_hp_recovery():
             self._recover_hp()
-        if self.state.mp_trig_active:
+        if self._needs_mp_recovery():
             self._recover_mp()
         
         # 유저 감지 대응
@@ -429,10 +616,30 @@ class LogicSvc(threading.Thread):
                 hw.humanized_press("esc")
                 self.state.target_locked = False
 
+    def _run_dosa_service_cycle(self, support_target: dict | None) -> bool:
+        """
+        도사 서비스 전용 루프.
+        격수 telemetry 기반 HP/MP 회복만 수행한다.
+        버프/디버프는 별도 함수로 분리해 이후 추가한다.
+        """
+        if not self.state.service_active:
+            return False
+        if not support_target:
+            return False
+
+        handled = False
+        if self._needs_hp_recovery_for(support_target):
+            self._recover_party_hp(support_target)
+            handled = True
+        if self._needs_mp_recovery_for(support_target):
+            self._recover_party_mp(support_target)
+            handled = True
+        return handled
+
     def _handle_combat(self):
         """전투 처리 (우선순위 1)"""
         # 전투 중에는 is_combat_busy 플래그 설정
-        self.state.is_combat_busy = True
+        self._set_combat_busy(True)
         
         # 역할별 전투 로직
         if self.state.role == "격수":
@@ -443,6 +650,9 @@ class LogicSvc(threading.Thread):
             self._run_priest_mode()
         else:
             self._run_default_mode()
+
+        if not self._should_handle_combat():
+            self._set_combat_busy(False)
 
     def _handle_moving(self):
         """이동/네비게이션 처리 (우선순위 2)"""
@@ -468,13 +678,13 @@ class LogicSvc(threading.Thread):
         # 사냥 로직(타겟 탐색, 전투, 아이템 획득)은 수동으로 수행
         
         # 생존 최우선 (HP/MP 회복) - 격수도 자가 회복 필요
-        if self.state.hp_trig_active:
+        if self._needs_hp_recovery():
             self._recover_hp()
             self.state.combat_start_time = 0.0
 
-        if self.state.mp_trig_active:
+        if self._needs_mp_recovery():
             self._recover_mp()
-            if self.state.hp_trig_active:
+            if self._needs_hp_recovery():
                 self._recover_hp()
 
         # 보무 버프 유지 (185s 주기)
@@ -505,13 +715,13 @@ class LogicSvc(threading.Thread):
         # 도사는 격수의 타겟을 따라가며 지원
         
         # 생존 최우선 (HP/MP 회복)
-        if self.state.hp_trig_active:
+        if self._needs_hp_recovery():
             self._recover_hp()
             self.state.combat_start_time = 0.0
 
-        if self.state.mp_trig_active:
+        if self._needs_mp_recovery():
             self._recover_mp()
-            if self.state.hp_trig_active:
+            if self._needs_hp_recovery():
                 self._recover_hp()
 
         # 보무 버프 유지 (185s 주기)
@@ -541,26 +751,51 @@ class LogicSvc(threading.Thread):
         return monsters if isinstance(monsters, list) else []
 
     def _calc_monster_metrics(self):
-        me = self.state.entities.get("me")
-        if not isinstance(me, dict):
-            return None, [], 0
-        me_grid = me.get("grid")
-        if not me_grid or len(me_grid) != 2:
+        me_pos = (int(getattr(self.state, "x", 0)), int(getattr(self.state, "y", 0)))
+        if me_pos[0] <= 0 and me_pos[1] <= 0:
             return None, [], 0
 
         valid_monsters = []
         dense_count = 0
         for m in self._get_priest_monsters():
-            grid = m.get("grid") if isinstance(m, dict) else None
-            if not grid or len(grid) != 2:
+            if not isinstance(m, dict):
                 continue
-            dx = int(grid[0]) - int(me_grid[0])
-            dy = int(grid[1]) - int(me_grid[1])
+            monster_pos = m.get("world_pos") or m.get("pos")
+            if not monster_pos or len(monster_pos) != 2:
+                grid = m.get("grid")
+                if not grid or len(grid) != 2:
+                    continue
+                dx = int(grid[0]) - int(self.state.char_grid[0])
+                dy = int(grid[1]) - int(self.state.char_grid[1])
+            else:
+                dx = int(monster_pos[0]) - me_pos[0]
+                dy = int(monster_pos[1]) - me_pos[1]
             dist = (dx * dx + dy * dy) ** 0.5
             valid_monsters.append({"monster": m, "dist": dist, "dx": dx, "dy": dy})
             if max(abs(dx), abs(dy)) <= 1:
                 dense_count += 1
-        return me_grid, valid_monsters, dense_count
+        return me_pos, valid_monsters, dense_count
+
+    def _get_priest_engage_metrics(self, engage_range: int | None = None):
+        """
+        술사 첨사냥은 가까운 몬스터만 전투 진입 대상으로 본다.
+        engage_range는 pos x/y 기준 체비쇼프 거리다.
+        """
+        if engage_range is None:
+            engage_range = max(0, int(getattr(self.state, "priest_engage_range", 2)))
+        me_grid, monster_infos, _dense_count = self._calc_monster_metrics()
+        if me_grid is None:
+            return None, [], 0
+
+        close_infos = [
+            info for info in monster_infos
+            if max(abs(info["dx"]), abs(info["dy"])) <= engage_range
+        ]
+        close_dense_count = sum(
+            1 for info in close_infos
+            if max(abs(info["dx"]), abs(info["dy"])) <= 1
+        )
+        return me_grid, close_infos, close_dense_count
 
     def _find_ready_attack_skill(self, aoe_mode: bool):
         attack_skills = [s for s in self.state.spells if s.category == "공격" and s.is_ready()]
@@ -606,13 +841,13 @@ class LogicSvc(threading.Thread):
             self._execute_bomu_buff_v3()
 
         # 생존 최우선 (HP/MP 회복)
-        if self.state.hp_trig_active:
+        if self._needs_hp_recovery():
             self._recover_hp()
             self.state.combat_start_time = 0.0
 
-        if self.state.mp_trig_active:
+        if self._needs_mp_recovery():
             self._recover_mp()
-            if self.state.hp_trig_active:
+            if self._needs_hp_recovery():
                 self._recover_hp()
 
         # 유저 탐지 대응 + 엔티티 우선순위 행동 제어
@@ -626,13 +861,13 @@ class LogicSvc(threading.Thread):
             print(f"[Item] 아이템 획득 시도: {self.state.detected_item_name} @ Grid({gx}, {gy})")
 
             while self.state.running and self.state.auto_hunt and self.state.detected_item_grid:
-                if self.state.target_locked or self.state.hp_trig_active:
+                if self.state.target_locked or self._needs_hp_recovery() or self._needs_mp_recovery():
                     print("[Action] 획득 중 전투/위급 상황 발생 -> 루팅 중단.")
                     break
 
                 # ── 회피 이동 (Stuck 감지) 통합 ──
-                if self.state.nav_avoid_enabled and self._check_stuck():
-                    self._escape_stuck()
+                if self._check_stuck():
+                    self._escape_stuck(rewind_waypoint=False)
                     humanized_sleep(TIMING_CONFIG["move_hold"])
                     continue
 
@@ -653,15 +888,16 @@ class LogicSvc(threading.Thread):
         if self.state.auto_debuff_enabled and dist_change > 15:
             self._execute_debuff_scan_v3()
 
-        me_grid, monster_infos, dense_count = self._calc_monster_metrics()
+        me_grid, monster_infos, dense_count = self._get_priest_engage_metrics()
         has_monsters = len(monster_infos) > 0
         if has_monsters:
             aoe_mode = dense_count >= 2
             # 단일 타겟 스킬은 타겟 락이 필요하므로 기존 탐색 시퀀스 유지
             if (not aoe_mode) and (not self.state.target_locked):
                 self.state.combat_start_time = 0.0
-                self._search_target_v3()
-                humanized_sleep(TIMING_CONFIG["ocr_fast"])
+                if self._search_target_v3():
+                    humanized_sleep(TIMING_CONFIG["ocr_fast"])
+                return
 
             skill = self._find_ready_attack_skill(aoe_mode=aoe_mode)
             if skill:
@@ -670,13 +906,13 @@ class LogicSvc(threading.Thread):
                 self._cast_attack_skill(skill)
             else:
                 self._execute_combat()
-        else:
-            # 레이더 데이터가 비었을 때는 기존 전투 루프 폴백
-            if not self.state.target_locked:
-                self.state.combat_start_time = 0.0
-                self._search_target_v3()
+        elif self.state.target_locked:
             humanized_sleep(TIMING_CONFIG["ocr_fast"])
             self._execute_combat()
+        else:
+            self._clear_target_state()
+            humanized_sleep(TIMING_CONFIG["nav_loop"])
+            return
 
         humanized_sleep(TIMING_CONFIG["action_loop"])
 
@@ -701,13 +937,13 @@ class LogicSvc(threading.Thread):
         # ══════════════════════════════════════════════════
         # 1. 생존 최우선 (HP / MP 회복)
         # ══════════════════════════════════════════════════
-        if self.state.hp_trig_active:
+        if self._needs_hp_recovery():
             self._recover_hp()
             self.state.combat_start_time = 0.0
 
-        if self.state.mp_trig_active:
+        if self._needs_mp_recovery():
             self._recover_mp()
-            if self.state.hp_trig_active:
+            if self._needs_hp_recovery():
                 self._recover_hp()
 
         # ══════════════════════════════════════════════════
@@ -725,7 +961,7 @@ class LogicSvc(threading.Thread):
             print(f"[Item] 아이템 획득 시도: {self.state.detected_item_name} @ Grid({gx}, {gy})")
 
             while self.state.running and self.state.auto_hunt and self.state.detected_item_grid:
-                if self.state.target_locked or self.state.hp_trig_active:
+                if self.state.target_locked or self._needs_hp_recovery() or self._needs_mp_recovery():
                     print("[Action] 획득 중 전투/위급 상황 발생 -> 루팅 중단.")
                     break
 
@@ -751,9 +987,15 @@ class LogicSvc(threading.Thread):
         # ══════════════════════════════════════════════════
         # 5. 타겟 탐색 & 전투
         # ══════════════════════════════════════════════════
+        has_monsters = bool(self._get_visible_monsters())
         if not self.state.target_locked:
+            if not has_monsters:
+                humanized_sleep(TIMING_CONFIG["nav_loop"])
+                return
             self.state.combat_start_time = 0.0
-            self._search_target_v3()
+            if self._search_target_v3():
+                humanized_sleep(TIMING_CONFIG["ocr_fast"])
+            return
 
         humanized_sleep(TIMING_CONFIG["ocr_fast"])
         self._execute_combat()
@@ -780,6 +1022,121 @@ def grid_name_to_coords(grid_name):
     gm = GridManager(None)
     return gm.name_to_grid(grid_name)
 
+
+def _nav_step_from_dir(cx: int, cy: int, direction: str) -> tuple[int, int]:
+    if direction == "up":
+        return cx, cy - 1
+    if direction == "down":
+        return cx, cy + 1
+    if direction == "left":
+        return cx - 1, cy
+    if direction == "right":
+        return cx + 1, cy
+    return cx, cy
+
+
+def nav_cell_blockers(state: GameState, gx: int, gy: int, include_entities: bool = True) -> list[str]:
+    blockers: list[str] = []
+    try:
+        map_name = getattr(state, "current_map", None)
+        map_data = getattr(state, "maps_db", {}).get(map_name) if map_name else None
+        if map_data:
+            walls = map_data.get("walls", [])
+            if [gx, gy] in walls:
+                blockers.append("wall")
+    except Exception:
+        pass
+
+    if include_entities:
+        try:
+            entities = getattr(state, "entities", {}) or {}
+            for kind, label in (("monsters", "monster"), ("users", "user")):
+                for ent in entities.get(kind, []):
+                    if not isinstance(ent, dict):
+                        continue
+                    grid = ent.get("grid")
+                    if not grid or len(grid) != 2:
+                        continue
+                    if int(grid[0]) == gx and int(grid[1]) == gy:
+                        blockers.append(label)
+                        break
+        except Exception:
+            pass
+
+    return list(dict.fromkeys(blockers))
+
+
+def nav_pick_step_direction(
+    state: GameState,
+    current_grid: tuple[int, int],
+    dx: int,
+    dy: int,
+    include_entities: bool = True,
+) -> tuple[str | None, tuple[int, int] | None, list[str]]:
+    if dx == 0 and dy == 0:
+        return None, None, []
+
+    ccx, ccy = current_grid
+
+    if abs(dx) > abs(dy):
+        axis_priority = ["x", "y"]
+    elif abs(dy) > abs(dx):
+        axis_priority = ["y", "x"]
+    else:
+        axis_priority = random.choice([["x", "y"], ["y", "x"]])
+
+    candidates: list[str] = []
+
+    def add_candidate(direction: str):
+        if direction not in candidates:
+            candidates.append(direction)
+
+    for axis in axis_priority:
+        if axis == "x" and dx != 0:
+            add_candidate("right" if dx > 0 else "left")
+        elif axis == "y" and dy != 0:
+            add_candidate("down" if dy > 0 else "up")
+
+    if abs(dx) >= abs(dy):
+        if dy > 0:
+            add_candidate("down")
+            add_candidate("up")
+        elif dy < 0:
+            add_candidate("up")
+            add_candidate("down")
+        else:
+            for direction in random.choice([["up", "down"], ["down", "up"]]):
+                add_candidate(direction)
+    else:
+        if dx > 0:
+            add_candidate("right")
+            add_candidate("left")
+        elif dx < 0:
+            add_candidate("left")
+            add_candidate("right")
+        else:
+            for direction in random.choice([["left", "right"], ["right", "left"]]):
+                add_candidate(direction)
+
+    if candidates:
+        opposite = {
+            "up": "down",
+            "down": "up",
+            "left": "right",
+            "right": "left",
+        }
+        add_candidate(opposite[candidates[0]])
+
+    blockers: list[str] = []
+    for direction in candidates:
+        nx, ny = _nav_step_from_dir(ccx, ccy, direction)
+        cell_blockers = nav_cell_blockers(state, nx, ny, include_entities=include_entities)
+        if not cell_blockers:
+            return direction, (nx, ny), []
+        blockers.extend(cell_blockers)
+
+    return None, None, list(dict.fromkeys(blockers))
+
 # ============================================================
 #  NavigationThread  ─  지능형 이동 + Stuck 탈출
 # ============================================================
@@ -799,83 +1156,129 @@ class RouteSvc(threading.Thread):
         self._last_coord_check_time = time.time()
         self._last_checked_pos      = (0, 0)
         # 지능형 회피 로직용 변수
-        self.last_pos = (0, 0)
-        self.stuck_timer = time.time()
+        self.last_pos = None
+        self.stuck_timer = 0.0
         self.stuck_count = 0
         # 시퀀스 기반 이동용 변수
         self.seq_phase = "entry"  # entry, points, exit
         self.seq_point_idx = 0
         self.seq_last_action_time = 0
+        self._was_in_combat = False
+        self._current_nav_context = None
+        self._combat_resume_context = None
+        self._advance_waypoint_after_combat = False
+        self._nav_current_pos = None
+        self._nav_attempt_pos = None
+        self._nav_attempt_started_at = 0.0
+        self._last_follow_close_log_time = 0.0
 
     # ----------------------------------------------------------
     def _check_stuck(self) -> bool:
-        """최근 1.5초간 좌표 변화가 없으면 stuck_count를 증가."""
+        """Return True when a move key was sent and coordinates did not change for 1 second."""
         now = time.time()
-        cx, cy = self.state.x, self.state.y
-        elapsed = now - self.stuck_timer
+        current_pos = (self.state.x, self.state.y)
 
-        # 좌표가 변했면 타이머와 카운터 리셋
-        if (cx, cy) != self.last_pos:
-            self.last_pos = (cx, cy)
-            self.stuck_timer = now
+        if self._nav_current_pos != current_pos:
+            self.last_pos = self._nav_current_pos
+            self._nav_current_pos = current_pos
+            self._nav_attempt_pos = None
+            self._nav_attempt_started_at = 0.0
             self.stuck_count = 0
             return False
 
-        # 0.7초 이상 변화 없으면 stuck_count 증가
-        if elapsed > 0.7:  # 1.5s -> 0.7s (2x faster)
+        if self._nav_attempt_pos != current_pos:
+            return False
+
+        if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= 1.0:
             self.stuck_count += 1
-            self.stuck_timer = now
-            print(f"[Stuck] 좌표 변화 없음 ({self.stuck_count}회 연속)")
-            if self.stuck_count >= 2:  # 2회 연속 0.7초 변화 없으면 회피 기동
-                return True
+            print(f"[Stuck] no coord change for 1s ({self.stuck_count} consecutive) pos={current_pos}")
+            return True
         return False
 
-    # ----------------------------------------------------------
-    def _escape_stuck(self):
-        """
-        지능형 회피 기동 시퀀스:
-        1단계: 직전 좌표로 이동 (후진)
-        2단계: 랜덤 횡이동 (좌측/우측)
-        3단계: 2~3회 반복하여 장애물 우회
-        4단계: 타겟/웨이포인트 리셋
-        """
-        print("[Warn] [STUCK] 막힘 감지! 회피 기동 시작...")
-        self.state.is_stuck = True  # 회피 기동 중 플래그 설정
+    def _mark_nav_attempt(self):
+        current_pos = (self.state.x, self.state.y)
+        if self._nav_attempt_pos != current_pos:
+            self._nav_attempt_pos = current_pos
+            self._nav_attempt_started_at = time.time()
 
-        # 2~3회 반복
-        for i in range(random.randint(2, 3)):
-            # 1단계: 직전 좌표로 이동 (후진)
-            # last_pos가 유효하면 그 방향으로 이동
-            if self.last_pos != (0, 0):
+    # ----------------------------------------------------------
+    def _escape_stuck(self, rewind_waypoint: bool = False):
+        """
+        Intelligent escape movement.
+        1) step back toward the previous position when available
+        2) random side-step
+        3) repeat a few times
+        4) reset target state
+        """
+        print("[Warn] [STUCK] blocked movement detected, escaping...")
+        self.state.is_stuck = True
+
+        for _ in range(random.randint(2, 3)):
+            if isinstance(self.last_pos, tuple) and len(self.last_pos) == 2:
                 cx, cy = self.state.x, self.state.y
                 lx, ly = self.last_pos
                 dx, dy = lx - cx, ly - cy
-                
-                # 방향 결정
                 if abs(dx) > abs(dy):
                     move_dir = "right" if dx > 0 else "left"
                 else:
                     move_dir = "down" if dy > 0 else "up"
-                
                 hw.hold_move(move_dir, "stuck_back_hold")
                 humanized_sleep(TIMING_CONFIG["key_gap"])
-            
-            # 2단계: 랜덤 이동 (상하좌우 4방향 — 수직 장애물 탈출 포함)
+
             side_dir = random.choice(["left", "right", "up", "down"])
             hw.hold_move(side_dir, "stuck_side_hold")
             humanized_sleep(TIMING_CONFIG["key_gap"])
 
-        # 3단계: 타겟/웨이포인트 리셋
         self.state.target_locked = False
         self.state.target_name = ""
-        if self.wp_idx > 0:
-            self.wp_idx -= 1  # 이전 웨이포인트로 되돌림
-        
-        # 회피 기동 완료
+        if rewind_waypoint and self.wp_idx > 0:
+            self.wp_idx -= 1
         self.state.is_stuck = False
         self.stuck_count = 0
-        self.stuck_timer = time.time()
-        print("[OK] [STUCK] 회피 기동 완료. 재탐색 개시.")
+        self.stuck_timer = 0.0
+        self._nav_attempt_pos = None
+        self._nav_attempt_started_at = 0.0
+        print("[OK] [STUCK] escape complete, continue navigation.")
+
+    def _set_nav_context(self, kind: str, **kwargs):
+        self._current_nav_context = {"kind": kind, **kwargs}
+
+    def _clear_nav_context(self):
+        self._current_nav_context = None
+
+    def _mark_combat_pause(self):
+        ctx = self._current_nav_context
+        if not isinstance(ctx, dict):
+            return
+        if ctx.get("kind") not in ("seq_point", "list_wp"):
+            return
+        self._combat_resume_context = dict(ctx)
+        self._advance_waypoint_after_combat = True
+
+    def _advance_waypoint_after_interrupt(self):
+        if not self._advance_waypoint_after_combat:
+            return
+        ctx = self._combat_resume_context
+        if not isinstance(ctx, dict):
+            self._advance_waypoint_after_combat = False
+            return
+
+        kind = ctx.get("kind")
+        if kind == "seq_point":
+            idx = int(ctx.get("seq_point_idx", -1))
+            advance_delta = int(ctx.get("advance_delta", 1))
+            if self.seq_phase == "points" and self.seq_point_idx == idx:
+                self.seq_point_idx += advance_delta
+                print(f"[Nav] 전투 종료 후 다음 사냥점으로 건너뜀: index {self.seq_point_idx}")
+        elif kind == "list_wp":
+            idx = int(ctx.get("wp_idx", -1))
+            advance_delta = int(ctx.get("advance_delta", 1))
+            if self.wp_idx == idx:
+                self.wp_idx += advance_delta
+                print(f"[Nav] 전투 종료 후 다음 웨이포인트로 건너뜀: index {self.wp_idx}")
+
+        self._advance_waypoint_after_combat = False
+        self._combat_resume_context = None
 
     # ----------------------------------------------------------
     def _is_in_combat(self) -> bool:
@@ -905,7 +1308,7 @@ class RouteSvc(threading.Thread):
         격수가 바라보는 방향의 반대편 1~2칸 뒤를 타겟으로 설정.
         """
         # 네트워크에서 격수 데이터 확인
-        remote_data = self.state.other_pc_data.get("LAPTOP")
+        remote_data = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
         if not remote_data:
             return None
 
@@ -919,10 +1322,10 @@ class RouteSvc(threading.Thread):
 
         # 방향 반대 매핑 (격수가 보는 방향의 반대가 등 뒤)
         behind_offset = {
-            "up": (0, 2),      # 격수가 위를 보면 아래 2칸이 등 뒤
-            "down": (0, -2),    # 격수가 아래를 보면 위 2칸이 등 뒤
-            "left": (2, 0),     # 격수가 왼쪽을 보면 오른쪽 2칸이 등 뒤
-            "right": (-2, 0)    # 격수가 오른쪽을 보면 왼쪽 2칸이 등 뒤
+            "up": (0, 1),      # 격수가 위를 보면 아래 1칸이 등 뒤
+            "down": (0, -1),    # 격수가 아래를 보면 위 1칸이 등 뒤
+            "left": (1, 0),     # 격수가 왼쪽을 보면 오른쪽 1칸이 등 뒤
+            "right": (-1, 0)    # 격수가 오른쪽을 보면 왼쪽 1칸이 등 뒤
         }.get(dps_dir, (0, 0))
 
         target_x = dps_x + behind_offset[0]
@@ -931,115 +1334,66 @@ class RouteSvc(threading.Thread):
         return (target_x, target_y)
 
     def _move_toward(self, tx: int, ty: int) -> bool:
-        """
-        목표 좌표 방향으로 1스텝 이동. 도달 시 True 반환.
-        Grid 기반 좌표 변환, 벽 체크, 전투 중 이동 중단.
-        random.gauss로 move_hold 시간 변화, Grid 도착 시 즉시 릴리즈.
-        """
-        # 전투 중이면 즉시 이동 중단
+        """Move one step toward a world target, avoiding walls / monsters / users."""
         if self._is_in_combat():
             return False
 
         cx, cy = self.state.x, self.state.y
         dx, dy = tx - cx, ty - cy
-
-        # Grid 기반 좌표 변환 (maps.json의 grid_size 활용)
-        map_data = self.state.maps_db.get(self.state.current_map)
-        if map_data:
-            grid_size = map_data.get("grid_size", 32)
-            # 절대 좌표를 Grid 좌표로 변환
-            gx_dx = int(dx / grid_size)
-            gy_dy = int(dy / grid_size)
-        else:
-            # 맵 데이터 없으면 절대 좌표 그대로 사용
-            gx_dx = dx
-            gy_dy = dy
-
-        # ── 이동 로그 ─────────────────────────────────────
         print(f"[Nav] Target: ({tx}, {ty}) | Current: ({cx}, {cy}) | Grid: {self.state.char_grid}")
 
-        # ── 주 이동 방향 및 벽(Wall) 회피 로직 ────────────────────────
         ccx, ccy = self.state.char_grid
-        
-        # 가로 우선, 세로 후 (대각선 제거)
-        if abs(gx_dx) > 0:
-            axis_priority = ["x", "y"]
-        elif abs(gy_dy) > 0:
-            axis_priority = ["y", "x"]
-        else:
-            axis_priority = []
-            
-        step_dir = None
-        for axis in axis_priority:
-            if axis == "x" and abs(gx_dx) > 0:
-                candidate_dir = "right" if gx_dx > 0 else "left"
-                gx_next = ccx + (1 if gx_dx > 0 else -1)
-                gy_next = ccy
-                if not self._is_wall(gx_next, gy_next):
-                    step_dir = candidate_dir
-                    break
-            elif axis == "y" and abs(gy_dy) > 0:
-                candidate_dir = "down" if gy_dy > 0 else "up"
-                gx_next = ccx
-                gy_next = ccy + (1 if gy_dy > 0 else -1)
-                if not self._is_wall(gx_next, gy_next):
-                    step_dir = candidate_dir
-                    break
+        step_dir, next_grid, blockers = nav_pick_step_direction(
+            self.state,
+            (ccx, ccy),
+            dx,
+            dy,
+            include_entities=True,
+        )
 
         if step_dir is None:
-            # 두 방향 모두 이동 불가(벽)이거나 도착 직전인 경우
-            if abs(gx_dx) > 0 or abs(gy_dy) > 0:
-                print(f"🚧 진행 가능한 모든 경로 벽 감지 -> 회피 가동")
-                self._escape_stuck()
-                return False
-        else:
-            # random.gauss로 move_hold 시간 변화 (기본 150ms, 표준편차 10ms)
-            base_hold = TIMING_CONFIG["move_hold"]
-            hold_time = max(0.050, min(0.300, random.gauss(base_hold, 0.010)))
-            
-            hw.hold_move(step_dir, "move_hold", duration=hold_time)
-            self.state.last_move_dir = step_dir
-            
-            # Grid 도착 시 즉시 릴리즈
-            if abs(gx_dx) <= 1 and abs(gy_dy) <= 1:
-                hw.send("U:key")  # 키 릴리즈
-                print(f"[Nav] Grid 도착 - 키 즉시 릴리즈")
+            if blockers:
+                print(f"[Nav] blocked: {','.join(blockers)}")
+            self._escape_stuck(rewind_waypoint=False)
+            return False
 
-        arrived = abs(gx_dx) <= 1 and abs(gy_dy) <= 1
+        base_hold = TIMING_CONFIG["move_hold"]
+        hold_time = max(0.050, min(0.300, random.gauss(base_hold, 0.010)))
+        hw.hold_move(step_dir, "move_hold", duration=hold_time)
+        self.state.last_move_dir = step_dir
+        self._mark_nav_attempt()
+
+        arrived = abs(dx) <= 1 and abs(dy) <= 1
         if arrived:
-            print(f"[Nav] 도착 완료: 웨이포인트 {self.wp_idx}번째 완료")
+            print(f"[Nav] arrived: waypoint {self.wp_idx}")
         return arrived
 
     # [V5] 아이템 획득용 격자 기반 이동
     def _move_toward_grid(self, gx: int, gy: int) -> bool:
-        """아이템의 Grid 좌표로 한 칸씩 정밀 이동."""
+        """Move one step toward a grid target, avoiding walls / monsters / users."""
         ccx, ccy = self.state.char_grid
         dgx, dgy = gx - ccx, gy - ccy
 
-        # 갱신된 위치 확인을 위해 잠시 대기 (Action 루프)
         arrived = (abs(dgx) == 0 and abs(dgy) == 0)
         if arrived:
             return True
 
-        if abs(dgx) > abs(dgy):
-            axis_priority = ["x", "y"]
-        elif abs(dgy) > abs(dgx):
-            axis_priority = ["y", "x"]
-        else:
-            axis_priority = random.choice([["x", "y"], ["y", "x"]])
-
-        step_dir = None
-        for axis in axis_priority:
-            if axis == "x" and abs(dgx) > 0:
-                step_dir = "right" if dgx > 0 else "left"
-                break
-            elif axis == "y" and abs(dgy) > 0:
-                step_dir = "down" if dgy > 0 else "up"
-                break
+        step_dir, next_grid, blockers = nav_pick_step_direction(
+            self.state,
+            (ccx, ccy),
+            dgx,
+            dgy,
+            include_entities=True,
+        )
 
         if step_dir:
             hw.hold_move(step_dir, "move_hold")
-            
+            self.state.last_move_dir = step_dir
+            self._mark_nav_attempt()
+        elif blockers:
+            print(f"[Nav] blocked: {','.join(blockers)}")
+            self._escape_stuck(rewind_waypoint=False)
+
         return False
 
     def _find_cluster_center(self) -> tuple[int, int] | None:
@@ -1089,6 +1443,7 @@ class RouteSvc(threading.Thread):
         if is_reverse:
             # Exit 단계 (역방향 시작점)
             if self.seq_phase == "entry":  # 역방향에서는 entry를 exit로 사용
+                self._set_nav_context("seq_entry")
                 exit_data = seq_data.get("exit", {"x": 0, "y": 0, "direction": "down", "reverse_action": ""})
                 tx, ty = exit_data["x"], exit_data["y"]
                 
@@ -1109,6 +1464,12 @@ class RouteSvc(threading.Thread):
                 if self.seq_point_idx >= 0:
                     grid_name = points[self.seq_point_idx]
                     col, row = grid_name_to_coords(grid_name)
+                    self._set_nav_context(
+                        "seq_point",
+                        seq_point_idx=self.seq_point_idx,
+                        grid_name=grid_name,
+                        advance_delta=-1,
+                    )
                     
                     if col is not None and row is not None:
                         arrived = self._move_toward_grid(col, row)
@@ -1123,6 +1484,7 @@ class RouteSvc(threading.Thread):
             
             # Entry 단계 (역방향 종료점)
             elif self.seq_phase == "exit":
+                self._set_nav_context("seq_exit")
                 entry = seq_data.get("entry", {"x": 0, "y": 0, "direction": "right", "reverse_action": ""})
                 tx, ty = entry["x"], entry["y"]
                 
@@ -1142,6 +1504,7 @@ class RouteSvc(threading.Thread):
         else:
             # Entry 단계
             if self.seq_phase == "entry":
+                self._set_nav_context("seq_entry")
                 entry = seq_data.get("entry", {"x": 0, "y": 0, "direction": "right", "reverse_action": ""})
                 tx, ty = entry["x"], entry["y"]
                 
@@ -1160,6 +1523,12 @@ class RouteSvc(threading.Thread):
                 if self.seq_point_idx < len(points):
                     grid_name = points[self.seq_point_idx]
                     col, row = grid_name_to_coords(grid_name)
+                    self._set_nav_context(
+                        "seq_point",
+                        seq_point_idx=self.seq_point_idx,
+                        grid_name=grid_name,
+                        advance_delta=1,
+                    )
                     
                     if col is not None and row is not None:
                         # Grid 좌표로 이동
@@ -1175,6 +1544,7 @@ class RouteSvc(threading.Thread):
             
             # Exit 단계
             elif self.seq_phase == "exit":
+                self._set_nav_context("seq_exit")
                 exit_data = seq_data.get("exit", {"x": 0, "y": 0, "direction": "down", "reverse_action": ""})
                 tx, ty = exit_data["x"], exit_data["y"]
                 
@@ -1190,31 +1560,62 @@ class RouteSvc(threading.Thread):
 
     # ----------------------------------------------------------
     def run(self):
-        print("[Nav] V5 Navigation Thread 시작...")
+        print("[Nav] V5 Navigation Thread started...")
         while self.state.running:
+
+            if getattr(self.state, "automation_paused", False):
+                self._clear_nav_context()
+                self._was_in_combat = False
+                self._advance_waypoint_after_combat = False
+                self._combat_resume_context = None
+                humanized_sleep(TIMING_CONFIG["idle_sleep"])
+                continue
 
             # Hot-Reload
             if self.state.last_update_time > self.last_load_time:
                 self.last_load_time = time.time()
-                print("[Sync] [Nav] 경로 설정 실시간 동기화.")
+                print("[Sync] [Nav] Reloading route settings...")
 
-            if not self.state.auto_hunt:
+            nav_requested = self.state.nav_route_enabled or self.state.nav_follow_enabled or self.state.nav_avoid_enabled
+            if not self.state.auto_hunt and not nav_requested:
+                self._clear_nav_context()
+                self._was_in_combat = False
+                self._advance_waypoint_after_combat = False
+                self._combat_resume_context = None
                 humanized_sleep(TIMING_CONFIG["idle_sleep"] * 2)
                 continue
 
+            if (self.state.nav_route_enabled or self.state.nav_follow_enabled or self.state.nav_avoid_enabled) and not self.state.sentinel_enabled:
+                self.state.sentinel_enabled = True
+                print("[Nav] Sentinel auto-enabled for navigation")
+
+            in_combat = bool(self.state.is_combat_busy)
+            if in_combat and not self._was_in_combat:
+                self._mark_combat_pause()
+            elif (not in_combat) and self._was_in_combat:
+                self._advance_waypoint_after_interrupt()
+            self._was_in_combat = in_combat
+
             # ── 0순위: 전투 중 이동 정지 (is_combat_busy 플래그 감시) ──
-            if self.state.is_combat_busy:
+            if in_combat:
                 humanized_sleep(TIMING_CONFIG["nav_loop"])
                 continue
 
+            self._clear_nav_context()
+
             # ── 1순위: Stuck Escape (막힘 감지 시 다른 로직 일시 중단) ──
-            if self.state.nav_avoid_enabled and self._check_stuck():
-                self._escape_stuck()
+            if self._check_stuck():
+                self._escape_stuck(rewind_waypoint=False)
                 humanized_sleep(TIMING_CONFIG["move_hold"])
                 continue
 
             # ── 술사 전용: 몹 밀집 중심으로 이동 후 대기 ───────────────
-            if self.state.role == "술사" and not self._is_in_combat():
+            if (
+                self.state.role == "술사"
+                and not self._is_in_combat()
+                and not self.state.nav_route_enabled
+                and not (self.state.is_connected and self.state.nav_follow_enabled)
+            ):
                 cluster_center = self._find_cluster_center()
                 if cluster_center:
                     gx, gy = cluster_center
@@ -1230,25 +1631,19 @@ class RouteSvc(threading.Thread):
             if self.state.is_connected and self.state.nav_follow_enabled:
                 follow_target = self._calc_follow_target()
                 if follow_target:
+                    self._set_nav_context("follow")
                     tx, ty = follow_target
-                    # 격수와의 거리 계산 (Grid 기반)
-                    remote_data = self.state.other_pc_data.get("LAPTOP")
-                    if remote_data:
-                        dps_x = remote_data.get("x", 0)
-                        dps_y = remote_data.get("y", 0)
-                        cx, cy = self.state.x, self.state.y
-                        dist = ((tx - cx) ** 2 + (ty - cy) ** 2) ** 0.5
-                        
-                        # 거리 1-2 Grid 내에 도달하면 정지
-                        map_data = self.state.maps_db.get(self.state.current_map)
-                        if map_data:
-                            grid_size = map_data.get("grid_size", 32)
-                            grid_dist = dist / grid_size
-                            if grid_dist <= 2:
-                                print(f"[Follow] 격수 근접 도달 (거리: {grid_dist:.1f} Grid)")
-                                humanized_sleep(TIMING_CONFIG["nav_loop"])
-                                continue
-                    
+                    cx, cy = self.state.x, self.state.y
+                    gap_x = abs(tx - cx)
+                    gap_y = abs(ty - cy)
+                    if max(gap_x, gap_y) <= 1:
+                        now = time.time()
+                        if now - self._last_follow_close_log_time >= 1.5:
+                            print(f"[Follow] Within follow range (pos gap: dx={gap_x}, dy={gap_y})")
+                            self._last_follow_close_log_time = now
+                        humanized_sleep(TIMING_CONFIG["nav_loop"])
+                        continue
+
                     self._move_toward(tx, ty)
 
             # ── 3순위: Waypoint Traversal (follow false/no target && is_in_combat false) ──
@@ -1277,9 +1672,11 @@ class RouteSvc(threading.Thread):
                     if wps:
                         if self.wp_idx >= len(wps):
                             self.wp_idx = 0
+                        self._set_nav_context("list_wp", wp_idx=self.wp_idx, advance_delta=1)
                         arrived = self._move_toward(*wps[self.wp_idx])
                         if arrived:
                             print(f"[Point] 도달: {wps[self.wp_idx]}")
                             self.wp_idx += 1
 
             humanized_sleep(TIMING_CONFIG["nav_loop"])
+

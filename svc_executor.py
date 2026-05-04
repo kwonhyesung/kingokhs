@@ -790,7 +790,7 @@ class RouteSvc(threading.Thread):
         격수가 바라보는 방향의 반대편 1~2칸 뒤를 타겟으로 설정.
         """
         # 네트워크에서 격수 데이터 확인
-        remote_data = self.state.other_pc_data.get("LAPTOP")
+        remote_data = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
         if not remote_data:
             return None
 
@@ -1107,7 +1107,7 @@ class RouteSvc(threading.Thread):
                 if follow_target:
                     tx, ty = follow_target
                     # 격수와의 거리 계산 (Grid 기반)
-                    remote_data = self.state.other_pc_data.get("LAPTOP")
+                    remote_data = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
                     if remote_data:
                         dps_x = remote_data.get("x", 0)
                         dps_y = remote_data.get("y", 0)

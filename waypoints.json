@@ -2,20 +2,24 @@
     "\ubcf5\uac74\ucc9c\ub9ac\ub9c8\uad74": {
         "1": {
             "points": [
-                "AG41",
-                "AP37",
-                "AS19"
+                "B12",
+                "H12",
+                "R13",
+                "R10",
+                "C10",
+                "C6",
+                "R3"
             ],
             "entry": {
-                "x": 32,
-                "y": 47,
+                "x": 9,
+                "y": 18,
                 "direction": "down",
                 "reverse_action": ""
             },
             "exit": {
-                "x": 19,
-                "y": 128,
-                "direction": "down",
+                "x": 9,
+                "y": 1,
+                "direction": "up",
                 "reverse_action": ""
             }
         }

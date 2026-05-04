@@ -1,15 +1,17 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import time
 import threading
 import random
 import os
 import sys
+import atexit
 import io
 import json
 import csv
 import io
+import ipaddress
 
-# 터미널 인코딩 강제 설정 (CP949 환경 대응))))
+# ?곕????몄퐫??媛뺤젣 ?ㅼ젙 (CP949 ?섍꼍 ???)))
 try:
     if sys.stdout.encoding != 'utf-8':
         sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', line_buffering=True)
@@ -42,13 +44,13 @@ import keyboard
 import threading
 import serial.tools.list_ports
 import ctypes
-import zmq
+import socket as pysocket
 import queue
 from tkinter import ttk, messagebox, simpledialog
 from PIL import Image, ImageTk
 from svc_monitor import NumericFieldScanner
 
-# Pillow 10+ 호환 리샘플링 (구버전은 정수 0 = NEAREST)
+# Pillow 10+ ?명솚 由ъ깦?뚮쭅 (援щ쾭?꾩? ?뺤닔 0 = NEAREST)
 try:
     from PIL.Image import Resampling
     _PIL_NEAREST = Resampling.NEAREST
@@ -58,13 +60,13 @@ from dataclasses import dataclass, asdict
 from typing import Tuple, Optional, Dict
 from enum import Enum, auto
 
-# 커널 클래스 임포트
+# 而ㅻ꼸 ?대옒???꾪룷??
 from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
 
-# 고해상도(65인치 등) 모니터 호환성을 위한 DPI 인식 활성화
+# 怨좏빐?곷룄(65?몄튂 ?? 紐⑤땲???명솚?깆쓣 ?꾪븳 DPI ?몄떇 ?쒖꽦??
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
@@ -82,21 +84,41 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
 LOG_FILE_STR = os.path.join(SCRIPT_DIR, "game_log_str.csv")
 
-# ZeroMQ 설정 (노트북인 경우 PUB, 데스크탑인 경우 SUB 설정 가능)
-IS_SERVER = True  # 노트북인 경우 True
-SERVER_IP = "192.168.137.1" # 노트북의 ICS IP
-ZMQ_PORT = "5555"
+DEFAULT_NETWORK_CONFIG = {
+    "role": "?꾩궗",
+    "server_ip": "192.168.137.1",
+    "bind_host": "0.0.0.0",
+    "telemetry_port": 5555,
+    "local_port": 5556,
+}
 
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 GUI_STATE_FILE = os.path.join(SCRIPT_DIR, "gui_state.json")
 TEMPLATE_DIGIT_DIR = os.path.join(SCRIPT_DIR, "temple", "digits")
 
+def load_network_config() -> dict:
+    cfg = dict(DEFAULT_NETWORK_CONFIG)
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            net = data.get("network", {})
+            if isinstance(net, dict):
+                cfg["role"] = str(net.get("role", cfg["role"]) or cfg["role"])
+                cfg["server_ip"] = str(net.get("server_ip", cfg["server_ip"]) or cfg["server_ip"])
+                cfg["bind_host"] = str(net.get("bind_host", cfg["bind_host"]) or cfg["bind_host"])
+                cfg["telemetry_port"] = int(net.get("telemetry_port", cfg["telemetry_port"]) or cfg["telemetry_port"])
+                cfg["local_port"] = int(net.get("local_port", cfg["local_port"]) or cfg["local_port"])
+    except Exception as e:
+        print(f"[Net] config load failed: {e}")
+    return cfg
+
 def dict_to_region(data: dict) -> Region:
-    """dict를 Region 객체로 변환하는 헬퍼 함수 (Grid 좌표 지원)"""
+    """Docstring."""
     if isinstance(data, Region):
         return data
     if isinstance(data, dict):
-        # Grid 좌표가 있는 경우 픽셀 좌표 우선 사용
+        # Grid 醫뚰몴媛 ?덈뒗 寃쎌슦 ?쎌? 醫뚰몴 ?곗꽑 ?ъ슜
         sx = data.get("sx_pixel", data.get("sx", 0))
         sy = data.get("sy_pixel", data.get("sy", 0))
         dx = data.get("dx_pixel", data.get("dx", 0))
@@ -108,20 +130,20 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             conf = json.load(f)
-            # 좌표 영역만 골라서 변환 (dict이고 'sx'가 있는 경우만)
+            # 醫뚰몴 ?곸뿭留?怨⑤씪??蹂??(dict?닿퀬 'sx'媛 ?덈뒗 寃쎌슦留?
             return {k: dict_to_region(v) for k, v in conf.items()
                     if isinstance(v, dict) and 'sx' in v}
-    # DEFAULT_REGIONS도 Region 객체로 변환
+    # DEFAULT_REGIONS??Region 媛앹껜濡?蹂??
     return {k: dict_to_region(v) for k, v in DEFAULT_REGIONS.items()}
 
 def save_config(regions_dict):
-    # Region 객체를 dict로 변환하여 저장 (Grid 좌표 병행 저장)
+    # Region 媛앹껜瑜?dict濡?蹂?섑븯?????(Grid 醫뚰몴 蹂묓뻾 ???
     serializable_dict = {}
     for k, v in regions_dict.items():
         if isinstance(v, Region):
-            # 기존 픽셀 좌표 유지하면서 Grid 좌표도 저장
+            # 湲곗〈 ?쎌? 醫뚰몴 ?좎??섎㈃??Grid 醫뚰몴?????
             region_dict = asdict(v)
-            # Grid 좌표가 없으면 빈 값으로 초기화
+            # Grid 醫뚰몴媛 ?놁쑝硫?鍮?媛믪쑝濡?珥덇린??
             region_dict["grid_start"] = region_dict.get("grid_start", [0, 0])
             region_dict["grid_end"] = region_dict.get("grid_end", [0, 0])
             serializable_dict[k] = region_dict
@@ -161,7 +183,7 @@ def save_gui_state(geometry: str, ui_scale: float, calibration_geometry: Optiona
     with open(GUI_STATE_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4)
 
-# 기본 좌표 설정 (ocr 인식 기본 캡쳐영역 바람의 나라 UI 기준 예시)
+# 湲곕낯 醫뚰몴 ?ㅼ젙 (ocr ?몄떇 湲곕낯 罹≪퀜?곸뿭 諛붾엺???섎씪 UI 湲곗? ?덉떆)
 DEFAULT_REGIONS = {
     "hp": {"sx": 650, "sy": 434, "dx": 740, "dy": 446},
     "mp": {"sx": 650, "sy": 447, "dx": 740, "dy": 459},
@@ -179,7 +201,7 @@ def find_game_window(substring: str) -> Optional[int]:
         title = win32gui.GetWindowText(hwnd)
         if substring in title and win32gui.IsWindowVisible(hwnd):
             found_hwnd = hwnd
-            return False # 찾았으므로 중단
+            return False # 李얠븯?쇰?濡?以묐떒
         return True
     
     try:
@@ -189,13 +211,13 @@ def find_game_window(substring: str) -> Optional[int]:
     return found_hwnd
 
 def grab_window_bg(hwnd: int, rect_ignored=None) -> Optional[Image.Image]:
-    """win32gui 기반 게임 화면 캡처 (PrintWindow로 DirectX 렌더링 캡처)"""
+    """Docstring."""
     try:
         import win32ui
-        # 클라이언트 영역 크기
+        # ?대씪?댁뼵???곸뿭 ?ш린
         _, _, width, height = win32gui.GetClientRect(hwnd)
 
-        # 화면 DC 생성
+        # ?붾㈃ DC ?앹꽦
         hwndDC = win32gui.GetWindowDC(hwnd)
         mfcDC = win32ui.CreateDCFromHandle(hwndDC)
         saveDC = mfcDC.CreateCompatibleDC()
@@ -203,17 +225,17 @@ def grab_window_bg(hwnd: int, rect_ignored=None) -> Optional[Image.Image]:
         saveBitMap.CreateCompatibleBitmap(mfcDC, width, height)
         saveDC.SelectObject(saveBitMap)
 
-        # PrintWindow: ctypes로 user32.PrintWindow 직접 호출
-        # PW_RENDERFULLCONTENT(2) = DirectX/GPU 렌더링 화면 캡처
+        # PrintWindow: ctypes濡?user32.PrintWindow 吏곸젒 ?몄텧
+        # PW_RENDERFULLCONTENT(2) = DirectX/GPU ?뚮뜑留??붾㈃ 罹≪쿂
         user32 = ctypes.windll.user32
         result = user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 2)
 
         if result == 0:
-            # PrintWindow 실패 시 BitBlt로 폴백
+            # PrintWindow ?ㅽ뙣 ??BitBlt濡??대갚
             saveDC.BitBlt((0, 0), (width, height), mfcDC, (0, 0), win32con.SRCCOPY)
 
-        # PrintWindow는 윈도우 전체(타이틀바 포함)를 캡처하므로
-        # 클라이언트 영역 오프셋을 계산하여 크롭
+        # PrintWindow???덈룄???꾩껜(??댄?諛??ы븿)瑜?罹≪쿂?섎?濡?
+        # ?대씪?댁뼵???곸뿭 ?ㅽ봽?뗭쓣 怨꾩궛?섏뿬 ?щ∼
         win_rect = win32gui.GetWindowRect(hwnd)
         client_left, client_top = win32gui.ClientToScreen(hwnd, (0, 0))
         offset_x = client_left - win_rect[0]
@@ -225,7 +247,7 @@ def grab_window_bg(hwnd: int, rect_ignored=None) -> Optional[Image.Image]:
                                (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
                                bmpstr, 'raw', 'BGRX', 0, 1)
 
-        # 클라이언트 영역만 크롭하여 반환
+        # ?대씪?댁뼵???곸뿭留??щ∼?섏뿬 諛섑솚
         img = full_img.crop((offset_x, offset_y, offset_x + width, offset_y + height))
         mfcDC.DeleteDC()
         saveDC.DeleteDC()
@@ -233,11 +255,11 @@ def grab_window_bg(hwnd: int, rect_ignored=None) -> Optional[Image.Image]:
         win32gui.DeleteObject(saveBitMap.GetHandle())
         return img
     except Exception as e:
-        print(f"[Capture] 캡처 실패: {e}")
+        print(f"[Capture] 罹≪쿂 ?ㅽ뙣: {e}")
         return None
 
 class OverlaySelector(tk.Toplevel):
-    """실시간 게임창 위에서 직접 영역을 지정하는 오버레이 선택기 (DPI 호환성 보강)"""
+    """Docstring."""
     def __init__(self, parent, hwnd, callback):
         super().__init__(parent)
         self.callback = callback
@@ -245,18 +267,18 @@ class OverlaySelector(tk.Toplevel):
         self.msg_id = None
         self.rect_id = None
 
-        # 1. 게임창 클라이언트 영역 위치 파악 (물리 좌표)
+        # 1. 寃뚯엫李??대씪?댁뼵???곸뿭 ?꾩튂 ?뚯븙 (臾쇰━ 醫뚰몴)
         left, top = win32gui.ClientToScreen(self.hwnd, (0, 0))
         _, _, w, h = win32gui.GetClientRect(self.hwnd)
 
 
-        # 2. 오버레이 설정 (표준 Tkinter를 사용하여 CustomTkinter Scaling 간섭 배제)
-        self.overrideredirect(True) # 타이틀바 제거
+        # 2. ?ㅻ쾭?덉씠 ?ㅼ젙 (?쒖? Tkinter瑜??ъ슜?섏뿬 CustomTkinter Scaling 媛꾩꽠 諛곗젣)
+        self.overrideredirect(True) # ??댄?諛??쒓굅
         self.attributes("-topmost", True)
-        self.attributes("-alpha", 0.05)  # 매우 투명하게 (5% 불투명)
+        self.attributes("-alpha", 0.05)  # 留ㅼ슦 ?щ챸?섍쾶 (5% 遺덊닾紐?
         self.geometry(f"{w}x{h}+{left}+{top}")
-        self.configure(bg="black")  # 검정 배경
-        self.lift() # 최상단으로 올림
+        self.configure(bg="black")  # 寃??諛곌꼍
+        self.lift() # 理쒖긽?⑥쑝濡??щ┝
 
         self.canvas = tk.Canvas(self, width=w, height=h, bg="black", highlightthickness=0, cursor="cross")
         self.canvas.pack(fill="both", expand=True)
@@ -266,23 +288,23 @@ class OverlaySelector(tk.Toplevel):
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
-        self.bind("<Escape>", self.on_cancel)  # ESC 취소
+        self.bind("<Escape>", self.on_cancel)  # ESC 痍⑥냼
 
-        # 안내 문구
-        self.msg_id = self.canvas.create_text(w//2, h//2, text="영역을 드래그하세요\n(ESC: 취소 / 드래그 완료 시 자동 저장)",
+        # ?덈궡 臾멸뎄
+        self.msg_id = self.canvas.create_text(w//2, h//2, text="Drag to select an area\n(ESC: cancel / finish box automatically)",
                                fill="#FFFFFF", font=("Inter", 16, "bold"), justify="center")
 
     def _screen_to_client(self, screen_x, screen_y):
-        """화면 좌표 → 게임창 클라이언트 좌표 (물리 픽셀, DPI 무관)"""
+        """Docstring."""
         cx, cy = win32gui.ScreenToClient(self.hwnd, (screen_x, screen_y))
         return cx, cy
 
     def on_press(self, event):
-        # Tkinter 좌표 대신 화면 좌표를 클라이언트 좌표로 변환
+        # Tkinter 醫뚰몴 ????붾㈃ 醫뚰몴瑜??대씪?댁뼵??醫뚰몴濡?蹂??
         screen_x, screen_y = win32api.GetCursorPos()
         self.start_cx, self.start_cy = self._screen_to_client(screen_x, screen_y)
 
-        # Tkinter 캔버스용 좌표 (시각적 피드백만)
+        # Tkinter 罹붾쾭?ㅼ슜 醫뚰몴 (?쒓컖???쇰뱶諛깅쭔)
         self.start_x, self.start_y = event.x, event.y
         if self.msg_id:
             self.canvas.delete(self.msg_id)
@@ -294,14 +316,14 @@ class OverlaySelector(tk.Toplevel):
         self.canvas.coords(self.rect_id, self.start_x, self.start_y, event.x, event.y)
 
     def on_release(self, event):
-        # Tkinter 좌표 대신 화면 좌표를 클라이언트 좌표로 변환 (물리 픽셀)
+        # Tkinter 醫뚰몴 ????붾㈃ 醫뚰몴瑜??대씪?댁뼵??醫뚰몴濡?蹂??(臾쇰━ ?쎌?)
         screen_x, screen_y = win32api.GetCursorPos()
         end_cx, end_cy = self._screen_to_client(screen_x, screen_y)
 
-        # 드래그 완료 즉시 캡처
+        # ?쒕옒洹??꾨즺 利됱떆 罹≪쿂
         captured_img = grab_window_bg(self.hwnd)
 
-        # 물리 픽셀 좌표 정렬 (DPI 스케일링 완전 무관)
+        # 臾쇰━ ?쎌? 醫뚰몴 ?뺣젹 (DPI ?ㅼ??쇰쭅 ?꾩쟾 臾닿?)
         sx = min(self.start_cx, end_cx)
         sy = min(self.start_cy, end_cy)
         dx = max(self.start_cx, end_cx)
@@ -316,25 +338,25 @@ class OverlaySelector(tk.Toplevel):
                 cdy = max(csy + 1, min(ih, dy))
                 
                 crop = captured_img.crop((csx, csy, cdx, cdy))
-                print(f"[DEBUG] 샘플링 물리좌표: ({sx},{sy})-({dx},{dy}) | 보정좌표: ({csx},{csy})-({cdx},{cdy}) | 캡처크기: {iw}x{ih}")
+                print(f"[DEBUG] ?섑뵆留?臾쇰━醫뚰몴: ({sx},{sy})-({dx},{dy}) | 蹂댁젙醫뚰몴: ({csx},{csy})-({cdx},{cdy}) | 罹≪쿂?ш린: {iw}x{ih}")
             except Exception as e:
-                print(f"[DEBUG] 크롭 처리 중 오류: {e}")
+                print(f"[DEBUG] ?щ∼ 泥섎━ 以??ㅻ쪟: {e}")
         else:
-            print(f"[DEBUG] 캡처 실패! captured_img=None")
+            print(f"[DEBUG] 罹≪쿂 ?ㅽ뙣! captured_img=None")
 
-        # 오버레이 즉시 닫기
+        # ?ㅻ쾭?덉씠 利됱떆 ?リ린
         self.destroy()
 
-        # 좌표 + 캡처 이미지 함께 전달
+        # 醫뚰몴 + 罹≪쿂 ?대?吏 ?④퍡 ?꾨떖
         self.callback(sx, sy, dx, dy, captured_img)
 
     def on_cancel(self, event):
-        """ESC 키로 취소"""
+        """Docstring."""
         self.destroy()
-        print("[DEBUG] 샘플링 취소됨")
+        print("[DEBUG] 샘플링 취소")
 
 class ROIIndicator(tk.Toplevel):
-    """지정된 OCR 영역을 게임 화면 위에 상시 표시하는 가이드 레이어 (Click-through)"""
+    """Docstring."""
     def __init__(self, parent, hwnd):
         super().__init__(parent)
         self.hwnd = hwnd
@@ -342,13 +364,13 @@ class ROIIndicator(tk.Toplevel):
         
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.attributes("-transparentcolor", "black") # 블랙 색상은 100% 투명 및 클릭-스루
+        self.attributes("-transparentcolor", "black") # 釉붾옓 ?됱긽? 100% ?щ챸 諛??대┃-?ㅻ（
         self.configure(bg="black")
         
         self.canvas = tk.Canvas(self, bg="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         
-        self.withdraw() # 초기에는 숨김
+        self.withdraw() # 珥덇린?먮뒗 ?④?
 
     def update_position(self, regions):
         if not self.visible:
@@ -360,7 +382,7 @@ class ROIIndicator(tk.Toplevel):
             _, _, w, h = win32gui.GetClientRect(self.hwnd)
             self.geometry(f"{w}x{h}+{left}+{top}")
             self.deiconify()
-            self.lift()  # 최상단으로 강제 이동
+            self.lift()  # 理쒖긽?⑥쑝濡?媛뺤젣 ?대룞
 
             self.canvas.delete("all")
             # 2026 SOTA neon colors
@@ -368,25 +390,25 @@ class ROIIndicator(tk.Toplevel):
 
             for name, reg in regions.items():
                 color = colors.get(name, "#FFFFFF")
-                # 실제 인식 영역보다 사방으로 3px 넓게 그려서 캡처 영역 침범 방지
+                # ?ㅼ젣 ?몄떇 ?곸뿭蹂대떎 ?щ갑?쇰줈 3px ?볤쾶 洹몃젮??罹≪쿂 ?곸뿭 移⑤쾾 諛⑹?
                 self.canvas.create_rectangle(reg.sx - 3, reg.sy - 3, reg.dx + 3, reg.dy + 3, outline=color, width=2)
-                # [텍스트 라벨 삭제됨 - OCR 간섭 방지]
+                # [?띿뒪???쇰꺼 ??젣??- OCR 媛꾩꽠 諛⑹?]
         except:
             self.withdraw()
 
 class GridIndicator(tk.Toplevel):
-    """24x24 격자를 게임 화면 위에 상시 표시하는 오버레이 레이어 (Click-through)"""
+    """Docstring."""
     def __init__(self, parent, hwnd, state):
         super().__init__(parent)
         self.hwnd = hwnd
         self.state = state
         self.visible = False
-        self.grid_size = 48.2  # float (누적오차 방지)
+        self.grid_size = 48.2  # float (?꾩쟻?ㅼ감 諛⑹?)
         
-        # config.json에서 오프셋 불러오기
+        # config.json?먯꽌 ?ㅽ봽??遺덈윭?ㅺ린
         config_file = os.path.join(SCRIPT_DIR, "config.json")
-        self.offset_x = 0  # 기본값
-        self.offset_y = 0  # 기본값
+        self.offset_x = 0  # 湲곕낯媛?
+        self.offset_y = 0  # 湲곕낯媛?
         if os.path.exists(config_file):
             try:
                 with open(config_file, 'r', encoding='utf-8') as f:
@@ -396,55 +418,55 @@ class GridIndicator(tk.Toplevel):
             except Exception:
                 pass
         
-        self.grid_alpha = 0.5  # 투명도 기본값 (0.0 ~ 1.0)
-        # 캐릭터가 화면상 고정되는 기준 타일 (클릭 좌표 변환/표시 공통 사용)
+        self.grid_alpha = 0.5  # ?щ챸??湲곕낯媛?(0.0 ~ 1.0)
+        # 罹먮┃?곌? ?붾㈃??怨좎젙?섎뒗 湲곗? ???(?대┃ 醫뚰몴 蹂???쒖떆 怨듯넻 ?ъ슜)
         self.char_screen_grid_x = 9
-        self.char_screen_grid_y = 11  # J12 타일 기준
-        self.item_positions = []  # 아이템 grid 좌표 리스트 [(gx, gy), ...]
+        self.char_screen_grid_y = 11  # J12 ???湲곗?
+        self.item_positions = []  # ?꾩씠??grid 醫뚰몴 由ъ뒪??[(gx, gy), ...]
         
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.attributes("-transparentcolor", "black") # 블랙 색상은 100% 투명 및 클릭-스루
+        self.attributes("-transparentcolor", "black") # 釉붾옓 ?됱긽? 100% ?щ챸 諛??대┃-?ㅻ（
         self.configure(bg="black")
         
         self.canvas = tk.Canvas(self, bg="black", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         
-        # 마우스 클릭 이벤트 바인딩
+        # 留덉슦???대┃ ?대깽??諛붿씤??
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         
-        # 좌표 표시 라벨
+        # 醫뚰몴 ?쒖떆 ?쇰꺼
         self.coord_label = tk.Label(self, text="", bg="black", fg="#00FF00", font=("Arial", 10))
         self.coord_label.place(x=10, y=10)
         
-        self.withdraw() # 초기에는 숨김
+        self.withdraw() # 珥덇린?먮뒗 ?④?
 
     def set_alpha(self, alpha):
-        """투명도 설정 (0.0 ~ 1.0)"""
+        """Docstring."""
         self.grid_alpha = max(0.0, min(1.0, alpha))
         self.attributes("-alpha", self.grid_alpha)
 
     def update_item_positions(self, item_grids):
-        """아이템 grid 좌표 리스트 업데이트"""
+        """Docstring."""
         self.item_positions = item_grids
 
     def on_canvas_click(self, event):
-        """마우스 클릭 시 좌표 표시"""
+        """Docstring."""
         if not self.visible:
             return
 
-        # 윈도우 좌표 (클릭한 위치)
+        # ?덈룄??醫뚰몴 (?대┃???꾩튂)
         window_x = event.x
         window_y = event.y
 
-        # 게임 좌표 계산 (그리드 좌표로 변환)
+        # 寃뚯엫 醫뚰몴 怨꾩궛 (洹몃━??醫뚰몴濡?蹂??
         try:
-            # ── 확정 오프셋: sx=276, sy=32 / 격자 크기 48.2 ──
-            # 공식: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
+            # ?? ?뺤젙 ?ㅽ봽?? sx=276, sy=32 / 寃⑹옄 ?ш린 48.2 ??
+            # 怨듭떇: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
             config_file = os.path.join(SCRIPT_DIR, "config.json")
-            play_area_sx = 276  # 확정 오프셋
-            play_area_sy = 32   # 확정 오프셋
-            grid_size = 48.2    # float (누적오차 방지)
+            play_area_sx = 276  # ?뺤젙 ?ㅽ봽??
+            play_area_sy = 32   # ?뺤젙 ?ㅽ봽??
+            grid_size = 48.2    # float (?꾩쟻?ㅼ감 諛⑹?)
             if os.path.exists(config_file):
                 try:
                     with open(config_file, 'r', encoding='utf-8') as f:
@@ -456,20 +478,20 @@ class GridIndicator(tk.Toplevel):
                 except Exception:
                     pass
 
-            # 격자 시작점 (play_area 기준 + offset)
+            # 寃⑹옄 ?쒖옉??(play_area 湲곗? + offset)
             grid_start_x = play_area_sx + self.offset_x
             grid_start_y = play_area_sy + self.offset_y
 
-            # 클릭한 화면 격자 인덱스: float 나눗셈 후 int 변환
+            # ?대┃???붾㈃ 寃⑹옄 ?몃뜳?? float ?섎닓????int 蹂??
             grid_x = int((window_x - grid_start_x) / grid_size)
             grid_y = int((window_y - grid_start_y) / grid_size)
 
-            # GameState에서 최신 절대 좌표 취득
+            # GameState?먯꽌 理쒖떊 ?덈? 醫뚰몴 痍⑤뱷
             data = self.state.get_all() if hasattr(self.state, "get_all") else {}
             my_world_x = int(data.get("x", getattr(self.state, "x", 0)))
             my_world_y = int(data.get("y", getattr(self.state, "y", 0)))
 
-            # 표시용: x/y는 4자리 고정 문자열(x_str/y_str) 우선 (누락은 'x')
+            # ?쒖떆?? x/y??4?먮━ 怨좎젙 臾몄옄??x_str/y_str) ?곗꽑 (?꾨씫? 'x')
             my_world_x_str = str(data.get("x_str", ""))
             my_world_y_str = str(data.get("y_str", ""))
             if not my_world_x_str:
@@ -477,29 +499,29 @@ class GridIndicator(tk.Toplevel):
             if not my_world_y_str:
                 my_world_y_str = f"{my_world_y:04d}"
 
-            # 캐릭터가 화면상에 있는 실제 동적 타일 좌표(me_grid)를 가져옴
+            # 罹먮┃?곌? ?붾㈃?곸뿉 ?덈뒗 ?ㅼ젣 ?숈쟻 ???醫뚰몴(me_grid)瑜?媛?몄샂
             me_data = self.state.entities.get("me", {}) if hasattr(self.state, "entities") else {}
             me_grid = me_data.get("grid", (self.char_screen_grid_x, self.char_screen_grid_y))
             char_screen_grid_x, char_screen_grid_y = me_grid
 
-            # 클릭한 월드 좌표 산출
+            # ?대┃???붾뱶 醫뚰몴 ?곗텧
             target_world_x = my_world_x + (grid_x - char_screen_grid_x)
             target_world_y = my_world_y + (grid_y - char_screen_grid_y)
 
-            # 클릭한 타일명
+            # ?대┃????쇰챸
             tile_col = chr(ord('A') + grid_x) if grid_x >= 0 else "?"
             tile_row = str(grid_y + 1)
             tile_name = f"{tile_col}{tile_row}"
 
-            # 좌표 표시 (검증 가능한 상세 포맷)
+            # 醫뚰몴 ?쒖떆 (寃利?媛?ν븳 ?곸꽭 ?щ㎎)
             coord_text = (
-                f"[내 좌표: {my_world_x_str}, {my_world_y_str}] | "
-                f"클릭한 타일: {tile_name} | "
-                f"계산된 월드 좌표: {target_world_x}, {target_world_y}"
+                f"[??醫뚰몴: {my_world_x_str}, {my_world_y_str}] | "
+                f"?대┃????? {tile_name} | "
+                f"怨꾩궛???붾뱶 醫뚰몴: {target_world_x}, {target_world_y}"
             )
             self.coord_label.configure(text=coord_text)
             
-            # 클릭한 위치에 녹색 점 표시
+            # ?대┃???꾩튂???뱀깋 ???쒖떆
             self.canvas.delete("click_marker")
             self.canvas.create_oval(window_x - 3, window_y - 3, window_x + 3, window_y + 3,
                                   fill="#00FF00", outline="#00FF00", tags="click_marker")
@@ -516,16 +538,16 @@ class GridIndicator(tk.Toplevel):
             _, _, w, h = win32gui.GetClientRect(self.hwnd)
             self.geometry(f"{w}x{h}+{left}+{top}")
             self.deiconify()
-            self.lift()  # 최상단으로 강제 이동
+            self.lift()  # 理쒖긽?⑥쑝濡?媛뺤젣 ?대룞
 
             self.canvas.delete("all")
 
-            # ── 확정 오프셋: sx=276, sy=32 / 격자 크기 48.2 ──
-            # 공식: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
+            # ?? ?뺤젙 ?ㅽ봽?? sx=276, sy=32 / 寃⑹옄 ?ш린 48.2 ??
+            # 怨듭떇: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
             config_file = os.path.join(SCRIPT_DIR, "config.json")
-            play_area_sx = 276  # 확정 오프셋
-            play_area_sy = 32   # 확정 오프셋
-            grid_size = 48.2    # float (누적오차 방지)
+            play_area_sx = 276  # ?뺤젙 ?ㅽ봽??
+            play_area_sy = 32   # ?뺤젙 ?ㅽ봽??
+            grid_size = 48.2    # float (?꾩쟻?ㅼ감 諛⑹?)
             if os.path.exists(config_file):
                 try:
                     with open(config_file, 'r', encoding='utf-8') as f:
@@ -537,36 +559,36 @@ class GridIndicator(tk.Toplevel):
                 except Exception:
                     pass
 
-            # 격자 시작점 (play_area 기준 + offset)
+            # 寃⑹옄 ?쒖옉??(play_area 湲곗? + offset)
             grid_start_x = play_area_sx + self.offset_x
             grid_start_y = play_area_sy + self.offset_y
             tile_size = grid_size
             
-            # 격자 수 제한 (가로 19칸 a1~S1, 세로 17칸 a1~a17)
+            # 寃⑹옄 ???쒗븳 (媛濡?19移?a1~S1, ?몃줈 17移?a1~a17)
             grid_cols = 19
             grid_rows = 17
 
-            # 격자 라인 그리기 (float grid_size → round로 정수 변환)
+            # 寃⑹옄 ?쇱씤 洹몃━湲?(float grid_size ??round濡??뺤닔 蹂??
             for i in range(grid_cols + 1):
                 x = round(grid_start_x + i * tile_size)
                 x_end = round(grid_start_y + grid_rows * tile_size)
                 self.canvas.create_line(x, round(grid_start_y), x, x_end, fill="#FFFFFF", width=1)
             
-            # 격자 라인 그리기 (17행 row=16 제외)
+            # 寃⑹옄 ?쇱씤 洹몃━湲?(17??row=16 ?쒖쇅)
             for i in range(grid_rows + 1):
-                if i == 16:  # 17행 건너뜀
+                if i == 16:  # 17??嫄대꼫?
                     continue
                 y = round(grid_start_y + i * tile_size)
                 x_end = round(grid_start_x + grid_cols * tile_size)
                 self.canvas.create_line(round(grid_start_x), y, x_end, y, fill="#FFFFFF", width=1)
             
-            # 테두리 칸에 4px 간격 추가 격자 그리기
-            # a열 (col=0), r열 (col=17), 1행 (row=0), 17행 (row=16)
-            border_cols = [0, grid_cols - 1]  # a열, r열
-            border_rows = [0, grid_rows - 1]  # 1행, 17행
+            # ?뚮몢由?移몄뿉 4px 媛꾧꺽 異붽? 寃⑹옄 洹몃━湲?
+            # a??(col=0), r??(col=17), 1??(row=0), 17??(row=16)
+            border_cols = [0, grid_cols - 1]  # a?? r??
+            border_rows = [0, grid_rows - 1]  # 1?? 17??
             fine_spacing = 4
             
-            # 테두리 열에 세로로 추가 격자 (테두리 칸 내부)
+            # ?뚮몢由??댁뿉 ?몃줈濡?異붽? 寃⑹옄 (?뚮몢由?移??대?)
             for col in border_cols:
                 col_start_x = round(grid_start_x + col * tile_size)
                 col_end_x = round(grid_start_x + (col + 1) * tile_size)
@@ -574,7 +596,7 @@ class GridIndicator(tk.Toplevel):
                     y = round(grid_start_y) + i
                     self.canvas.create_line(col_start_x, y, col_end_x, y, fill="#FFFFFF", width=1)
             
-            # 테두리 행에 가로로 추가 격자 (테두리 칸 내부)
+            # ?뚮몢由??됱뿉 媛濡쒕줈 異붽? 寃⑹옄 (?뚮몢由?移??대?)
             for row in border_rows:
                 row_start_y = round(grid_start_y + row * tile_size)
                 row_end_y = round(grid_start_y + (row + 1) * tile_size)
@@ -582,7 +604,7 @@ class GridIndicator(tk.Toplevel):
                     x = round(grid_start_x) + i
                     self.canvas.create_line(x, row_start_y, x, row_end_y, fill="#FFFFFF", width=1)
 
-            # 아이템 위치에 녹색 점 및 좌표 표시
+            # ?꾩씠???꾩튂???뱀깋 ??諛?醫뚰몴 ?쒖떆
             data = self.state.get_all() if hasattr(self.state, "get_all") else {}
             my_world_x = int(data.get("x", getattr(self.state, "x", 0)))
             my_world_y = int(data.get("y", getattr(self.state, "y", 0)))
@@ -595,7 +617,7 @@ class GridIndicator(tk.Toplevel):
                                             item_x + 4, item_y + 4,
                                             fill="#00FF00", outline="#00FF00")
 
-                    # Grid 좌표와 POS_X,Y 좌표 계산
+                    # Grid 醫뚰몴? POS_X,Y 醫뚰몴 怨꾩궛
                     col_name = chr(ord('A') + gx)
                     row_name = str(gy + 1)
                     grid_name = f"{col_name}{row_name}"
@@ -607,41 +629,41 @@ class GridIndicator(tk.Toplevel):
                     pos_y = my_world_y + (gy - char_grid_y)
                     coord_text = f"{grid_name}\n({pos_x},{pos_y})"
 
-                    # 좌표 텍스트 표시 (녹색 점 옆)
+                    # 醫뚰몴 ?띿뒪???쒖떆 (?뱀깋 ????
                     self.canvas.create_text(item_x + 8, item_y, text=coord_text,
                                             fill="#00FF00", font=("Arial", 7), anchor="w")
 
-            # 격자 이름 표시
+            # 寃⑹옄 ?대쫫 ?쒖떆
             for row in range(grid_rows):
                 for col in range(grid_cols):
-                    # 정수 인덱스
+                    # ?뺤닔 ?몃뜳??
                     grid_x = col
                     grid_y = row
                     
-                    # 엑셀 방식 변환 (A1, B2...)
+                    # ?묒? 諛⑹떇 蹂??(A1, B2...)
                     col_name = chr(ord('A') + grid_x)
                     row_name = str(grid_y + 1)
                     grid_name = f"{col_name}{row_name}"
                     
-                    # 격자 칸 중앙에 텍스트 표시
+                    # 寃⑹옄 移?以묒븰???띿뒪???쒖떆
                     x = grid_start_x + grid_x * tile_size + tile_size // 2
                     y = grid_start_y + grid_y * tile_size + tile_size // 2
                     self.canvas.create_text(x, y, text=grid_name, fill="#FFFFFF", font=("Arial", 8))
         except:
             self.withdraw()
 
-# hw는 svc_kernel에서 임포트됨
-# AIController는 LogicSvc로 대체됨
-# GameState는 svc_kernel에서 임포트됨
+# hw??svc_kernel?먯꽌 ?꾪룷?몃맖
+# AIController??LogicSvc濡??泥대맖
+# GameState??svc_kernel?먯꽌 ?꾪룷?몃맖
 
-# DXCam 제거됨 - OBS 가상카메라 모드 사용
-
-# --------------------------------------------------------------------------------
-# 3. 게임 액션 함수 (원본 스크립트 이식)
-# execute_* 함수들은 LogicSvc로 대체됨
+# DXCam ?쒓굅??- OBS 媛?곸뭅硫붾씪 紐⑤뱶 ?ъ슜
 
 # --------------------------------------------------------------------------------
-# 5. 데이터 저장 스레드 (Logger)
+# 3. 寃뚯엫 ?≪뀡 ?⑥닔 (?먮낯 ?ㅽ겕由쏀듃 ?댁떇)
+# execute_* ?⑥닔?ㅼ? LogicSvc濡??泥대맖
+
+# --------------------------------------------------------------------------------
+# 5. ?곗씠??????ㅻ젅??(Logger)
 # --------------------------------------------------------------------------------
 class LoggerThread(threading.Thread):
     def __init__(self, state: GameState):
@@ -655,8 +677,8 @@ class LoggerThread(threading.Thread):
         ]
 
     def run(self):
-        print("[Log] Logger Thread Started...")
-        # 파일이 없으면 헤더 작성
+        print("[Log] Logger thread started...")
+        # ?뚯씪???놁쑝硫??ㅻ뜑 ?묒꽦
         if not os.path.exists(LOG_FILE):
             with open(LOG_FILE, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -687,74 +709,261 @@ class LoggerThread(threading.Thread):
             time.sleep(1)
 
 # --------------------------------------------------------------------------------
-# 6. ZeroMQ 네트워크 스레드 (PUB/SUB)
+# 6. ZeroMQ ?ㅽ듃?뚰겕 ?ㅻ젅??(PUB/SUB)
 # --------------------------------------------------------------------------------
 class NetworkThread(threading.Thread):
-    def __init__(self, state: GameState, is_server=True):
+    def __init__(self, state: GameState, network_cfg: Optional[dict] = None):
         super().__init__(daemon=True)
         self.state = state
-        self.is_server = is_server
-        self.context = zmq.Context()
+        self.cfg = dict(network_cfg or load_network_config())
+        self.role = str(self.cfg.get('role', getattr(state, 'network_role', '도사')) or '도사').strip()
+        self.server_ip = str(self.cfg.get('server_ip', getattr(state, 'network_server_ip', '192.168.137.1')) or '192.168.137.1')
+        self.bind_host = str(self.cfg.get('bind_host', getattr(state, 'network_bind_host', '0.0.0.0')) or '0.0.0.0')
+        self.telemetry_port = int(self.cfg.get('telemetry_port', getattr(state, 'network_telemetry_port', 5555)) or 5555)
+        self.local_port = int(self.cfg.get('local_port', getattr(state, 'network_local_port', 5556)) or 5556)
+        self.is_server = self.role == '도사'
+        self.sock: Optional[pysocket.socket] = None
+        self._peers: dict[tuple[str, int], dict] = {}
+        self._last_send = 0.0
+        self._last_broadcast = 0.0
+        self._warned_connreset = False
+        self._warned_server_ip = False
+        self._seen_rx_senders: set[str] = set()
+        self.send_interval = 0.05
+        self.broadcast_interval = 0.05
+
+        self.state.network_role = self.role
+        self.state.network_server_ip = self.server_ip
+        self.state.network_bind_host = self.bind_host
+        self.state.network_telemetry_port = self.telemetry_port
+        self.state.network_local_port = self.local_port
+
+    def _make_socket(self) -> pysocket.socket:
+        sock = pysocket.socket(pysocket.AF_INET, pysocket.SOCK_DGRAM)
+        sock.setsockopt(pysocket.SOL_SOCKET, pysocket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(pysocket.SOL_SOCKET, pysocket.SO_REUSEPORT, 1)
+        except Exception:
+            pass
+        udp_connreset = getattr(pysocket, "SIO_UDP_CONNRESET", 0x9800000C)
+        try:
+            sock.ioctl(udp_connreset, False)
+        except Exception:
+            pass
+        sock.settimeout(0.01)
+        return sock
+
+    def _is_reachable_host_ip(self, host: str) -> bool:
+        try:
+            ip = ipaddress.ip_address(host)
+            return not (ip.is_loopback or ip.is_unspecified)
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _encode_payload(payload: dict) -> bytes:
+        return json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+
+    @staticmethod
+    def _decode_payload(data: bytes) -> Optional[dict]:
+        try:
+            text = data.decode('utf-8', errors='ignore').strip()
+            if not text:
+                return None
+            return json.loads(text)
+        except Exception:
+            return None
+
+    def _register_peer(self, addr: tuple[str, int], payload: dict, sender: str) -> None:
+        status = payload.get('status', {}) if isinstance(payload, dict) else {}
+        self._peers[addr] = {
+            'sender': sender,
+            'role': str(status.get('network_role') or status.get('role') or '').strip(),
+            'seen_at': time.time(),
+        }
+
+    def _broadcast_snapshot(self) -> None:
+        if not self.sock or not self._peers:
+            return
+        payload = self.state.build_share_payload()
+        payload['kind'] = 'telemetry'
+        payload['role'] = self.role
+        payload['sender_role'] = self.role
+        payload['peer_count'] = len(self._peers)
+        raw = self._encode_payload(payload)
+        stale = []
+        for addr in list(self._peers.keys()):
+            try:
+                self.sock.sendto(raw, addr)
+            except Exception:
+                stale.append(addr)
+        for addr in stale:
+            self._peers.pop(addr, None)
+
+    def _send_telemetry(self) -> None:
+        if not self.sock:
+            return
+        payload = self.state.build_share_payload()
+        payload['kind'] = 'telemetry'
+        payload['role'] = self.role
+        payload['sender_role'] = self.role
+        raw = self._encode_payload(payload)
+        try:
+            self.sock.sendto(raw, (self.server_ip, self.telemetry_port))
+        except OSError as e:
+            if getattr(e, "winerror", None) == 10054:
+                if not self._warned_connreset:
+                    print(
+                        f"[Net] UDP reset ignored for client. Check server_ip={self.server_ip} "
+                        f"and make sure the dosa PC is already running."
+                    )
+                    self._warned_connreset = True
+                return
+            raise
+
+    def _drain_event_outbox(self) -> None:
+        outbox = getattr(self.state, 'network_outbox', None)
+        if outbox is None:
+            return
+        while True:
+            try:
+                event = outbox.get_nowait()
+            except queue.Empty:
+                break
+            except Exception:
+                break
+            if not isinstance(event, dict):
+                continue
+            repeat = max(1, int(event.get('repeat', 1) or 1))
+            payload = self.state.build_share_payload()
+            payload['kind'] = 'event'
+            payload['event_type'] = str(event.get('event_type', '') or '').strip()
+            payload['event_payload'] = dict(event.get('payload') or {})
+            payload['event_repeat'] = repeat
+            raw = self._encode_payload(payload)
+            targets = list(self._peers.keys()) if self.is_server else [(self.server_ip, self.telemetry_port)]
+            for _ in range(repeat):
+                for addr in targets:
+                    try:
+                        self.sock.sendto(raw, addr)
+                    except Exception:
+                        pass
 
     def run(self):
         try:
+            self.sock = self._make_socket()
             if self.is_server:
-                socket = self.context.socket(zmq.PUB)
-                socket.bind(f"tcp://*:{ZMQ_PORT}")
-                self.state.is_connected = True
-                print("[Net] 서버 모드 연결 성공")
+                self.sock.bind((self.bind_host, self.telemetry_port))
+                print(f'[Net] UDP hub connected: {self.bind_host}:{self.telemetry_port} (role={self.role})')
             else:
-                socket = self.context.socket(zmq.SUB)
-                socket.connect(f"tcp://{SERVER_IP}:{ZMQ_PORT}")
-                socket.setsockopt_string(zmq.SUBSCRIBE, "")
-                self.state.is_connected = True
-                print("[Net] 클라이언트 모드 연결 성공")
+                self.sock.bind((self.bind_host, self.local_port))
+                print(f'[Net] UDP client connected: {self.bind_host}:{self.local_port} -> {self.server_ip}:{self.telemetry_port} (role={self.role})')
+                if not self._is_reachable_host_ip(self.server_ip) and not self._warned_server_ip:
+                    print(
+                        f"[Net] WARNING: server_ip={self.server_ip} looks unusable. "
+                        "Set it to the dosa PC's active IPv4 address on the network you are actually using."
+                    )
+                    self._warned_server_ip = True
+            self.state.is_connected = True
 
             while self.state.running:
-                if self.is_server:
-                    data = self.state.get_all()
-                    socket.send_string(json.dumps(data) + (" " * random.randint(1,16)))
-                    time.sleep(0.1)
-                else:
-                    try:
-                        msg = socket.recv_string(flags=zmq.NOBLOCK)
-                        remote_data = json.loads(msg)
-                        self.state.update_other("LAPTOP", remote_data)
-                        # 수신된 데이터 병합 (last_move_dir, nav_follow_enabled)
-                        if "last_move_dir" in remote_data:
-                            self.state.last_move_dir = remote_data["last_move_dir"]
-                        if "nav_follow_enabled" in remote_data:
-                            self.state.nav_follow_enabled = remote_data["nav_follow_enabled"]
-                    except zmq.Again:
-                        time.sleep(0.01)
-        except Exception as e: 
-            print(f"[Net] Error: {e}")
-            self.state.is_connected = False
+                now = time.time()
+                try:
+                    self._drain_event_outbox()
+                except Exception as e:
+                    print(f'[Net] event send failed: {e}')
 
-# --------------------------------------------------------------------------------
-# 7. UI 클래스 (초밀집 하이엔드 디자인)
+                if not self.is_server and (now - self._last_send) >= self.send_interval:
+                    try:
+                        self._send_telemetry()
+                        self._last_send = now
+                    except Exception as e:
+                        print(f'[Net] telemetry send failed: {e}')
+
+                if self.is_server and (now - self._last_broadcast) >= self.broadcast_interval:
+                    try:
+                        self._broadcast_snapshot()
+                        self._last_broadcast = now
+                    except Exception as e:
+                        print(f'[Net] broadcast failed: {e}')
+
+                try:
+                    data, addr = self.sock.recvfrom(65535)
+                except pysocket.timeout:
+                    continue
+                except BlockingIOError:
+                    continue
+                except ConnectionResetError:
+                    if not self._warned_connreset:
+                        print(
+                            "[Net] UDP reset ignored. Usually this means the target port is closed, "
+                            "the server is not running yet, or server_ip is wrong."
+                        )
+                        self._warned_connreset = True
+                    continue
+                except OSError as e:
+                    if getattr(e, "winerror", None) == 10054:
+                        if not self._warned_connreset:
+                            print(
+                                "[Net] UDP reset ignored. Usually this means the target port is closed, "
+                                "the server is not running yet, or server_ip is wrong."
+                            )
+                            self._warned_connreset = True
+                        continue
+                    raise
+
+                payload = self._decode_payload(data)
+                if not isinstance(payload, dict):
+                    continue
+
+                sender, remote_data = self.state.apply_remote_payload(payload)
+                if self.is_server:
+                    self._register_peer(addr, payload, sender)
+                    if sender not in self._seen_rx_senders:
+                        seq = int(payload.get("seq", 0) or 0)
+                        kind = str(payload.get("kind", "") or "")
+                        role = str(payload.get("role") or payload.get("sender_role") or "")
+                        print(
+                            f"[Net][RX] sender={sender} role={role} kind={kind} seq={seq} addr={addr[0]}:{addr[1]}"
+                        )
+                        self._seen_rx_senders.add(sender)
+                    self._last_broadcast = 0.0
+                else:
+                    # Keep remote telemetry in other_pc_data only; local nav toggles stay local.
+                    pass
+        except Exception as e:
+            print(f'[Net] Error: {e}')
+            self.state.is_connected = False
+        finally:
+            try:
+                if self.sock:
+                    self.sock.close()
+            except Exception:
+                pass
+
+# --------------------------------------------------------------------------------# 7. UI ?대옒??(珥덈?吏??섏씠?붾뱶 ?붿옄??
 # --------------------------------------------------------------------------------
 class AppView:
     def __init__(self, state: GameState, hwnd=None):
         self.state = state
         self.hwnd = hwnd
         self.root = ctk.CTk()
-        # GameState의 gui_update_queue 사용 (중복 큐 제거)
-        self.waypoint_index = 0  # 순차적 이동용 인덱스
+        # GameState??gui_update_queue ?ъ슜 (以묐났 ???쒓굅)
+        self.waypoint_index = 0  # ?쒖감???대룞???몃뜳??
         self.ui_scale = 1.0
         self.ui_scale_step = 0.05
         self.ui_scale_min = 0.5
         self.ui_scale_max = 2.0
         self.root.title("SYSTEM PARALLEL SOTA v2.0")
         
-        # 폰트 먼저 선언 (Ultra-Compact 디자인: 9pt)
+        # ?고듃 癒쇱? ?좎뼵 (Ultra-Compact ?붿옄?? 9pt)
         self.header_font = ctk.CTkFont(family="Orbitron", size=12, weight="bold")
         self.main_font = ctk.CTkFont(family="Inter", size=9)
         
-        # 상태 로드 (geometry 설정 등)
+        # ?곹깭 濡쒕뱶 (geometry ?ㅼ젙 ??
         self.restore_gui_state()
         
-        # 마법 데이터 로드 및 초기화
+        # 留덈쾿 ?곗씠??濡쒕뱶 諛?珥덇린??
         self.spell_db_path = os.path.join(SCRIPT_DIR, "spells_config.json")
         self.picked_spell = None
         self.dnd_spell = None
@@ -763,24 +972,25 @@ class AppView:
         
         self.create_widgets()
         self.bind_global_zoom_controls()
-        self.last_values = {}  # Dirty Checking용 캐시
-        self.frame_count = 0  # 성능 측정용 프레임 카운터
+        self.last_values = {}  # Dirty Checking??罹먯떆
+        self.frame_count = 0  # ?깅뒫 痢≪젙???꾨젅??移댁슫??
+        self._paused_control_mode = "NONE"
         
-        # Tab별 렌더링 스위치 (리소스 관리)
+        # Tab蹂??뚮뜑留??ㅼ쐞移?(由ъ냼??愿由?
         self.tab_enabled = {
-            "dash": True,   # 숫자 라벨 업데이트
-            "nav": True     # 네비게이션 상태
+            "dash": True,   # ?レ옄 ?쇰꺼 ?낅뜲?댄듃
+            "nav": True     # ?ㅻ퉬寃뚯씠???곹깭
         }
         self.update_fast_labels()
         self.update_slow_ui()
         
-        # 아두이노 자동 연결 시도
+        # ?꾨몢?대끂 ?먮룞 ?곌껐 ?쒕룄
         self.auto_connect_hardware()
 
     def restore_gui_state(self):
-        # 윈도우 크기: 가로 480px, 세로 900px 이상 (마우스 드래그로 조절 가능)
+        # ?덈룄???ш린: 媛濡?480px, ?몃줈 900px ?댁긽 (留덉슦???쒕옒洹몃줈 議곗젅 媛??
         self.root.geometry("480x900")
-        self.root.resizable(True, True)  # 가로/세로 모두 조절 가능
+        self.root.resizable(True, True)  # 媛濡??몃줈 紐⑤몢 議곗젅 媛??
         gui_state = load_gui_state()
         self.ui_scale = gui_state["ui_scale"]
         self.calibration_geometry = gui_state.get("calibration_geometry", "420x270+180+180")
@@ -821,10 +1031,10 @@ class AppView:
         top_actions = ctk.CTkFrame(self.c_dash, fg_color="transparent")
         top_actions.pack(fill="x", padx=1, pady=1)
         
-        # 첫 번째 줄: RUN, OCR, GUIDES, GRID, PORT
+        # 泥?踰덉㎏ 以? RUN, OCR, GUIDES, GRID, PORT
         row1 = ctk.CTkFrame(top_actions, fg_color="transparent")
         row1.pack(fill="x", pady=1)
-        self.btn_macro = ctk.CTkButton(row1, text="RUN", height=22, width=60, font=("Inter", 9, "bold"), fg_color="#10B981", command=self.toggle_service)
+        self.btn_macro = ctk.CTkButton(row1, text="RUN (F2)", height=22, width=60, font=("Inter", 9, "bold"), fg_color="#10B981", command=self.toggle_service)
         self.btn_macro.pack(side="left", padx=1)
         self.btn_ocr_toggle = ctk.CTkButton(row1, text="OCR", height=22, width=50, font=("Inter", 9), fg_color="#10B981", command=self.toggle_ocr_engine)
         self.btn_ocr_toggle.pack(side="left", padx=1)
@@ -838,7 +1048,7 @@ class AppView:
         self.btn_hw_connect = ctk.CTkButton(row1, text="HW", height=22, width=40, font=("Inter", 9), command=self.toggle_hardware)
         self.btn_hw_connect.pack(side="left", padx=1)
         
-        # 두 번째 줄: CALIB, SCALE, ROLE, SENTINEL
+        # ??踰덉㎏ 以? CALIB, SCALE, ROLE, SENTINEL
         row2 = ctk.CTkFrame(top_actions, fg_color="transparent")
         row2.pack(fill="x", pady=1)
         self.btn_open_calib = ctk.CTkButton(row2, text="CALIB", height=22, width=50, font=("Inter", 9), command=self.open_calibration_popup)
@@ -852,23 +1062,23 @@ class AppView:
         self.lbl_gui_res = ctk.CTkLabel(row2, text="UI:-", font=("Inter", 8), text_color="#A855F7", width=50)
         self.lbl_gui_res.pack(side="left", padx=1)
         ctk.CTkLabel(row2, text="R", font=("Inter", 9), width=15).pack(side="left", padx=1)
-        self.cb_role = ctk.CTkComboBox(row2, values=["격수", "도사", "술사"], height=22, width=50, font=("Inter", 9), command=self.set_role)
+        self.cb_role = ctk.CTkComboBox(row2, values=["Warrior", "Priest", "Shaman"], height=22, width=82, font=("Inter", 9), command=self.set_role)
         self.cb_role.pack(side="left", padx=1)
-        self.cb_role.set(self.state.role)
+        self.cb_role.set(self._display_role_name(self.state.role))
         self.btn_sentinel = ctk.CTkButton(row2, text="SNT", height=22, width=40, font=("Inter", 9), command=self.toggle_sentinel)
         self.btn_sentinel.pack(side="left", padx=1)
         
-        # 세 번째 줄: OFFSET, ALPHA, GRID
+        # ??踰덉㎏ 以? OFFSET, ALPHA, GRID
         row3 = ctk.CTkFrame(top_actions, fg_color="transparent")
         row3.pack(fill="x", pady=1)
         self.lbl_grid_offset = ctk.CTkLabel(row3, text="O:(0,0)", font=("Inter", 8), width=60)
         self.lbl_grid_offset.pack(side="left", padx=1)
         btn_frame = ctk.CTkFrame(row3, fg_color="#2D3748", corner_radius=2)
         btn_frame.pack(side="left", padx=1)
-        ctk.CTkButton(btn_frame, text="↑", height=18, width=18, font=("Inter", 7), command=lambda: self.move_grid(0, -1)).grid(row=0, column=1, padx=0)
-        ctk.CTkButton(btn_frame, text="←", height=18, width=18, font=("Inter", 7), command=lambda: self.move_grid(-1, 0)).grid(row=1, column=0, padx=0)
-        ctk.CTkButton(btn_frame, text="↓", height=18, width=18, font=("Inter", 7), command=lambda: self.move_grid(0, 1)).grid(row=1, column=1, padx=0)
-        ctk.CTkButton(btn_frame, text="→", height=18, width=18, font=("Inter", 7), command=lambda: self.move_grid(1, 0)).grid(row=1, column=2, padx=0)
+        ctk.CTkButton(btn_frame, text="^", height=18, width=18, font=("Inter", 7), command=lambda: self.move_grid(0, -1)).grid(row=0, column=1, padx=0)
+        ctk.CTkButton(btn_frame, text="<", height=18, width=18, font=("Inter", 7), command=lambda: self.move_grid(-1, 0)).grid(row=1, column=0, padx=0)
+        ctk.CTkButton(btn_frame, text="v", height=18, width=18, font=("Inter", 7), command=lambda: self.move_grid(0, 1)).grid(row=1, column=1, padx=0)
+        ctk.CTkButton(btn_frame, text=">", height=18, width=18, font=("Inter", 7), command=lambda: self.move_grid(1, 0)).grid(row=1, column=2, padx=0)
         ctk.CTkLabel(row3, text="A", font=("Inter", 8), width=15).pack(side="left", padx=1)
         self.slider_alpha = ctk.CTkSlider(row3, from_=0.1, to=1.0, number_of_steps=9, width=60, command=self.on_alpha_change)
         self.slider_alpha.set(0.5)
@@ -876,17 +1086,17 @@ class AppView:
         self.lbl_char_grid = ctk.CTkLabel(row3, text="G:-", font=("Inter", 8), text_color="#00D4FF", width=80)
         self.lbl_char_grid.pack(side="left", padx=1)
         
-        # OCR Threshold 슬라이더 제거 (개별 임계값 로직으로 대체)
+        # OCR Threshold ?щ씪?대뜑 ?쒓굅 (媛쒕퀎 ?꾧퀎媛?濡쒖쭅?쇰줈 ?泥?
         
-        # 상태 정보 - 가로 2열 배치
+        # ?곹깭 ?뺣낫 - 媛濡?2??諛곗튂
 
-        # 상태 정보 - 가로 2열 배치
+        # ?곹깭 ?뺣낫 - 媛濡?2??諛곗튂
         st = ctk.CTkFrame(self.c_dash, fg_color="#1E2129", corner_radius=4, border_width=1, border_color="#343A46")
         st.pack(fill="x", padx=1, pady=1)
         g = ctk.CTkFrame(st, fg_color="transparent")
         g.pack(fill="x", padx=2, pady=2)
         
-        # 가로 2열 배치
+        # 媛濡?2??諛곗튂
         ctk.CTkLabel(g, text="HP", font=("Inter", 9, "bold")).grid(row=0, column=0, sticky="w", padx=1)
         self.lbl_hp = ctk.CTkLabel(g, text="-", font=("Inter", 9), width=100, anchor="w")
         self.lbl_hp.grid(row=0, column=1, sticky="w", padx=1)
@@ -905,6 +1115,58 @@ class AppView:
         self.lbl_xy = ctk.CTkLabel(g, text="-", font=("Inter", 9), width=220, anchor="w")
         self.lbl_xy.grid(row=2, column=1, columnspan=3, sticky="w", padx=1)
 
+        if self.state.role == "도사":
+            self.net_box = ctk.CTkFrame(self.c_dash, fg_color="#0B1220", corner_radius=6, border_width=1, border_color="#2563EB")
+            self.net_box.pack(fill="x", padx=1, pady=1)
+
+            ctk.CTkLabel(self.net_box, text="NETWORK MONITOR", font=("Inter", 10, "bold"), text_color="#60A5FA").pack(pady=(3, 1))
+            self.lbl_rx_summary = ctk.CTkLabel(
+                self.net_box,
+                text="RX: -",
+                font=("Inter", 8, "bold"),
+                text_color="#93C5FD",
+                anchor="w",
+                justify="left"
+            )
+            self.lbl_rx_summary.pack(fill="x", padx=6, pady=(0, 3))
+
+            self.net_local_strip = ctk.CTkFrame(self.net_box, fg_color="#111827", corner_radius=4, border_width=1, border_color="#38BDF8")
+            self.net_local_strip.pack(fill="x", padx=6, pady=(0, 4))
+            ctk.CTkLabel(self.net_local_strip, text=f"[{self._display_role_name(self.state.role)}] LOCAL", font=("Inter", 8, "bold"), text_color="#38BDF8").pack(side="left", padx=(6, 4), pady=4)
+            self.lbl_local_status = ctk.CTkLabel(self.net_local_strip, text="-", font=("Inter", 8), anchor="w", justify="left")
+            self.lbl_local_status.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=4)
+
+            self.net_role_cards = {}
+            cards_row = ctk.CTkFrame(self.net_box, fg_color="transparent")
+            cards_row.pack(fill="x", padx=4, pady=(0, 4))
+
+            for role_name in ("격수", "술사"):
+                card = ctk.CTkFrame(cards_row, fg_color="#111827", corner_radius=8, border_width=2, border_color="#374151")
+                card.pack(side="left", fill="both", expand=True, padx=3)
+
+                title_row = ctk.CTkFrame(card, fg_color="transparent")
+                title_row.pack(fill="x", padx=6, pady=(5, 2))
+                title_lbl = ctk.CTkLabel(title_row, text=self._display_role_name(role_name), font=("Inter", 10, "bold"), text_color="#E5E7EB")
+                title_lbl.pack(side="left")
+                status_lbl = ctk.CTkLabel(title_row, text="DISCONNECTED", font=("Inter", 8, "bold"), text_color="#F87171")
+                status_lbl.pack(side="right")
+
+                map_lbl = ctk.CTkLabel(card, text="MAP: -", font=("Inter", 10, "bold"), text_color="#93C5FD", anchor="w", justify="left")
+                map_lbl.pack(fill="x", padx=6, pady=(1, 1))
+                coord_lbl = ctk.CTkLabel(card, text="X/Y: -", font=("Inter", 11, "bold"), text_color="#FDE68A", anchor="w", justify="left")
+                coord_lbl.pack(fill="x", padx=6, pady=(0, 1))
+                hpmp_lbl = ctk.CTkLabel(card, text="HP/MP: -", font=("Inter", 9, "bold"), text_color="#A7F3D0", anchor="w", justify="left")
+                hpmp_lbl.pack(fill="x", padx=6, pady=(0, 5))
+
+                self.net_role_cards[role_name] = {
+                    "frame": card,
+                    "title": title_lbl,
+                    "status": status_lbl,
+                    "map": map_lbl,
+                    "coord": coord_lbl,
+                    "hpmp": hpmp_lbl,
+                }
+
         # Navigation & Control Tab
         self.build_navigation_control()
 
@@ -913,19 +1175,19 @@ class AppView:
         self.toast_lbl.pack(side="bottom", pady=5)
 
     def open_calibration_popup(self):
-        print("[DEBUG] CALIB 버튼 클릭됨")
+        print("[DEBUG]")
         pop = getattr(self, "calibration_popup", None)
         if pop is not None:
             try:
                 if pop.winfo_exists():
-                    print("[DEBUG] 기존 팝업을 찾아서 앞으로 가져옴")
+                    print("[DEBUG] 湲곗〈 ?앹뾽??李얠븘???욎쑝濡?媛?몄샂")
                     pop.lift()
                     pop.focus_force()
                     return
             except tk.TclError:
                 pass
 
-        print("[DEBUG] 새로운 캘리브레이션 팝업 생성")
+        print("[DEBUG] ?덈줈??罹섎━釉뚮젅?댁뀡 ?앹뾽 ?앹꽦")
         try:
             self.calibration_popup = ctk.CTkToplevel(self.root)
             self.calibration_popup.title("Calibration")
@@ -933,18 +1195,18 @@ class AppView:
             self.calibration_popup.attributes("-topmost", True)
             self.calibration_popup.transient(self.root)
             self.calibration_popup.minsize(860, 360)
-            print("[DEBUG] 팝업 기본 설정 완료")
+            print("[DEBUG] ?앹뾽 湲곕낯 ?ㅼ젙 ?꾨즺")
         except Exception as e:
-            print(f"[DEBUG] 팝업 생성 실패: {e}")
+            print(f"[DEBUG] ?앹뾽 ?앹꽦 ?ㅽ뙣: {e}")
             return
 
         try:
             self.preview_zoom_var = ctk.StringVar(value="x3")
             self.preview_crop_pil = None
             self.preview_tkimg = None
-            print("[DEBUG] 변수 초기화 완료")
+            print("[DEBUG] 蹂??珥덇린???꾨즺")
         except Exception as e:
-            print(f"[DEBUG] 변수 초기화 실패: {e}")
+            print(f"[DEBUG] 蹂??珥덇린???ㅽ뙣: {e}")
             return
 
         try:
@@ -953,9 +1215,9 @@ class AppView:
             body.grid_columnconfigure(0, weight=0)
             body.grid_columnconfigure(1, weight=1)
             body.grid_rowconfigure(0, weight=1)
-            print("[DEBUG] body 프레임 생성 완료")
+            print("[DEBUG] body ?꾨젅???앹꽦 ?꾨즺")
         except Exception as e:
-            print(f"[DEBUG] body 프레임 생성 실패: {e}")
+            print(f"[DEBUG] body ?꾨젅???앹꽦 ?ㅽ뙣: {e}")
             return
 
         left_panel = ctk.CTkFrame(body, width=280, corner_radius=8, fg_color="#1E2129")
@@ -977,27 +1239,27 @@ class AppView:
 
         dp = ctk.CTkFrame(left_panel, fg_color="transparent")
         dp.pack(pady=3)
-        # 시작 좌표 조절 (sx, sy)
-        ctk.CTkButton(dp, text="▲", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("sy", -1)).grid(row=0, column=1)
-        ctk.CTkButton(dp, text="◀", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("sx", -1)).grid(row=1, column=0)
-        ctk.CTkButton(dp, text="▶", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("sx", 1)).grid(row=1, column=2)
-        ctk.CTkButton(dp, text="▼", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("sy", 1)).grid(row=2, column=1)
+        # ?쒖옉 醫뚰몴 議곗젅 (sx, sy)
+        ctk.CTkButton(dp, text="^", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("sy", -1)).grid(row=0, column=1)
+        ctk.CTkButton(dp, text="<", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("sx", -1)).grid(row=1, column=0)
+        ctk.CTkButton(dp, text=">", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("sx", 1)).grid(row=1, column=2)
+        ctk.CTkButton(dp, text="v", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("sy", 1)).grid(row=2, column=1)
 
-        # 끝 좌표 조절 (dx, dy)
+        # ??醫뚰몴 議곗젅 (dx, dy)
         ctk.CTkLabel(left_panel, text="End Position", font=("Inter", 9)).pack(pady=(4, 1))
         dp2 = ctk.CTkFrame(left_panel, fg_color="transparent")
         dp2.pack(pady=3)
-        ctk.CTkButton(dp2, text="▲", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("dy", -1)).grid(row=0, column=1)
-        ctk.CTkButton(dp2, text="◀", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("dx", -1)).grid(row=1, column=0)
-        ctk.CTkButton(dp2, text="▶", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("dx", 1)).grid(row=1, column=2)
-        ctk.CTkButton(dp2, text="▼", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("dy", 1)).grid(row=2, column=1)
+        ctk.CTkButton(dp2, text="^", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("dy", -1)).grid(row=0, column=1)
+        ctk.CTkButton(dp2, text="<", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("dx", -1)).grid(row=1, column=0)
+        ctk.CTkButton(dp2, text=">", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("dx", 1)).grid(row=1, column=2)
+        ctk.CTkButton(dp2, text="v", width=26, height=24, font=("Inter", 10), command=lambda: self.adj_val("dy", 1)).grid(row=2, column=1)
 
         ctk.CTkLabel(left_panel, text="Preview Zoom", font=("Inter", 9)).pack(pady=(6, 1))
         self.zoom_menu = ctk.CTkOptionMenu(left_panel, values=["x3", "x4", "x5"], variable=self.preview_zoom_var, width=90, height=22, font=("Inter", 9),
                                            command=lambda _: self.update_calibration_preview())
         self.zoom_menu.pack(pady=1)
 
-        # Threshold 슬라이더 (이진화 임계값 튜닝)
+        # Threshold ?щ씪?대뜑 (?댁쭊???꾧퀎媛??쒕떇)
         thresh_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
         thresh_frame.pack(pady=(6, 1), fill="x", padx=6)
         ctk.CTkLabel(thresh_frame, text="Threshold", font=("Inter", 9)).pack(side="left", padx=2)
@@ -1010,33 +1272,33 @@ class AppView:
         self.threshold_slider.pack(pady=(0, 1), padx=6, fill="x")
 
 
-        # 샘플링 버튼 추가
+        # ?섑뵆留?踰꾪듉 異붽?
         sample_row = ctk.CTkFrame(left_panel, fg_color="transparent")
         sample_row.pack(pady=(3, 6))
-        ctk.CTkButton(sample_row, text="샘플링", width=190, height=24, font=("Inter", 9, "bold"),
+        ctk.CTkButton(sample_row, text="SAMPLE", width=190, height=24, font=("Inter", 9, "bold"),
                      fg_color="#A855F7", hover_color="#7E22CE", command=self.start_sampling_tool).pack()
 
-        # 카테고리 선택 드롭다운
+        # 移댄뀒怨좊━ ?좏깮 ?쒕∼?ㅼ슫
         category_row = ctk.CTkFrame(left_panel, fg_color="transparent")
         category_row.pack(pady=(2, 6))
-        ctk.CTkLabel(category_row, text="카테고리:", font=("Inter", 8)).pack(side="left", padx=2)
+        ctk.CTkLabel(category_row, text="Category:", font=("Inter", 8)).pack(side="left", padx=2)
         self.sample_category_var = ctk.StringVar(value="digits")
         ctk.CTkOptionMenu(category_row, values=["digits", "monsters", "status", "users", "items", "marker"],
                          variable=self.sample_category_var, width=120, height=22, font=("Inter", 8)).pack(side="left", padx=2)
 
-        # 샘플링 1px 편집 UI
+        # ?섑뵆留?1px ?몄쭛 UI
         self.sample_trim_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
         self.sample_trim_frame.pack(pady=(3, 6))
 
-        # 줌 선택
+        # 以??좏깮
         zoom_row = ctk.CTkFrame(self.sample_trim_frame, fg_color="transparent")
         zoom_row.pack(pady=(2, 2))
-        ctk.CTkLabel(zoom_row, text="줌:", font=("Inter", 8)).pack(side="left", padx=2)
+        ctk.CTkLabel(zoom_row, text="Zoom", font=("Inter", 8)).pack(side="left", padx=2)
         self.sample_zoom_var = ctk.StringVar(value="x2")
         ctk.CTkOptionMenu(zoom_row, values=["x1", "x2", "x4"], variable=self.sample_zoom_var, width=60, height=20, font=("Inter", 8),
                          command=lambda _: self.set_sample_zoom(int(self.sample_zoom_var.get().replace("x", "")))).pack(side="left", padx=2)
 
-        # 1px 트림 버튼
+        # 1px ?몃┝ 踰꾪듉
         trim_grid = ctk.CTkFrame(self.sample_trim_frame, fg_color="transparent")
         trim_grid.pack(pady=2)
         ctk.CTkButton(trim_grid, text="L+", width=36, height=20, font=("Inter", 8), command=lambda: self.trim_sample("left", 1)).grid(row=0, column=0, padx=1, pady=1)
@@ -1048,8 +1310,8 @@ class AppView:
         ctk.CTkButton(trim_grid, text="B+", width=36, height=20, font=("Inter", 8), command=lambda: self.trim_sample("bottom", 1)).grid(row=1, column=2, padx=1, pady=1)
         ctk.CTkButton(trim_grid, text="B-", width=36, height=20, font=("Inter", 8), command=lambda: self.trim_sample("bottom", -1)).grid(row=1, column=3, padx=1, pady=1)
 
-        # 리셋 버튼
-        ctk.CTkButton(self.sample_trim_frame, text="리셋", width=148, height=20, font=("Inter", 8), command=self.reset_sample_crop).pack(pady=(2, 0))
+        # 由ъ뀑 踰꾪듉
+        ctk.CTkButton(self.sample_trim_frame, text="RESET", width=148, height=20, font=("Inter", 8), command=self.reset_sample_crop).pack(pady=(2, 0))
 
         actions_row = ctk.CTkFrame(left_panel, fg_color="transparent")
         actions_row.pack(pady=(3, 6))
@@ -1070,21 +1332,21 @@ class AppView:
         self.calibration_popup.bind("<Configure>", self.on_calibration_popup_configure)
         self.tune_target.configure(command=lambda _: self.update_calibration_preview())
         
-        print("[DEBUG] 팝업 설정 완료, 프리뷰 업데이트 시작")
+        print("[DEBUG] ?앹뾽 ?ㅼ젙 ?꾨즺, ?꾨━酉??낅뜲?댄듃 ?쒖옉")
         try:
             self.update_calibration_preview()
-            print("[DEBUG] 프리뷰 업데이트 완료")
+            print("[DEBUG] ?꾨━酉??낅뜲?댄듃 ?꾨즺")
         except Exception as e:
-            print(f"[DEBUG] 프리뷰 업데이트 실패: {e}")
+            print(f"[DEBUG] ?꾨━酉??낅뜲?댄듃 ?ㅽ뙣: {e}")
         
-        print("[DEBUG] 팝업 표시 시도")
+        print("[DEBUG] ?앹뾽 ?쒖떆 ?쒕룄")
         try:
             self.calibration_popup.lift()
             self.calibration_popup.focus_force()
             self.calibration_popup.update_idletasks()
-            print("[DEBUG] 팝업 표시 성공")
+            print("[DEBUG] ?앹뾽 ?쒖떆 ?깃났")
         except Exception as e:
-            print(f"[DEBUG] 팝업 표시 실패: {e}")
+            print(f"[DEBUG] ?앹뾽 ?쒖떆 ?ㅽ뙣: {e}")
         
         self.show_toast("CALIBRATION POPUP OPEN")
 
@@ -1102,10 +1364,10 @@ class AppView:
         base = reader_thread.regions[target]
         return Region(base.sx, base.sy, base.dx, base.dy), target
 
-    # on_thr_change 제거 (슬라이더 미사용)
+    # on_thr_change ?쒓굅 (?щ씪?대뜑 誘몄궗??
 
     def update_move_hold(self, value):
-        """move_hold 슬라이더 콜백"""
+        """Docstring."""
         from bis_core import TIMING_CONFIG
         ms_val = float(value)
         TIMING_CONFIG["move_hold"] = ms_val / 1000.0  # ms -> s
@@ -1113,7 +1375,7 @@ class AppView:
         self.save_timing_config()
     
     def update_key_gap(self, value):
-        """key_gap 슬라이더 콜백"""
+        """Docstring."""
         from bis_core import TIMING_CONFIG
         ms_val = float(value)
         TIMING_CONFIG["key_gap"] = ms_val / 1000.0  # ms -> s
@@ -1121,7 +1383,7 @@ class AppView:
         self.save_timing_config()
     
     def save_timing_config(self):
-        """TIMING_CONFIG를 config.json에 저장"""
+        """Load timing values from config.json."""
         try:
             from bis_core import TIMING_CONFIG
             config_file = os.path.join(os.path.dirname(__file__), "config.json")
@@ -1131,39 +1393,39 @@ class AppView:
             with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"[Config] TIMING_CONFIG 저장 실패: {e}")
+            print(f"[Config] TIMING_CONFIG ????ㅽ뙣: {e}")
 
     def update_calibration_preview(self):
-        print("[DEBUG] 캘리브레이션 프리뷰 업데이트 시작")
+        print("[DEBUG] 罹섎━釉뚮젅?댁뀡 ?꾨━酉??낅뜲?댄듃 ?쒖옉")
         if not hasattr(self, "calibration_popup") or not self.calibration_popup.winfo_exists():
-            print("[DEBUG] 캘리브레이션 팝업이 존재하지 않음")
+            print("[DEBUG] 罹섎━釉뚮젅?댁뀡 ?앹뾽??議댁옱?섏? ?딆쓬")
             return
         hwnd = find_game_window(WIN_KEY)
         if not hwnd:
-            print("[DEBUG] 게임 윈도우를 찾을 수 없음")
+            print("[DEBUG] 寃뚯엫 ?덈룄?곕? 李얠쓣 ???놁쓬")
             self.preview_meta_lbl.configure(text="Game window not found")
             self.preview_canvas.delete("all")
             return
-        print(f"[DEBUG] 게임 윈도우 찾음: {hwnd}")
+        print(f"[DEBUG] 寃뚯엫 ?덈룄??李얠쓬: {hwnd}")
         reg, target = self.get_trimmed_region_for_preview()
         if reg is None:
-            print("[DEBUG] 잘못된 크롭 범위")
+            print("[DEBUG] ?섎せ???щ∼ 踰붿쐞")
             self.preview_meta_lbl.configure(text="Invalid crop range")
             self.preview_canvas.delete("all")
             return
 
         full_img = grab_window_bg(hwnd)
         if full_img is None:
-            print("[DEBUG] 화면 캡처 실패")
+            print("[DEBUG] ?붾㈃ 罹≪쿂 ?ㅽ뙣")
             self.preview_meta_lbl.configure(text="Capture failed")
             self.preview_canvas.delete("all")
             return
 
-        print("[DEBUG] 화면 캡처 성공, 크롭 진행")
+        print("[DEBUG] ?붾㈃ 罹≪쿂 ?깃났, ?щ∼ 吏꾪뻾")
         try:
             crop = full_img.crop(reg.to_bbox((0, 0)))
         except Exception as e:
-            print(f"[DEBUG] 크롭 실패: {e}")
+            print(f"[DEBUG] ?щ∼ ?ㅽ뙣: {e}")
             self.preview_meta_lbl.configure(text="Crop failed")
             self.preview_canvas.delete("all")
             return
@@ -1180,7 +1442,7 @@ class AppView:
         self.preview_meta_lbl.configure(text=f"{target.upper()} | {crop.width}x{crop.height} | zoom x{zoom}")
 
     def show_input_dialog(self, title, message, default_value=""):
-        """CustomTkinter 스타일의 입력 다이얼로그"""
+        """Open a CustomTkinter popup for crop selection."""
         dialog = ctk.CTkToplevel(self.root)
         dialog.title(title)
         dialog.geometry("400x200")
@@ -1212,10 +1474,10 @@ class AppView:
         button_frame = ctk.CTkFrame(frame, fg_color="transparent")
         button_frame.pack(fill="x")
 
-        ok_btn = ctk.CTkButton(button_frame, text="확인", width=80, command=on_ok)
+        ok_btn = ctk.CTkButton(button_frame, text="OK", width=80, command=on_ok)
         ok_btn.pack(side="right", padx=5)
 
-        cancel_btn = ctk.CTkButton(button_frame, text="취소", width=80, command=on_cancel)
+        cancel_btn = ctk.CTkButton(button_frame, text="Cancel", width=80, command=on_cancel)
         cancel_btn.pack(side="right", padx=5)
 
         entry.bind("<Return>", lambda e: on_ok())
@@ -1226,14 +1488,14 @@ class AppView:
 
     def save_calibration_preview(self):
         if self.preview_crop_pil is None:
-            messagebox.showwarning("Save Preview", "먼저 CAPTURE로 미리보기를 생성하세요.")
+            messagebox.showwarning("Save Preview", "癒쇱? CAPTURE濡?誘몃━蹂닿린瑜??앹꽦?섏꽭??")
             return
-        if not messagebox.askyesno("Save Preview", "현재 미리보기를 저장할까요?"):
+        if not messagebox.askyesno("Save Preview", "?꾩옱 誘몃━蹂닿린瑜???ν븷源뚯슂?"):
             return
 
         os.makedirs(TEMPLATE_DIGIT_DIR, exist_ok=True)
         default_name = f"{self.tune_target.get()}_{int(time.time())}"
-        name = self.show_input_dialog("파일명", "저장할 파일명을 입력하세요 (확장자 제외):", default_name)
+        name = self.show_input_dialog("File Name", "Enter a name for the capture file (extension omitted):", default_name)
         if not name:
             return
 
@@ -1242,61 +1504,61 @@ class AppView:
             ch for ch in name_str if ch.isalnum() or ch in ("_", "-", ".")
         ).strip(". ")
         if not safe_name:
-            messagebox.showerror("Save Preview", "유효한 파일명을 입력하세요.")
+            messagebox.showerror("Save Preview", "?좏슚???뚯씪紐낆쓣 ?낅젰?섏꽭??")
             return
         path = os.path.join(TEMPLATE_DIGIT_DIR, f"{safe_name}.png")
 
         if os.path.exists(path):
-            overwrite = messagebox.askyesno("중복 파일", f"이미 존재합니다.\n덮어쓸까요?\n{path}")
+            overwrite = messagebox.askyesno("以묐났 ?뚯씪", f"?대? 議댁옱?⑸땲??\n??뼱?멸퉴??\n{path}")
             if not overwrite:
                 return
 
         try:
             self.preview_crop_pil.save(path)
-            messagebox.showinfo("Save Preview", f"저장 완료:\n{path}")
+            messagebox.showinfo("Save Preview", f"????꾨즺:\n{path}")
         except Exception as e:
-            messagebox.showerror("Save Preview", f"저장 실패:\n{e}")
+            messagebox.showerror("Save Preview", f"????ㅽ뙣:\n{e}")
 
     def save_with_mode_check(self):
-        """샘플링 모드 확인 후 저장"""
+        """Open the sampling tool popup."""
         if hasattr(self, "sample_pil") and self.sample_pil is not None:
             self.save_sample()
         else:
             self.save_calibration_preview()
 
     def start_sampling_tool(self):
-        """범용 템플릿 샘플링 모드 시작"""
-        print("[DEBUG] 샘플링 버튼 클릭됨")
+        """Start sampling tool."""
+        print("[DEBUG]")
         hwnd = find_game_window(WIN_KEY)
         if not hwnd:
-            print("[DEBUG] 게임창을 찾을 수 없음")
+            print("[DEBUG] 寃뚯엫李쎌쓣 李얠쓣 ???놁쓬")
             self.show_toast("[Err] WINDOW NOT FOUND", "#FF5555")
             return
 
-        print(f"[DEBUG] 게임창 찾음: hwnd={hwnd}")
+        print(f"[DEBUG] 寃뚯엫李?李얠쓬: hwnd={hwnd}")
         self.sample_region = None
 
         def save_sample(sx, sy, dx, dy, captured_img=None):
-            print(f"[DEBUG] 샘플링 영역 저장: ({sx}, {sy}, {dx}, {dy})")
+            print(f"[DEBUG] ?섑뵆留??곸뿭 ??? ({sx}, {sy}, {dx}, {dy})")
             x1, x2 = sorted((sx, dx))
             y1, y2 = sorted((sy, dy))
             self.sample_region = [x1, y1, x2, y2]
-            self.sample_original = [x1, y1, x2, y2]  # 원본 백업
+            self.sample_original = [x1, y1, x2, y2]  # ?먮낯 諛깆뾽
             self.sample_trim = {"left": 0, "right": 0, "top": 0, "bottom": 0}
-            self.sample_captured_img = captured_img  # 즉시 캡처된 이미지 저장
+            self.sample_captured_img = captured_img  # 利됱떆 罹≪쿂???대?吏 ???
             self.show_sample_preview()
 
-        print("[DEBUG] OverlaySelector 호출 시작")
+        print("[DEBUG] OverlaySelector ?몄텧 ?쒖옉")
         OverlaySelector(self.root, hwnd, save_sample)
-        print("[DEBUG] OverlaySelector 호출 완료")
+        print("[DEBUG] OverlaySelector ?몄텧 ?꾨즺")
 
     def image_to_binary_string(self, img):
-        """이미지를 0/1 비트맵 문자열로 변환 (ft.ahk FindText 방식)"""
-        # 그레이스케일 변환
+        """Convert image to 0/1 binary string (FindText-style)."""
+        # 洹몃젅?댁뒪耳??蹂??
         gray = img.convert('L')
-        # 이진화 (임계값 128)
+        # ?댁쭊??(?꾧퀎媛?128)
         binary = gray.point(lambda x: 0 if x < 128 else 1, '1')
-        # 문자열로 변환
+        # 臾몄옄?대줈 蹂??
         width, height = binary.size
         binary_str = ""
         for y in range(height):
@@ -1306,11 +1568,11 @@ class AppView:
         return binary_str
 
     def show_sample_preview(self):
-        """샘플링된 영역을 미리보기창에 표시 (1px 트림 적용)"""
+        """Docstring."""
         if not hasattr(self, "sample_region") or self.sample_region is None:
             return
 
-        # 드래그 시 즉시 캡처한 이미지 우선 사용 (좌표 정합 보장)
+        # ?쒕옒洹???利됱떆 罹≪쿂???대?吏 ?곗꽑 ?ъ슜 (醫뚰몴 ?뺥빀 蹂댁옣)
         full_img = getattr(self, 'sample_captured_img', None)
         if full_img is None:
             hwnd = find_game_window(WIN_KEY)
@@ -1320,7 +1582,7 @@ class AppView:
         if full_img is None:
             return
 
-        # 트림 적용된 좌표 계산
+        # ?몃┝ ?곸슜??醫뚰몴 怨꾩궛
         x1, y1, x2, y2 = self.sample_region
         trim = getattr(self, "sample_trim", {"left": 0, "right": 0, "top": 0, "bottom": 0})
         sx = x1 + trim["left"]
@@ -1335,17 +1597,17 @@ class AppView:
 
         try:
             crop = full_img.crop((sx, sy, dx, dy))
-            # grab_window_bg가 이미 BGRX→RGB 변환을 수행하므로 추가 변환 불필요
+            # grab_window_bg媛 ?대? BGRX?뭃GB 蹂?섏쓣 ?섑뻾?섎?濡?異붽? 蹂??遺덊븘??
 
-            # 줌 적용 (기본 2x, 조정 가능)
+            # 以??곸슜 (湲곕낯 2x, 議곗젙 媛??
             zoom = getattr(self, "sample_zoom", 2)
             preview_img = crop.resize((max(1, crop.width * zoom), max(1, crop.height * zoom)), _PIL_NEAREST)
             self.sample_pil = crop.copy()
 
-            # 비트맵 문자열 생성 (ft.ahk FindText 방식)
+            # 鍮꾪듃留?臾몄옄???앹꽦 (ft.ahk FindText 諛⑹떇)
             self.sample_binary_str = self.image_to_binary_string(crop)
 
-            # 미리보기창에 표시
+            # 誘몃━蹂닿린李쎌뿉 ?쒖떆
             self.preview_tkimg = ImageTk.PhotoImage(preview_img)
             cw = max(1, self.preview_canvas.winfo_width())
             ch = max(1, self.preview_canvas.winfo_height())
@@ -1354,12 +1616,12 @@ class AppView:
             trim_info = f"L{trim['left']} R{trim['right']} T{trim['top']} B{trim['bottom']}"
             category = self.sample_category_var.get() if hasattr(self, "sample_category_var") else "digits"
             self.preview_meta_lbl.configure(text=f"SAMPLE [{category.upper()}] | {crop.width}x{crop.height} | x{zoom} | {trim_info}", font=("Inter", 11, "bold"))
-            self.show_toast("샘플링 완료 - 1px 편집 후 SAVE 버튼 클릭")
+            self.show_toast("Sample preview updated - trim 1px and press SAVE")
         except Exception as e:
-            self.show_toast(f"샘플링 실패: {e}", "#FF5555")
+            self.show_toast("Sample preview failed", "#FF5555")
 
     def trim_sample(self, edge, delta=1):
-        """샘플링 영역 1px 조정 (edge: left/right/top/bottom)"""
+        """Docstring."""
         if not hasattr(self, "sample_region") or self.sample_region is None:
             return
         if not hasattr(self, "sample_trim"):
@@ -1369,7 +1631,7 @@ class AppView:
         orig = getattr(self, "sample_original", [x1, y1, x2, y2])
         ow, oh = orig[2] - orig[0], orig[3] - orig[1]
 
-        # 새 트림값 계산 (원본 범위 초과 방지)
+        # ???몃┝媛?怨꾩궛 (?먮낯 踰붿쐞 珥덇낵 諛⑹?)
         new_trim = dict(self.sample_trim)
         if edge == "left":
             new_trim["left"] = max(0, min(new_trim["left"] + delta, ow - new_trim["right"] - 1))
@@ -1384,96 +1646,96 @@ class AppView:
         self.show_sample_preview()
 
     def reset_sample_crop(self):
-        """샘플링 영역 원본으로 복원"""
+        """Docstring."""
         if hasattr(self, "sample_original") and self.sample_original:
             self.sample_region = list(self.sample_original)
             self.sample_trim = {"left": 0, "right": 0, "top": 0, "bottom": 0}
             self.show_sample_preview()
-            self.show_toast("크롭 리셋 완료")
+            self.show_toast("Reset complete")
 
     def set_sample_zoom(self, zoom):
-        """샘플링 줌 설정 (1, 2, 4)"""
+        """Docstring."""
         self.sample_zoom = zoom
         if hasattr(self, "sample_region") and self.sample_region:
             self.show_sample_preview()
 
     def save_sample(self):
-        """샘플링된 이미지를 선택한 카테고리 폴더에 저장"""
-        print(f"[DEBUG] 저장 시작: sample_pil 존재 여부 확인")
+        """Save the selected sample image into the category folder."""
+        print(f"[DEBUG] ????쒖옉: sample_pil 議댁옱 ?щ? ?뺤씤")
         if not hasattr(self, "sample_pil") or self.sample_pil is None:
-            print(f"[DEBUG] sample_pil 없음: hasattr={hasattr(self, 'sample_pil')}, sample_pil={getattr(self, 'sample_pil', None)}")
-            self.show_toast("먼저 샘플링을 수행하세요", "#FF5555")
+            print(f"[DEBUG] sample_pil ?놁쓬: hasattr={hasattr(self, 'sample_pil')}, sample_pil={getattr(self, 'sample_pil', None)}")
+            self.show_toast("OK")
             return
 
-        # 카테고리 가져오기
+        # 移댄뀒怨좊━ 媛?몄삤湲?
         category = self.sample_category_var.get() if hasattr(self, "sample_category_var") else "digits"
-        print(f"[DEBUG] 카테고리: {category}")
+        print(f"[DEBUG] 移댄뀒怨좊━: {category}")
 
-        # 카테고리 폴더 경로 생성
+        # 移댄뀒怨좊━ ?대뜑 寃쎈줈 ?앹꽦
         category_dir = os.path.join(SCRIPT_DIR, "temple", category)
         os.makedirs(category_dir, exist_ok=True)
-        print(f"[DEBUG] 카테고리 폴더: {category_dir}")
+        print(f"[DEBUG] 移댄뀒怨좊━ ?대뜑: {category_dir}")
 
-        # 파일명 입력 다이얼로그
-        name = self.show_input_dialog("파일명 입력", f"저장할 파일명을 입력하세요 ({category}):", "")
-        print(f"[DEBUG] 입력된 파일명: {name}")
+        # ?뚯씪紐??낅젰 ?ㅼ씠?쇰줈洹?
+        name = self.show_input_dialog("?뚯씪紐??낅젰", f"??ν븷 ?뚯씪紐낆쓣 ?낅젰?섏꽭??({category}):", "")
+        print(f"[DEBUG] ?낅젰???뚯씪紐? {name}")
         if not name:
-            self.show_toast("파일명을 입력하세요", "#FF5555")
+            self.show_toast("OK")
             return
 
-        # 파일명 안전화
+        # ?뚯씪紐??덉쟾??
         safe_name = "".join(
             ch for ch in str(name) if ch.isalnum() or ch in ("_", "-", ".")
         ).strip(". ")
-        print(f"[DEBUG] 안전화된 파일명: {safe_name}")
+        print(f"[DEBUG] ?덉쟾?붾맂 ?뚯씪紐? {safe_name}")
         if not safe_name:
-            self.show_toast("유효한 파일명을 입력하세요", "#FF5555")
+            self.show_toast("OK")
             return
 
         path = os.path.join(category_dir, f"{safe_name}.png")
-        print(f"[DEBUG] 저장 경로: {path}")
+        print(f"[DEBUG] ???寃쎈줈: {path}")
 
-        # 중복 파일명 체크
+        # 以묐났 ?뚯씪紐?泥댄겕
         if os.path.exists(path):
-            print(f"[DEBUG] 중복 파일명 존재: {path}")
-            messagebox.showwarning("중복 파일", f"이미 존재하는 파일명입니다:\n{safe_name}.png\n다른 이름을 사용하세요.")
+            print(f"[DEBUG] 以묐났 ?뚯씪紐?議댁옱: {path}")
+            messagebox.showwarning("以묐났 ?뚯씪", f"?대? 議댁옱?섎뒗 ?뚯씪紐낆엯?덈떎:\n{safe_name}.png\n?ㅻⅨ ?대쫫???ъ슜?섏꽭??")
             return
 
         try:
-            print(f"[DEBUG] 저장 시도: {path}")
+            print(f"[DEBUG] ????쒕룄: {path}")
             self.sample_pil.save(path)
-            print(f"[DEBUG] 저장 성공: {path}")
+            print(f"[DEBUG] ????깃났: {path}")
 
-            # 비트맵 문자열도 .txt 파일로 저장 (ft.ahk FindText 방식)
+            # 鍮꾪듃留?臾몄옄?대룄 .txt ?뚯씪濡????(ft.ahk FindText 諛⑹떇)
             if hasattr(self, "sample_binary_str"):
                 txt_path = os.path.join(category_dir, f"{safe_name}.txt")
                 with open(txt_path, 'w', encoding='utf-8') as f:
                     f.write(self.sample_binary_str)
-                print(f"[DEBUG] 비트맵 문자열 저장 성공: {txt_path}")
+                print(f"[DEBUG] 鍮꾪듃留?臾몄옄??????깃났: {txt_path}")
 
-            self.state.last_update_time = time.time()  # 비전 엔진 리로드 트리거
-            self.show_toast(f"{category.upper()}/{safe_name}.png 저장 완료")
-            # 샘플링 모드 종료
+            self.state.last_update_time = time.time()  # 鍮꾩쟾 ?붿쭊 由щ줈???몃━嫄?
+            self.show_toast("Sample save failed", "#FF5555")
+            # ?섑뵆留?紐⑤뱶 醫낅즺
             if hasattr(self, "sample_pil"):
                 delattr(self, "sample_pil")
             if hasattr(self, "sample_binary_str"):
                 delattr(self, "sample_binary_str")
         except Exception as e:
-            print(f"[DEBUG] 저장 실패: {e}")
-            self.show_toast(f"저장 실패: {e}", "#FF5555")
+            print(f"[DEBUG] ????ㅽ뙣: {e}")
+            self.show_toast("Sample save failed", "#FF5555")
 
     def _on_threshold_slider_change(self, value):
-        """Threshold 슬라이더 변경 시: 라벨 업데이트 + PatternMatcher에 값 전달 + 템플릿 reload"""
+        """Docstring."""
         val = int(float(value))
         self.threshold_label.configure(text=str(val))
-        # PatternMatcher의 이진화 임계값 동기화
+        # PatternMatcher???댁쭊???꾧퀎媛??숆린??
         global reader_thread
         if reader_thread and hasattr(reader_thread, 'matcher'):
             reader_thread.matcher.bin_threshold = val
-            # 템플릿 다시 로드 (새 threshold로 이진화)
+            # ?쒗뵆由??ㅼ떆 濡쒕뱶 (??threshold濡??댁쭊??
             tmpl_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temple")
             reader_thread.matcher.reload(tmpl_root)
-        # 캘리브레이션 프리뷰 갱신
+        # 罹섎━釉뚮젅?댁뀡 ?꾨━酉?媛깆떊
         self.update_calibration_preview()
 
     def close_calibration_popup(self):
@@ -1487,7 +1749,7 @@ class AppView:
 
     def bind_global_zoom_controls(self):
         self.root.bind_all("<Control-MouseWheel>", self.on_ctrl_mousewheel)
-        # 일부 환경(Linux/X11)에서 delta 대신 Button-4/5 이벤트를 사용
+        # ?쇰? ?섍꼍(Linux/X11)?먯꽌 delta ???Button-4/5 ?대깽?몃? ?ъ슜
         self.root.bind_all("<Control-Button-4>", self.on_ctrl_mousewheel)
         self.root.bind_all("<Control-Button-5>", self.on_ctrl_mousewheel)
 
@@ -1515,35 +1777,35 @@ class AppView:
         return "break"
 
     def build_navigation_control(self):
-        # 네비게이션 모드 섹션 - Ultra-Compact
+        # ?ㅻ퉬寃뚯씠??紐⑤뱶 ?뱀뀡 - Ultra-Compact
         nav_toggle_box = ctk.CTkFrame(self.c_nav, fg_color="#1A1C23", border_width=1, border_color="#343A46")
         nav_toggle_box.pack(fill="x", padx=1, pady=1)
-        ctk.CTkLabel(nav_toggle_box, text="🚀 NAV", font=("Inter", 9, "bold"), text_color="#10B981").pack(pady=1)
+        ctk.CTkLabel(nav_toggle_box, text="NAV", font=("Inter", 9, "bold"), text_color="#10B981").pack(pady=1)
         
         switch_row = ctk.CTkFrame(nav_toggle_box, fg_color="transparent")
         switch_row.pack(fill="x", pady=1, padx=2)
         
-        self.sw_follow = ctk.CTkCheckBox(switch_row, text="추적", font=("Inter", 9), command=self.update_nav_flags)
+        self.sw_follow = ctk.CTkCheckBox(switch_row, text="Group Follow", font=("Inter", 9), command=self.update_nav_flags)
         self.sw_follow.pack(side="left", padx=2)
         
-        self.sw_route = ctk.CTkCheckBox(switch_row, text="경로", font=("Inter", 9), command=self.update_nav_flags)
+        self.sw_route = ctk.CTkCheckBox(switch_row, text="Route", font=("Inter", 9), command=self.update_nav_flags)
         self.sw_route.pack(side="left", padx=2)
         
-        self.sw_avoid = ctk.CTkCheckBox(switch_row, text="우회", font=("Inter", 9), command=self.update_nav_flags)
+        self.sw_avoid = ctk.CTkCheckBox(switch_row, text="Avoid", font=("Inter", 9), command=self.update_nav_flags)
         self.sw_avoid.pack(side="left", padx=2)
 
-        # 유저 탐지 대응 섹션 - Ultra-Compact
+        # ?좎? ?먯? ????뱀뀡 - Ultra-Compact
         user_opt_box = ctk.CTkFrame(self.c_nav, fg_color="#1A1C23", border_width=1, border_color="#343A46")
         user_opt_box.pack(fill="x", padx=1, pady=1)
-        ctk.CTkLabel(user_opt_box, text="👤 USER", font=("Inter", 9, "bold"), text_color="#F87171").pack(pady=1)
+        ctk.CTkLabel(user_opt_box, text="USER OPTIONS", font=("Inter", 9, "bold"), text_color="#F87171").pack(pady=1)
         
-        # ── 화이트리스트 CSV 편집 UI ──────────────────────────
+        # ?? ?붿씠?몃━?ㅽ듃 CSV ?몄쭛 UI ??????????????????????????
         wl_box = ctk.CTkFrame(user_opt_box, fg_color="#0E1117", corner_radius=4)
         wl_box.pack(fill="x", padx=4, pady=2)
-        ctk.CTkLabel(wl_box, text="✅ 화이트리스트 (whitelist.csv)", font=("Inter", 8, "bold"),
+        ctk.CTkLabel(wl_box, text="Whitelist (whitelist.csv)", font=("Inter", 8, "bold"),
                      text_color="#10B981").pack(anchor="w", padx=4, pady=1)
 
-        # Listbox 영역
+        # Listbox ?곸뿭
         wl_list_frame = ctk.CTkFrame(wl_box, fg_color="#14161B")
         wl_list_frame.pack(fill="x", padx=4, pady=1)
         import tkinter as tk
@@ -1555,44 +1817,44 @@ class AppView:
         )
         self.lb_whitelist.pack(fill="x", padx=2, pady=1)
 
-        # 입력창 + 버튼
+        # ?낅젰李?+ 踰꾪듉
         wl_edit_row = ctk.CTkFrame(wl_box, fg_color="transparent")
         wl_edit_row.pack(fill="x", padx=4, pady=1)
-        self.ent_wl_add = ctk.CTkEntry(wl_edit_row, width=130, placeholder_text="닉네임 입력",
+        self.ent_wl_add = ctk.CTkEntry(wl_edit_row, width=130, placeholder_text="Enter nickname",
                                        height=20, font=("Inter", 8))
         self.ent_wl_add.pack(side="left", padx=1)
-        ctk.CTkButton(wl_edit_row, text="+추가", height=20, width=40, font=("Inter", 8),
+        ctk.CTkButton(wl_edit_row, text="ADD", height=20, width=40, font=("Inter", 8),
                       fg_color="#10B981", command=self._wl_add_nick).pack(side="left", padx=1)
-        ctk.CTkButton(wl_edit_row, text="삭제", height=20, width=40, font=("Inter", 8),
+        ctk.CTkButton(wl_edit_row, text="DEL", height=20, width=40, font=("Inter", 8),
                       fg_color="#EF4444", command=self._wl_del_nick).pack(side="left", padx=1)
-        ctk.CTkButton(wl_edit_row, text="저장", height=20, width=40, font=("Inter", 8),
+        ctk.CTkButton(wl_edit_row, text="SAVE", height=20, width=40, font=("Inter", 8),
                       fg_color="#A855F7", command=self._wl_save).pack(side="left", padx=1)
 
-        # 초기 로드
+        # 珥덇린 濡쒕뱶
         self._wl_refresh_listbox()
 
-        # 대응 옵션 스위치
+        # ????듭뀡 ?ㅼ쐞移?
         act_row = ctk.CTkFrame(user_opt_box, fg_color="transparent")
         act_row.pack(fill="x", pady=1, padx=2)
         
-        self.sw_u_alarm = ctk.CTkCheckBox(act_row, text="알림", font=("Inter", 9), command=self.sync_user_opts)
+        self.sw_u_alarm = ctk.CTkCheckBox(act_row, text="Alert", font=("Inter", 9), command=self.sync_user_opts)
         self.sw_u_alarm.pack(side="left", padx=2)
         
-        self.sw_u_stop = ctk.CTkCheckBox(act_row, text="정지", font=("Inter", 9), command=self.sync_user_opts)
+        self.sw_u_stop = ctk.CTkCheckBox(act_row, text="Stop", font=("Inter", 9), command=self.sync_user_opts)
         self.sw_u_stop.pack(side="left", padx=2)
         
-        self.sw_u_next = ctk.CTkCheckBox(act_row, text="무시", font=("Inter", 9), command=self.sync_user_opts)
+        self.sw_u_next = ctk.CTkCheckBox(act_row, text="Skip", font=("Inter", 9), command=self.sync_user_opts)
         self.sw_u_next.pack(side="left", padx=2)
         
-        self.sw_auto_debuff = ctk.CTkCheckBox(act_row, text="저주", font=("Inter", 9), command=self.sync_user_opts)
+        self.sw_auto_debuff = ctk.CTkCheckBox(act_row, text="AUTO DEBUFF", font=("Inter", 9), command=self.sync_user_opts)
         self.sw_auto_debuff.pack(side="left", padx=2)
 
-        # ── Grid 미세조정 슬라이더 ──────────────────────────
+        # ?? Grid 誘몄꽭議곗젙 ?щ씪?대뜑 ??????????????????????????
         grid_tune_box = ctk.CTkFrame(self.c_nav, fg_color="#1A1C23", border_width=1, border_color="#343A46")
         grid_tune_box.pack(fill="x", padx=1, pady=1)
-        ctk.CTkLabel(grid_tune_box, text="📐 Grid 미세조정", font=("Inter", 9, "bold"), text_color="#F59E0B").pack(pady=1)
+        ctk.CTkLabel(grid_tune_box, text="Grid Tuning", font=("Inter", 9, "bold"), text_color="#F59E0B").pack(pady=1)
 
-        # 오프셋 X 슬라이더
+        # ?ㅽ봽??X ?щ씪?대뜑
         sx_row = ctk.CTkFrame(grid_tune_box, fg_color="transparent")
         sx_row.pack(fill="x", padx=4, pady=1)
         ctk.CTkLabel(sx_row, text="Offset X", font=("Inter", 8), width=50).pack(side="left")
@@ -1603,7 +1865,7 @@ class AppView:
         self.grid_sx_lbl = ctk.CTkLabel(sx_row, text="276", font=("Inter", 8), width=30)
         self.grid_sx_lbl.pack(side="left")
 
-        # 오프셋 Y 슬라이더
+        # ?ㅽ봽??Y ?щ씪?대뜑
         sy_row = ctk.CTkFrame(grid_tune_box, fg_color="transparent")
         sy_row.pack(fill="x", padx=4, pady=1)
         ctk.CTkLabel(sy_row, text="Offset Y", font=("Inter", 8), width=50).pack(side="left")
@@ -1614,7 +1876,7 @@ class AppView:
         self.grid_sy_lbl = ctk.CTkLabel(sy_row, text="32", font=("Inter", 8), width=30)
         self.grid_sy_lbl.pack(side="left")
 
-        # 그리드 크기 슬라이더
+        # 洹몃━???ш린 ?щ씪?대뜑
         gs_row = ctk.CTkFrame(grid_tune_box, fg_color="transparent")
         gs_row.pack(fill="x", padx=4, pady=1)
         ctk.CTkLabel(gs_row, text="Grid Size", font=("Inter", 8), width=50).pack(side="left")
@@ -1626,42 +1888,42 @@ class AppView:
         self.grid_size_lbl = ctk.CTkLabel(gs_row, text="48.2", font=("Inter", 8), width=35)
         self.grid_size_lbl.pack(side="left")
 
-        # 저장 버튼
-        ctk.CTkButton(grid_tune_box, text="💾 저장", height=20, width=60, font=("Inter", 8),
+        # ???踰꾪듉
+        ctk.CTkButton(grid_tune_box, text="SAVE", height=20, width=60, font=("Inter", 8),
                       fg_color="#F59E0B", command=self._save_grid_tune).pack(pady=2)
 
-        # 사냥 경로 섹션 - Ultra-Compact
+        # ?щ깷 寃쎈줈 ?뱀뀡 - Ultra-Compact
         seq_box = ctk.CTkFrame(self.c_nav, fg_color="#1A1C23", border_width=1, border_color="#343A46")
         seq_box.pack(fill="x", padx=1, pady=1)
-        ctk.CTkLabel(seq_box, text="🧭 사냥 경로", font=("Inter", 9, "bold"), text_color="#A855F7").pack(pady=1)
+        ctk.CTkLabel(seq_box, text="Route Editor", font=("Inter", 9, "bold"), text_color="#A855F7").pack(pady=1)
         
-        # 상단: 맵/층 선택 및 역방향 모드
+        # ?곷떒: 留?痢??좏깮 諛???갑??紐⑤뱶
         top_row = ctk.CTkFrame(seq_box, fg_color="transparent")
         top_row.pack(fill="x", pady=1, padx=2)
         
-        ctk.CTkLabel(top_row, text="맵:", font=("Inter", 9)).pack(side="left", padx=1)
-        self.hunting_map_var = ctk.StringVar(value="복건천리마굴")
-        self.hunting_map_dropdown = ctk.CTkOptionMenu(top_row, variable=self.hunting_map_var, values=["복건천리마굴"], command=self.on_hunting_map_change, width=80)
+        ctk.CTkLabel(top_row, text="Map", font=("Inter", 9)).pack(side="left", padx=1)
+        self.hunting_map_var = ctk.StringVar(value="Select map")
+        self.hunting_map_dropdown = ctk.CTkOptionMenu(top_row, variable=self.hunting_map_var, values=["Select map"], command=self.on_hunting_map_change, width=80)
         self.hunting_map_dropdown.pack(side="left", padx=1)
         
-        ctk.CTkLabel(top_row, text="층:", font=("Inter", 9)).pack(side="left", padx=1)
+        ctk.CTkLabel(top_row, text="Floor", font=("Inter", 9)).pack(side="left", padx=1)
         self.hunting_floor_var = ctk.StringVar(value="1")
         self.hunting_floor_dropdown = ctk.CTkOptionMenu(top_row, variable=self.hunting_floor_var, values=["1"], command=self.on_hunting_floor_change, width=50)
         self.hunting_floor_dropdown.pack(side="left", padx=1)
         
-        self.sw_reverse_mode = ctk.CTkCheckBox(top_row, text="역", font=("Inter", 9), command=self.toggle_reverse_mode)
+        self.sw_reverse_mode = ctk.CTkCheckBox(top_row, text="REV", font=("Inter", 9), command=self.toggle_reverse_mode)
         self.sw_reverse_mode.pack(side="left", padx=1)
         
-        # 관리 버튼 (한 줄에 4개)
+        # 愿由?踰꾪듉 (??以꾩뿉 4媛?
         mid_row = ctk.CTkFrame(seq_box, fg_color="transparent")
         mid_row.pack(fill="x", pady=1, padx=2)
         
-        ctk.CTkButton(mid_row, text="+맵", height=22, width=50, font=("Inter", 9), command=self.add_hunting_map).pack(side="left", padx=1)
-        ctk.CTkButton(mid_row, text="+층", height=22, width=50, font=("Inter", 9), command=self.add_hunting_floor).pack(side="left", padx=1)
-        ctk.CTkButton(mid_row, text="+좌표", height=22, width=50, font=("Inter", 9), command=self.add_current_coord).pack(side="left", padx=1)
-        ctk.CTkButton(mid_row, text="저장", height=22, width=50, font=("Inter", 9), command=self.save_waypoints).pack(side="left", padx=1)
+        ctk.CTkButton(mid_row, text="+MAP", height=22, width=50, font=("Inter", 9), command=self.add_hunting_map).pack(side="left", padx=1)
+        ctk.CTkButton(mid_row, text="+FLOOR", height=22, width=50, font=("Inter", 9), command=self.add_hunting_floor).pack(side="left", padx=1)
+        ctk.CTkButton(mid_row, text="+POS", height=22, width=50, font=("Inter", 9), command=self.add_current_coord).pack(side="left", padx=1)
+        ctk.CTkButton(mid_row, text="SAVE", height=22, width=50, font=("Inter", 9), command=self.save_waypoints).pack(side="left", padx=1)
         
-        # Treeview (엑셀 스타일 표)
+        # Treeview (?묒? ?ㅽ?????
         tree_container = ctk.CTkFrame(seq_box, fg_color="#14161B")
         tree_container.pack(fill="x", pady=1, padx=2)
         
@@ -1670,11 +1932,11 @@ class AppView:
         
         columns = ("type", "x", "y", "direction", "reverse_action", "grid")
         self.seq_tree = tk.ttk.Treeview(tree_frame, columns=columns, show="headings", height=12)
-        self.seq_tree.heading("type", text="T")
+        self.seq_tree.heading("type", text="Type")
         self.seq_tree.heading("x", text="X")
         self.seq_tree.heading("y", text="Y")
-        self.seq_tree.heading("direction", text="D")
-        self.seq_tree.heading("reverse_action", text="R")
+        self.seq_tree.heading("direction", text="Dir")
+        self.seq_tree.heading("reverse_action", text="Rev")
         self.seq_tree.heading("grid", text="Grid")
         
         self.seq_tree.column("type", width=40)
@@ -1688,55 +1950,55 @@ class AppView:
         self.seq_tree.bind("<Double-1>", self.on_tree_double_click)
         self.seq_tree.bind("<Key>", self.on_tree_key_press)
         
-        # 관리 도구 (▲ ▼ 삭제 저장 현재좌표입력 이동)
+        # 愿由??꾧뎄 (??????젣 ????꾩옱醫뚰몴?낅젰 ?대룞)
         tool_row = ctk.CTkFrame(seq_box, fg_color="transparent")
         tool_row.pack(fill="x", pady=1, padx=2)
         
-        ctk.CTkButton(tool_row, text="▲", height=22, width=30, font=("Inter", 9), command=self.move_seq_up).pack(side="left", padx=1)
-        ctk.CTkButton(tool_row, text="▼", height=22, width=30, font=("Inter", 9), command=self.move_seq_down).pack(side="left", padx=1)
-        ctk.CTkButton(tool_row, text="×", height=22, width=30, font=("Inter", 9), command=self.delete_seq_item).pack(side="left", padx=1)
-        ctk.CTkButton(tool_row, text="💾", height=22, width=30, font=("Inter", 9), command=self.save_waypoints).pack(side="left", padx=1)
-        ctk.CTkButton(tool_row, text="현재좌표입력", height=22, width=70, font=("Inter", 9), command=self.set_current_coord_to_selected).pack(side="left", padx=1)
-        ctk.CTkButton(tool_row, text="이동", height=22, width=40, font=("Inter", 9), command=self.move_to_selected_coord).pack(side="left", padx=1)
+        ctk.CTkButton(tool_row, text="UP", height=22, width=30, font=("Inter", 9), command=self.move_seq_up).pack(side="left", padx=1)
+        ctk.CTkButton(tool_row, text="DOWN", height=22, width=30, font=("Inter", 9), command=self.move_seq_down).pack(side="left", padx=1)
+        ctk.CTkButton(tool_row, text="DEL", height=22, width=30, font=("Inter", 9), command=self.delete_seq_item).pack(side="left", padx=1)
+        ctk.CTkButton(tool_row, text="SAVE", height=22, width=30, font=("Inter", 9), command=self.save_waypoints).pack(side="left", padx=1)
+        ctk.CTkButton(tool_row, text="CUR", height=22, width=70, font=("Inter", 9), command=self.set_current_coord_to_selected).pack(side="left", padx=1)
+        ctk.CTkButton(tool_row, text="GO", height=22, width=40, font=("Inter", 9), command=self.move_to_selected_coord).pack(side="left", padx=1)
         
-        # 추가 버튼 (입구 사냥 출구)
+        # 異붽? 踰꾪듉 (?낃뎄 ?щ깷 異쒓뎄)
         add_row = ctk.CTkFrame(seq_box, fg_color="transparent")
         add_row.pack(fill="x", pady=1, padx=2)
         
-        ctk.CTkButton(add_row, text="입구", height=22, width=80, font=("Inter", 9), command=self.add_seq_entry).pack(side="left", padx=1)
-        ctk.CTkButton(add_row, text="사냥", height=22, width=80, font=("Inter", 9), command=self.add_seq_point).pack(side="left", padx=1)
-        ctk.CTkButton(add_row, text="출구", height=22, width=80, font=("Inter", 9), command=self.add_seq_exit).pack(side="left", padx=1)
+        ctk.CTkButton(add_row, text="ENTRY", height=22, width=80, font=("Inter", 9), command=self.add_seq_entry).pack(side="left", padx=1)
+        ctk.CTkButton(add_row, text="POINT", height=22, width=80, font=("Inter", 9), command=self.add_seq_point).pack(side="left", padx=1)
+        ctk.CTkButton(add_row, text="EXIT", height=22, width=80, font=("Inter", 9), command=self.add_seq_exit).pack(side="left", padx=1)
         
-        # 초기 시퀀스 로드
+        # 珥덇린 ?쒗??濡쒕뱶
         self.load_hunting_sequence()
 
     def update_nav_flags(self):
         self.state.nav_follow_enabled = self.sw_follow.get()
         self.state.nav_route_enabled = self.sw_route.get()
         self.state.nav_avoid_enabled = self.sw_avoid.get()
-        self.show_toast("⚙️ 이동 모드 설정 변경됨")
+        self.show_toast("Navigation flags updated")
 
     def sync_user_opts(self):
         self.state.user_alarm_enabled = self.sw_u_alarm.get()
         self.state.user_stop_enabled = self.sw_u_stop.get()
         self.state.user_next_enabled = self.sw_u_next.get()
         self.state.auto_debuff_enabled = self.sw_auto_debuff.get()
-        self.show_toast("👤 유저 탐지 설정 변경됨")
+        self.show_toast("User options updated")
 
-    # ── Grid 미세조정 헬퍼 ──────────────────────────────
+    # ?? Grid 誘몄꽭議곗젙 ?ы띁 ??????????????????????????????
     def _on_grid_tune(self, val=None):
-        """슬라이더 변경 시 라벨 업데이트 + config.json 즉시 저장"""
+        """Update grid tuning and save immediately."""
         sx = int(self.grid_sx_var.get())
         sy = int(self.grid_sy_var.get())
         gs = round(float(self.grid_size_var.get()), 1)
         self.grid_sx_lbl.configure(text=str(sx))
         self.grid_sy_lbl.configure(text=str(sy))
         self.grid_size_lbl.configure(text=f"{gs:.1f}")
-        # config.json 즉시 저장
+        # config.json 利됱떆 ???
         self._save_grid_tune()
 
     def _save_grid_tune(self):
-        """Grid 미세조정 값을 config.json에 저장"""
+        """Save grid tuning values into config.json."""
         try:
             sx = int(self.grid_sx_var.get())
             sy = int(self.grid_sy_var.get())
@@ -1753,14 +2015,14 @@ class AppView:
             conf["play_area"]["grid_size"] = gs
             with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(conf, f, indent=4, ensure_ascii=False)
-            # GridIndicator에도 즉시 반영
+            # GridIndicator?먮룄 利됱떆 諛섏쁺
             if hasattr(self, 'grid_indicator') and self.grid_indicator:
                 self.grid_indicator.grid_size = gs
-            self.show_toast(f"📐 Grid 조정: sx={sx}, sy={sy}, size={gs}")
+                self.show_toast("Grid tuning updated")
         except Exception as e:
-            print(f"[GridTune] 저장 실패: {e}")
+            print(f"[GridTune] ????ㅽ뙣: {e}")
 
-    # ── 화이트리스트 관리 헬퍼 ──────────────────────────────
+    # ?? ?붿씠?몃━?ㅽ듃 愿由??ы띁 ??????????????????????????????
     def _wl_refresh_listbox(self):
         self.lb_whitelist.delete(0, tk.END)
         for nick in self.state.whitelist_names:
@@ -1786,20 +2048,20 @@ class AppView:
             self._wl_refresh_listbox()
 
     def _wl_save(self):
-        # GameState에 보관된 리스트를 CSV에 저장
+        # GameState??蹂닿???由ъ뒪?몃? CSV?????
         self.state.save_whitelist_csv()
-        self.show_toast("✅ 화이트리스트 저장됨")
+        self.show_toast("Whitelist saved")
 
 
     class GridConverter:
-        """Grid 좌표 변환 유틸리티 클래스"""
+        """GridConverter helper utilities."""
         
         @staticmethod
         def name_to_index(grid_name):
-            """Grid 이름(S3, A10 등)을 내부 인덱스(col, row)로 변환"""
+            """Convert grid names like S3 or A10 to column/row indexes."""
             if not grid_name or len(grid_name) < 2:
                 return None, None
-            # 알파벳 추출 (열)
+            # ?뚰뙆踰?異붿텧 (??
             col_part = ""
             row_part = ""
             for i, char in enumerate(grid_name):
@@ -1811,11 +2073,11 @@ class AppView:
             if not col_part or not row_part:
                 return None, None
             try:
-                # 열 계산 (A=0, B=1, ..., S=18)
+                # ??怨꾩궛 (A=0, B=1, ..., S=18)
                 col = 0
                 for char in col_part:
                     col = col * 26 + (ord(char) - ord('A'))
-                # 행 계산 (1-indexed → 0-indexed)
+                # ??怨꾩궛 (1-indexed ??0-indexed)
                 row = int(row_part) - 1
                 return col, row
             except (ValueError, IndexError):
@@ -1823,9 +2085,9 @@ class AppView:
         
         @staticmethod
         def index_to_name(col, row):
-            """내부 인덱스(col, row)를 Grid 이름(S3, A10 등)으로 변환"""
+            """Convert column/row indexes back to grid names like S3 or A10."""
             try:
-                # 열 계산 (0-indexed → 알파벳)
+                # ??怨꾩궛 (0-indexed ???뚰뙆踰?
                 col_name = ""
                 temp_col = col
                 while temp_col >= 0:
@@ -1833,18 +2095,18 @@ class AppView:
                     temp_col = temp_col // 26 - 1
                     if temp_col < 0:
                         break
-                # 행 계산 (0-indexed → 1-indexed)
+                # ??怨꾩궛 (0-indexed ??1-indexed)
                 row_name = str(row + 1)
                 return f"{col_name}{row_name}"
             except:
                 return None
 
     def grid_name_to_coords(self, grid_name):
-        """Grid 이름(S3, A10 등)을 좌표(col, row)로 변환 (GridConverter 사용)"""
+        """Docstring."""
         return AppView.GridConverter.name_to_index(grid_name)
 
     def coords_to_grid_name(self, col, row):
-        """좌표(col, row)를 Grid 이름(S3, A10 등)으로 변환 (GridConverter 사용)"""
+        """Docstring."""
         return AppView.GridConverter.index_to_name(col, row)
 
     def save_waypoints(self):
@@ -1852,7 +2114,7 @@ class AppView:
         with open(waypoint_file, 'w', encoding='utf-8') as f:
             json.dump(self.state.waypoints_db, f, indent=4)
             
-        # CSV 추가 저장 (엑셀 관리용 표 생성)
+        # CSV 異붽? ???(?묒? 愿由ъ슜 ???앹꽦)
         try:
             csv_path = os.path.join(SCRIPT_DIR, "waypoints.csv")
             with open(csv_path, 'w', encoding='utf-8-sig', newline='') as f:
@@ -1871,17 +2133,17 @@ class AppView:
                             ex = data["exit"]
                             writer.writerow([map_name, floor_num, "Exit", ex.get("x",0), ex.get("y",0), ex.get("direction",""), ex.get("reverse_action",""), ""])
         except Exception as e:
-            print(f"[Warn] CSV 백업 실패: {e}")
+            print(f"[Warn] CSV 諛깆뾽 ?ㅽ뙣: {e}")
             
-        self.show_toast("💾 웨이포인트(JSON/CSV) 저장 완료")
+        self.show_toast("Waypoints saved (JSON/CSV)")
 
     def load_hunting_sequence(self):
-        """현재 선택된 맵/층의 시퀀스를 ListView에 로드 (CSV 우선)"""
+        """Docstring."""
         csv_path = os.path.join(SCRIPT_DIR, "waypoints.csv")
         waypoint_file = os.path.join(SCRIPT_DIR, "waypoints.json")
         loaded_db = {}
         
-        # 1. CSV 파일 우선 로드 (사용자 직접 엑셀 편집 반영)
+        # 1. CSV ?뚯씪 ?곗꽑 濡쒕뱶 (?ъ슜??吏곸젒 ?묒? ?몄쭛 諛섏쁺)
         if os.path.exists(csv_path):
             try:
                 with open(csv_path, 'r', encoding='utf-8-sig') as f:
@@ -1909,9 +2171,9 @@ class AppView:
                         elif t_type == "Hunt":
                             if g_str: target_dict["points"].append(g_str)
             except Exception as e:
-                print(f"[Warn] CSV 로드 실패, JSON 폴백 시도: {e}")
+                print(f"[Warn] CSV 濡쒕뱶 ?ㅽ뙣, JSON ?대갚 ?쒕룄: {e}")
         
-        # 2. CSV가 없을 경우 기존 JSON.load
+        # 2. CSV媛 ?놁쓣 寃쎌슦 湲곗〈 JSON.load
         if not loaded_db and os.path.exists(waypoint_file):
             try:
                 with open(waypoint_file, "r", encoding="utf-8") as f:
@@ -1921,21 +2183,21 @@ class AppView:
         
         self.state.waypoints_db = loaded_db
         
-        # 맵 드롭다운 업데이트
+        # 留??쒕∼?ㅼ슫 ?낅뜲?댄듃
         map_names = list(self.state.waypoints_db.keys())
-        self.hunting_map_dropdown.configure(values=map_names if map_names else ["복건천리마굴"])
+        self.hunting_map_dropdown.configure(values=map_names if map_names else ["蹂듦굔泥쒕━留덇뎬"])
         
-        # 층 드롭다운 업데이트
+        # 痢??쒕∼?ㅼ슫 ?낅뜲?댄듃
         current_map = self.hunting_map_var.get()
         if current_map in self.state.waypoints_db:
             floors = list(self.state.waypoints_db[current_map].keys())
             self.hunting_floor_dropdown.configure(values=floors if floors else ["1"])
         
-        # 시퀀스 로드
+        # ?쒗??濡쒕뱶
         self.refresh_seq_tree()
 
     def refresh_seq_tree(self):
-        """시퀀스 Treeview 갱신"""
+        """Docstring."""
         for item in self.seq_tree.get_children():
             self.seq_tree.delete(item)
         
@@ -1945,7 +2207,7 @@ class AppView:
         if current_map in self.state.waypoints_db and current_floor in self.state.waypoints_db[current_map]:
             seq_data = self.state.waypoints_db[current_map][current_floor]
             
-            # 입구
+            # ?낃뎄
             if "entry" in seq_data:
                 entry = seq_data["entry"]
                 x, y = entry.get("x", 0), entry.get("y", 0)
@@ -1959,7 +2221,7 @@ class AppView:
                     grid_str
                 ))
             
-            # 사냥점
+            # ?щ깷??
             if "points" in seq_data:
                 for point in seq_data["points"]:
                     col, row = self.GridConverter.name_to_index(point)
@@ -1973,7 +2235,7 @@ class AppView:
                         grid_str
                     ))
             
-            # 출구
+            # 異쒓뎄
             if "exit" in seq_data:
                 exit_data = seq_data["exit"]
                 x, y = exit_data.get("x", 0), exit_data.get("y", 0)
@@ -1988,7 +2250,7 @@ class AppView:
                 ))
 
     def on_hunting_map_change(self, value):
-        """맵 드롭다운 변경 시 층 드롭다운 및 시퀀스 갱신"""
+        """Docstring."""
         current_map = value
         if current_map in self.state.waypoints_db:
             floors = list(self.state.waypoints_db[current_map].keys())
@@ -1998,23 +2260,23 @@ class AppView:
         self.refresh_seq_tree()
 
     def on_hunting_floor_change(self, value):
-        """층 드롭다운 변경 시 시퀀스 갱신"""
+        """Docstring."""
         self.refresh_seq_tree()
 
     def add_hunting_floor(self):
-        """새 층 추가"""
+        """Docstring."""
         current_map = self.hunting_map_var.get()
         if current_map not in self.state.waypoints_db:
-            self.show_toast("맵을 먼저 선택해주세요", "#FF5555")
+            self.show_toast("Select a map first", "#FF5555")
             return
         
         pop = ctk.CTkToplevel(self.root)
-        pop.title("새 층 추가")
+        pop.title("Add Floor")
         pop.geometry("300x150")
         pop.attributes("-topmost", True)
         pop.transient(self.root)
         
-        ctk.CTkLabel(pop, text="층 이름:", font=("Inter", 11)).pack(pady=10)
+        ctk.CTkLabel(pop, text="Floor name:", font=("Inter", 11)).pack(pady=10)
         ent_name = ctk.CTkEntry(pop, width=150)
         ent_name.pack(pady=5)
         
@@ -2030,19 +2292,19 @@ class AppView:
                     self.save_waypoints()
                     self.load_hunting_sequence()
                     self.hunting_floor_var.set(name)
-                    self.show_toast(f"층 '{name}' 추가 완료")
+                    self.show_toast("Hunting floor added")
                     pop.destroy()
                 else:
-                    self.show_toast("이미 존재하는 층입니다", "#FF5555")
+                    self.show_toast("Floor already exists", "#FF5555")
         
-        ctk.CTkButton(pop, text="확인", command=on_ok).pack(pady=10)
+        ctk.CTkButton(pop, text="OK", command=on_ok).pack(pady=10)
 
     def add_current_coord(self):
-        """현재 좌표 추가"""
+        """Docstring."""
         current_map = self.hunting_map_var.get()
         current_floor = self.hunting_floor_var.get()
         if current_map not in self.state.waypoints_db or current_floor not in self.state.waypoints_db[current_map]:
-            self.show_toast("맵과 층을 먼저 선택해주세요", "#FF5555")
+            self.show_toast("Select a map and floor first", "#FF5555")
             return
         
         data = self.state.get_all()
@@ -2051,17 +2313,17 @@ class AppView:
         seq_data["points"].append(f"{x},{y}")
         self.save_waypoints()
         self.refresh_seq_tree()
-        self.show_toast(f"현재 좌표 ({x}, {y}) 추가 완료")
+        self.show_toast("Current coordinate added")
 
     def on_tree_double_click(self, event):
-        """Treeview 셀 더블클릭 시 편집"""
+        """Docstring."""
         item = self.seq_tree.selection()
         if not item:
             return
         item = item[0]
         column = self.seq_tree.identify_column(event.x)
         
-        # 컬럼 인덱스 가져오기
+        # 而щ읆 ?몃뜳??媛?몄삤湲?
         col_map = {"#1": "type", "#2": "x", "#3": "y", "#4": "direction", "#5": "reverse_action"}
         col_name = col_map.get(column, "")
         
@@ -2072,14 +2334,14 @@ class AppView:
         col_idx = list(col_map.values()).index(col_name)
         current_value = current_values[col_idx]
         
-        # 편집 팝업
+        # ?몄쭛 ?앹뾽
         pop = ctk.CTkToplevel(self.root)
-        pop.title("셀 편집")
+        pop.title("? ?몄쭛")
         pop.geometry("300x120")
         pop.attributes("-topmost", True)
         pop.transient(self.root)
         
-        ctk.CTkLabel(pop, text=f"{col_name} 수정:", font=("Inter", 10)).pack(pady=5)
+        ctk.CTkLabel(pop, text=f"Edit {col_name}:", font=("Inter", 10)).pack(pady=5)
         ent = ctk.CTkEntry(pop, width=200)
         ent.insert(0, str(current_value))
         ent.pack(pady=5)
@@ -2092,7 +2354,7 @@ class AppView:
             values[col_idx] = new_value
             self.seq_tree.item(item, values=tuple(values))
             
-            # waypoints.json에 저장
+            # waypoints.json?????
             self.save_tree_to_data()
             pop.destroy()
         
@@ -2101,14 +2363,14 @@ class AppView:
         
         btn_row = ctk.CTkFrame(pop, fg_color="transparent")
         btn_row.pack(pady=5)
-        ctk.CTkButton(btn_row, text="확인", height=24, width=80, command=on_ok).pack(side="left", padx=5)
-        ctk.CTkButton(btn_row, text="취소", height=24, width=80, command=on_cancel).pack(side="left", padx=5)
+        ctk.CTkButton(btn_row, text="OK", height=24, width=80, command=on_ok).pack(side="left", padx=5)
+        ctk.CTkButton(btn_row, text="CANCEL", height=24, width=80, command=on_cancel).pack(side="left", padx=5)
         
         ent.bind("<Return>", lambda e: on_ok())
         ent.bind("<Escape>", lambda e: on_cancel())
 
     def save_tree_to_data(self):
-        """Treeview 데이터를 waypoints.json에 저장"""
+        """Save Treeview data into waypoints.json."""
         current_map = self.hunting_map_var.get()
         current_floor = self.hunting_floor_var.get()
         if current_map not in self.state.waypoints_db or current_floor not in self.state.waypoints_db[current_map]:
@@ -2153,14 +2415,14 @@ class AppView:
         self.save_waypoints()
 
     def add_hunting_map(self):
-        """새 맵 추가"""
+        """Docstring."""
         pop = ctk.CTkToplevel(self.root)
-        pop.title("새 맵 추가")
+        pop.title("Add Map")
         pop.geometry("300x150")
         pop.attributes("-topmost", True)
         pop.transient(self.root)
         
-        ctk.CTkLabel(pop, text="맵 이름:", font=("Inter", 11)).pack(pady=10)
+        ctk.CTkLabel(pop, text="Map name:", font=("Inter", 11)).pack(pady=10)
         ent_name = ctk.CTkEntry(pop, width=200)
         ent_name.pack(pady=5)
         
@@ -2178,24 +2440,24 @@ class AppView:
                     self.save_waypoints()
                     self.load_hunting_sequence()
                     self.hunting_map_var.set(name)
-                    self.show_toast(f"맵 '{name}' 추가 완료")
+                    self.show_toast("Hunting map added")
                     pop.destroy()
                 else:
-                    self.show_toast("이미 존재하는 맵입니다", "#FF5555")
+                    self.show_toast("Map already exists", "#FF5555")
         
-        ctk.CTkButton(pop, text="확인", command=on_ok).pack(pady=10)
+        ctk.CTkButton(pop, text="OK", command=on_ok).pack(pady=10)
 
     def delete_hunting_map(self):
-        """현재 맵 삭제"""
+        """Docstring."""
         current_map = self.hunting_map_var.get()
         if current_map in self.state.waypoints_db:
             del self.state.waypoints_db[current_map]
             self.save_waypoints()
             self.load_hunting_sequence()
-            self.show_toast(f"맵 '{current_map}' 삭제 완료")
+            self.show_toast("Hunting map deleted")
 
     def delete_seq_item(self):
-        """시퀀스 항목 삭제 (Treeview용)"""
+        """Docstring."""
         item = self.seq_tree.selection()
         if not item:
             return
@@ -2203,25 +2465,25 @@ class AppView:
         
         self.seq_tree.delete(item)
         self.save_tree_to_data()
-        self.show_toast("항목 삭제 완료")
+        self.show_toast("Selected item deleted")
 
     def move_seq_up(self):
-        """시퀀스 항목 위로 이동 (Treeview용)"""
+        """Docstring."""
         item = self.seq_tree.selection()
         if not item:
             return
         item = item[0]
         
-        # 현재 아이템의 값 가져오기
+        # ?꾩옱 ?꾩씠?쒖쓽 媛?媛?몄삤湲?
         values = self.seq_tree.item(item, "values")
         
-        # 이전 아이템 찾기
+        # ?댁쟾 ?꾩씠??李얘린
         items = self.seq_tree.get_children()
         idx = items.index(item)
         if idx == 0:
-            return  # 첫 번째 아이템은 이동 불가
+            return  # 泥?踰덉㎏ ?꾩씠?쒖? ?대룞 遺덇?
         
-        # 이전 아이템과 값 교환
+        # ?댁쟾 ?꾩씠?쒓낵 媛?援먰솚
         prev_item = items[idx - 1]
         prev_values = self.seq_tree.item(prev_item, "values")
         
@@ -2232,22 +2494,22 @@ class AppView:
         self.save_tree_to_data()
 
     def move_seq_down(self):
-        """시퀀스 항목 아래로 이동 (Treeview용)"""
+        """Docstring."""
         item = self.seq_tree.selection()
         if not item:
             return
         item = item[0]
         
-        # 현재 아이템의 값 가져오기
+        # ?꾩옱 ?꾩씠?쒖쓽 媛?媛?몄삤湲?
         values = self.seq_tree.item(item, "values")
         
-        # 다음 아이템 찾기
+        # ?ㅼ쓬 ?꾩씠??李얘린
         items = self.seq_tree.get_children()
         idx = items.index(item)
         if idx == len(items) - 1:
-            return  # 마지막 아이템은 이동 불가
+            return  # 留덉?留??꾩씠?쒖? ?대룞 遺덇?
         
-        # 다음 아이템과 값 교환
+        # ?ㅼ쓬 ?꾩씠?쒓낵 媛?援먰솚
         next_item = items[idx + 1]
         next_values = self.seq_tree.item(next_item, "values")
         
@@ -2258,56 +2520,56 @@ class AppView:
         self.save_tree_to_data()
 
     def add_seq_entry(self):
-        """입구 추가 (Treeview용)"""
+        """Docstring."""
         current_map = self.hunting_map_var.get()
         current_floor = self.hunting_floor_var.get()
         if current_map not in self.state.waypoints_db or current_floor not in self.state.waypoints_db[current_map]:
             return
         
-        # Treeview에 입구 행 추가
+        # Treeview???낃뎄 ??異붽?
         self.seq_tree.insert("", 0, values=("Entry", 0, 0, "right", "", ""))
         self.save_tree_to_data()
-        self.show_toast("입구 추가 완료")
+        self.show_toast("Entry added")
 
     def add_seq_point(self):
-        """사냥점 추가 (Treeview용)"""
+        """Docstring."""
         current_map = self.hunting_map_var.get()
         current_floor = self.hunting_floor_var.get()
         if current_map not in self.state.waypoints_db or current_floor not in self.state.waypoints_db[current_map]:
             return
         
-        # 현재 좌표 가져오기
+        # ?꾩옱 醫뚰몴 媛?몄삤湲?
         data = self.state.get_all()
         x, y = data.get("x", 0), data.get("y", 0)
         
-        # grid 좌표 계산
+        # grid 醫뚰몴 怨꾩궛
         grid_str = self.calculate_grid_coord(x, y)
         
-        # Treeview에 사냥점 행 추가
+        # Treeview???щ깷????異붽?
         self.seq_tree.insert("", "end", values=("Hunt", x, y, "", "", grid_str))
         self.save_tree_to_data()
-        self.show_toast("사냥점 추가 완료")
+        self.show_toast("Point added")
 
     def add_seq_exit(self):
-        """출구 추가 (Treeview용)"""
+        """Docstring."""
         current_map = self.hunting_map_var.get()
         current_floor = self.hunting_floor_var.get()
         if current_map not in self.state.waypoints_db or current_floor not in self.state.waypoints_db[current_map]:
             return
         
-        # Treeview에 출구 행 추가
+        # Treeview??異쒓뎄 ??異붽?
         self.seq_tree.insert("", "end", values=("Exit", 0, 0, "down", "", ""))
         self.save_tree_to_data()
-        self.show_toast("출구 추가 완료")
+        self.show_toast("Exit added")
 
     def on_tree_key_press(self, event):
-        """Treeview 키보드 이벤트 처리 - 방향키로 direction 입력"""
+        """Docstring."""
         item = self.seq_tree.selection()
         if not item:
             return
         item = item[0]
         
-        # 방향키 매핑
+        # 諛⑺뼢??留ㅽ븨
         direction_map = {
             "Up": "up",
             "Down": "down",
@@ -2317,27 +2579,27 @@ class AppView:
         
         if event.keysym in direction_map:
             direction = direction_map[event.keysym]
-            # 현재 값 가져오기
+            # ?꾩옱 媛?媛?몄삤湲?
             values = list(self.seq_tree.item(item, "values"))
-            # direction 컬럼 업데이트 (index 3)
+            # direction 而щ읆 ?낅뜲?댄듃 (index 3)
             values[3] = direction
             self.seq_tree.item(item, values=values)
             self.save_tree_to_data()
-            self.show_toast(f"방향: {direction}")
+            self.show_toast(f"Direction: {direction}")
 
     def calculate_grid_coord(self, x, y):
-        """x, y 좌표에서 grid 좌표 계산"""
+        """Docstring."""
         try:
-            # hwnd 유효성 검사
+            # hwnd ?좏슚??寃??
             if not self.hwnd:
                 return ""
 
-            # ── 확정 오프셋: sx=276, sy=32 / 격자 크기 48.2 ──
-            # 공식: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
+            # ?? ?뺤젙 ?ㅽ봽?? sx=276, sy=32 / 寃⑹옄 ?ш린 48.2 ??
+            # 怨듭떇: GridX = (PixelX - 276) / 48.2, GridY = (PixelY - 32) / 48.2
             config_file = os.path.join(SCRIPT_DIR, "config.json")
-            play_area_sx = 276  # 확정 오프셋
-            play_area_sy = 32   # 확정 오프셋
-            grid_size = 48.2    # float (누적오차 방지)
+            play_area_sx = 276  # ?뺤젙 ?ㅽ봽??
+            play_area_sy = 32   # ?뺤젙 ?ㅽ봽??
+            grid_size = 48.2    # float (?꾩쟻?ㅼ감 諛⑹?)
             if os.path.exists(config_file):
                 try:
                     with open(config_file, 'r', encoding='utf-8') as f:
@@ -2352,7 +2614,7 @@ class AppView:
             grid_x = int((x - play_area_sx) / grid_size)
             grid_y = int((y - play_area_sy) / grid_size)
             
-            # grid 좌표를 문자열로 변환 (예: A1, B2, C3)
+            # grid 醫뚰몴瑜?臾몄옄?대줈 蹂??(?? A1, B2, C3)
             if grid_x < 0 or grid_y < 0:
                 return ""
             
@@ -2361,98 +2623,98 @@ class AppView:
             
             return grid_str
         except Exception as e:
-            print(f"grid 좌표 계산 오류: {e}")
+            print(f"grid 醫뚰몴 怨꾩궛 ?ㅻ쪟: {e}")
             return ""
 
     def set_current_coord_to_selected(self):
-        """현재 게임 좌표를 선택된 항목의 x,y에 입력"""
+        """Docstring."""
         item = self.seq_tree.selection()
         if not item:
-            self.show_toast("항목을 선택해주세요", color="#EF4444")
+            self.show_toast("Select an item first", color="#EF4444")
             return
         item = item[0]
         
-        # 현재 게임 좌표 가져오기
+        # ?꾩옱 寃뚯엫 醫뚰몴 媛?몄삤湲?
         data = self.state.get_all()
         x, y = data.get("x", 0), data.get("y", 0)
         
-        # grid 좌표 계산
+        # grid 醫뚰몴 怨꾩궛
         grid_str = self.calculate_grid_coord(x, y)
         
-        # 현재 값 가져오기
+        # ?꾩옱 媛?媛?몄삤湲?
         values = list(self.seq_tree.item(item, "values"))
-        # x, y, grid 컬럼 업데이트 (index 1, 2, 5)
+        # x, y, grid 而щ읆 ?낅뜲?댄듃 (index 1, 2, 5)
         values[1] = str(x)
         values[2] = str(y)
         values[5] = grid_str
         self.seq_tree.item(item, values=values)
         self.save_tree_to_data()
-        self.show_toast(f"좌표 입력: ({x}, {y}) Grid: {grid_str}")
+        self.show_toast("Coordinate updated")
 
     def move_to_selected_coord(self):
-        """선택된 항목의 좌표로 이동"""
-        print("[Move] F1 키 눌림")
+        """Docstring."""
+        print("[Move] Selected coordinate move started")
         item = self.seq_tree.selection()
         if not item:
-            print("[Move] 항목 선택 안됨, 첫 번째 항목 자동 선택")
-            # 첫 번째 항목 자동 선택
+            print("[Move] No item selected, auto-selecting first item")
+            # Auto-select the first item
             first_item = self.seq_tree.get_children()
             if first_item:
                 self.seq_tree.selection_set(first_item[0])
                 item = self.seq_tree.selection()
                 if not item:
-                    print("[Move] 첫 번째 항목 선택 실패")
-                    self.show_toast("항목이 없습니다", color="#EF4444")
+                    print("[Move] Failed to auto-select the first item")
+                    self.show_toast("No items available", color="#EF4444")
                     return
                 item = item[0]
             else:
-                print("[Move] 항목이 없음")
-                self.show_toast("항목이 없습니다", color="#EF4444")
+                print("[Move] No items available")
+                self.show_toast("No items available", color="#EF4444")
                 return
         else:
             item = item[0]
         
-        # 선택된 항목의 좌표 가져오기
+        # ?좏깮????ぉ??醫뚰몴 媛?몄삤湲?
         values = self.seq_tree.item(item, "values")
         x = int(values[1]) if values[1] else 0
         y = int(values[2]) if values[2] else 0
         grid_str = values[5] if len(values) > 5 else ""
-        print(f"[Move] 선택된 좌표: ({x}, {y}), 그리드: {grid_str}")
+        print(f"[Move] ?좏깮??醫뚰몴: ({x}, {y}), 洹몃━?? {grid_str}")
         
-        # 현재 좌표 가져오기
+        # ?꾩옱 醫뚰몴 媛?몄삤湲?
         data = self.state.get_all()
         current_x, current_y = data.get("x", 0), data.get("y", 0)
-        print(f"[Move] 현재 좌표: ({current_x}, {current_y})")
+        print(f"[Move] ?꾩옱 醫뚰몴: ({current_x}, {current_y})")
         
-        # 방향 결정
+        # 諛⑺뼢 寃곗젙
         dx = x - current_x
         dy = y - current_y
         print(f"[Move] dx: {dx}, dy: {dy}")
         
-        # 방향키 입력 (아두이노 통신)
+        # 諛⑺뼢???낅젰 (?꾨몢?대끂 ?듭떊)
         if abs(dx) > abs(dy):
             direction = "right" if dx > 0 else "left"
         else:
             direction = "down" if dy > 0 else "up"
         
-        print(f"[Move] 방향: {direction}")
+        print(f"[Move] 諛⑺뼢: {direction}")
         
-        # 아두이노로 방향키 전송
+        # ?꾨몢?대끂濡?諛⑺뼢???꾩넚
         try:
             hw.hold_move(direction, "move_hold")
-            print("[Move] 아두이노 전송 완료")
+            print("[Move] ?꾨몢?대끂 ?꾩넚 ?꾨즺")
         except Exception as e:
-            print(f"[Move] 아두이노 전송 실패: {e}")
+            print(f"[Move] ?꾨몢?대끂 ?꾩넚 ?ㅽ뙣: {e}")
         
-        self.show_toast(f"이동: {direction} -> ({x}, {y}) Grid: {grid_str}")
+            self.show_toast("Move complete")
 
     def toggle_reverse_mode(self):
-        """역방향 회항 모드 토글"""
+        """Docstring."""
         self.state.reverse_mode = self.sw_reverse_mode.get()
-        self.show_toast(f"역방향 회항 모드: {'ON' if self.state.reverse_mode else 'OFF'}")
+        self.show_toast(f"Reverse mode: {'ON' if self.state.reverse_mode else 'OFF'}")
 
     def show_toast(self, msg, color="#10B981"):
-        """메인 스레드가 아닌 곳에서도 안전하게 토스트 메시지를 호출할 수 있도록 수정"""
+        """Docstring."""
         def _logic():
             self.toast_lbl.configure(text=msg, text_color=color)
             self.root.after(2200, lambda: self.toast_lbl.configure(text=""))
@@ -2481,10 +2743,10 @@ class AppView:
         
         with open(config_file, 'w', encoding='utf-8') as f:
             json.dump(conf, f, indent=4)
-        self.show_toast("💾 트리거 설정 저장 완료")
+        self.show_toast("Spell settings saved")
 
     def get_dynamic_font_size(self, text, max_width=34):
-        # 텍스트 길이에 따라 폰트 크기 계산 (공간이 더 좁아짐에 따라 더 작은 폰트 허용)
+        # ?띿뒪??湲몄씠???곕씪 ?고듃 ?ш린 怨꾩궛 (怨듦컙????醫곸븘吏먯뿉 ?곕씪 ???묒? ?고듃 ?덉슜)
         length = len(text)
         if length <= 2: return 10
         if length <= 4: return 8
@@ -2502,7 +2764,7 @@ class AppView:
     def save_spells_db(self):
         with open(self.spell_db_path, 'w', encoding='utf-8') as f:
             json.dump(self.spell_db, f, indent=4, ensure_ascii=False)
-        # GameState 동기화
+        # GameState ?숆린??
         self.state.spells.clear()
         for s in self.spell_db:
             if s.get("slot") and s.get("use", True):
@@ -2511,17 +2773,17 @@ class AppView:
                     target_type=s["target_type"],
                     hotkey=s["slot"] if len(s["slot"]) == 1 and s["slot"].isdigit() else None,
                     spell_char=s["slot"] if not (len(s["slot"]) == 1 and s["slot"].isdigit()) else None,
-                    category=s.get("category", "공격")
+                    category=s.get("category", "怨듦꺽")
                 ))
 
     def sync_slots_from_db(self):
-        # UI 업데이트 로직 (build 이후 호출 가능)
+        # UI ?낅뜲?댄듃 濡쒖쭅 (build ?댄썑 ?몄텧 媛??
         if hasattr(self, 'slot_buttons'):
-            # 초기화
+            # 珥덇린??
             for info in self.slot_buttons.values():
                 info["btn"].configure(text="", fg_color="#252A34", border_color="#4B5563")
             
-            # DB에서 슬롯 매핑 확인
+            # DB?먯꽌 ?щ’ 留ㅽ븨 ?뺤씤
             for spell in self.spell_db:
                 slot_key = spell.get("slot")
                 if slot_key:
@@ -2530,12 +2792,12 @@ class AppView:
                             name = spell["name"]
                             fs = self.get_dynamic_font_size(name)
                             color = self.get_category_color(spell.get("category"))
-                            # 채워진 슬롯: 텍스트 추가, 다크톤 배경 및 유색 테두리
+                            # 梨꾩썙吏??щ’: ?띿뒪??異붽?, ?ㅽ겕??諛곌꼍 諛??좎깋 ?뚮몢由?
                             info["btn"].configure(text=name, font=("Inter", fs), fg_color="#1F2937", border_color=color)
 
     def get_category_color(self, cat):
-        # 첨부 이미지의 느낌을 살린 선명한 색상 구성
-        colors = {"공격": "#F43F5E", "회복": "#0EA5E9", "버프": "#8B5CF6", "디버프": "#F59E0B"}
+        # 泥⑤? ?대?吏???먮굦???대┛ ?좊챸???됱긽 援ъ꽦
+        colors = {"ATTACK": "#F43F5E", "BUFF": "#0EA5E9", "DEBUFF": "#8B5CF6", "OTHER": "#F59E0B"}
         return colors.get(cat, "#475569")
 
     def refresh_storage_box(self):
@@ -2543,12 +2805,12 @@ class AppView:
             widget.destroy()
         
         for i, spell in enumerate(self.spell_db):
-            r, c = divmod(i, 10) # 10열로 배열
+            r, c = divmod(i, 10) # 10?대줈 諛곗뿴
             name = spell["name"]
             fs = self.get_dynamic_font_size(name)
             color = self.get_category_color(spell.get("category"))
             
-            # 선택된 상태면 하이라이트(민트색 테두리)
+            # ?좏깮???곹깭硫??섏씠?쇱씠??誘쇳듃???뚮몢由?
             btn_color = "#1F2937" if self.picked_spell != name else "#111827"
             border_color = "#10B981" if self.picked_spell == name else color
             
@@ -2559,7 +2821,7 @@ class AppView:
                                command=lambda n=name: self.pick_spell(n))
             btn.grid(row=r, column=c, padx=2, pady=2)
             
-            # 드래그 앤 드롭 바인딩
+            # ?쒕옒洹????쒕∼ 諛붿씤??
             btn.bind("<ButtonPress-1>", lambda e, n=name: self.on_drag_start(e, n))
             btn.bind("<B1-Motion>", self.on_drag_motion)
             btn.bind("<ButtonRelease-1>", self.on_drag_drop)
@@ -2571,7 +2833,7 @@ class AppView:
             self.dnd_label = None
             
         fs = self.get_dynamic_font_size(name)
-        # 플로팅 레이블 생성
+        # ?뚮줈???덉씠釉??앹꽦
         self.dnd_label = tk.Label(self.root, text=name, bg="#10B981", fg="#FFFFFF", 
                                  font=("Inter", fs+1, "bold"), relief="flat", padx=6, pady=3)
         
@@ -2594,7 +2856,7 @@ class AppView:
 
         x, y = event.x_root, event.y_root
         
-        # 드롭된 위치가 슬롯 내부인지 판별
+        # ?쒕∼???꾩튂媛 ?щ’ ?대??몄? ?먮퀎
         for (r, c), info in self.slot_buttons.items():
             btn = info["btn"]
             bx = btn.winfo_rootx()
@@ -2622,14 +2884,14 @@ class AppView:
             
             # Type Dropdown
             var_type = ctk.StringVar(value=spell["target_type"])
-            cb_type = ctk.CTkOptionMenu(row, values=["즉발형", "대상선택형", "대상입력형"], 
+            cb_type = ctk.CTkOptionMenu(row, values=["INSTANT", "TARGET_SELECT", "TARGET_INPUT"],
                                       variable=var_type, width=100, font=("Inter", 10),
                                       command=lambda v, s=spell: self.update_spell_prop(s, "target_type", v))
             cb_type.pack(side="left", padx=5)
             
             # Category Dropdown
-            var_cat = ctk.StringVar(value=spell.get("category", "공격"))
-            cb_cat = ctk.CTkOptionMenu(row, values=["공격", "회복", "버프", "디버프"], 
+            var_cat = ctk.StringVar(value=spell.get("category", "怨듦꺽"))
+            cb_cat = ctk.CTkOptionMenu(row, values=["ATTACK", "BUFF", "DEBUFF", "OTHER"],
                                      variable=var_cat, width=100, font=("Inter", 10),
                                      command=lambda v, s=spell: self.update_spell_prop(s, "category", v))
             cb_cat.pack(side="left", padx=5)
@@ -2646,7 +2908,7 @@ class AppView:
         
         key = self.slot_buttons[(r, c)]["key"]
         
-        # 이전 슬롯이 같은 키였다면 제거 (중복 방지)
+        # ?댁쟾 ?щ’??媛숈? ?ㅼ??ㅻ㈃ ?쒓굅 (以묐났 諛⑹?)
         for s in self.spell_db:
             if s.get("slot") == key:
                 s["slot"] = ""
@@ -2672,7 +2934,7 @@ class AppView:
     def update_spell_prop(self, spell, key, value):
         spell[key] = value
         self.save_spells_db()
-        self.refresh_storage_box() # 색상 등이 바뀔 수 있으므로 갱신
+        self.refresh_storage_box() # ?됱긽 ?깆씠 諛붾????덉쑝誘濡?媛깆떊
         self.show_toast(f"{spell['name']} updated")
 
     def open_visual_selector(self, target_name):
@@ -2692,11 +2954,11 @@ class AppView:
             conf[target_name] = asdict(Region(sx, sy, dx, dy))
             save_config(conf)
             self.show_toast(f"# {target_name.upper()} AREA SAVED")
-            # 즉시 프리뷰 갱신
+            # 利됱떆 ?꾨━酉?媛깆떊
             if hasattr(self, "update_calibration_preview"):
                 self.update_calibration_preview()
 
-        # 스크린샷 창 대신 실시간 오버레이 실행
+        # ?ㅽ겕由곗꺑 李?????ㅼ떆媛??ㅻ쾭?덉씠 ?ㅽ뻾
         OverlaySelector(self.root, hwnd, save_result)
 
     def toggle_ocr_engine(self):
@@ -2713,24 +2975,24 @@ class AppView:
         if not hasattr(self, "indicator"):
             hwnd = find_game_window(WIN_KEY)
             if not hwnd:
-                self.show_toast("❌ GAME NOT FOUND", "#FF5555")
+                self.show_toast("??GAME NOT FOUND", "#FF5555")
                 return
             self.indicator = ROIIndicator(self.root, hwnd)
             
         self.indicator.visible = not self.indicator.visible
         if self.indicator.visible:
-            # 즉시 표시
+            # 利됱떆 ?쒖떆
             global reader_thread
             if reader_thread is not None and hasattr(reader_thread, "regions"):
                 self.indicator.update_position(reader_thread.regions)
         else:
-            self.indicator.withdraw() # 즉시 숨김 버그 수정
+            self.indicator.withdraw() # 利됱떆 ?④? 踰꾧렇 ?섏젙
 
     def toggle_grid_overlay(self):
         if not hasattr(self, "grid_indicator"):
             hwnd = find_game_window(WIN_KEY)
             if not hwnd:
-                self.show_toast("❌ GAME NOT FOUND", "#FF5555")
+                self.show_toast("??GAME NOT FOUND", "#FF5555")
                 return
             self.grid_indicator = GridIndicator(self.root, hwnd, self.state)
             
@@ -2741,21 +3003,21 @@ class AppView:
             self.btn_grid_toggle.configure(text="GRID ON", fg_color="#10B981")
             self.lbl_grid_offset.configure(text=f"OFFSET: ({self.grid_indicator.offset_x}, {self.grid_indicator.offset_y})")
             self.grid_indicator.update_position()
-            self.show_toast("그리드 오버레이 활성화")
+            self.show_toast("OK")
         else:
             self.btn_grid_toggle.configure(text="GRID OFF", fg_color="#FF5555")
             self.grid_indicator.withdraw()
-            self.show_toast("그리드 오버레이 비활성화")
+            self.show_toast("Grid overlay hidden")
 
     def on_alpha_change(self, value):
-        """불투명도 슬라이더 변경 시 호출"""
+        """Docstring."""
         if hasattr(self, "grid_indicator"):
             self.grid_indicator.set_alpha(float(value))
 
     def move_grid(self, dx, dy):
-        """그리드 오프셋 1px 이동"""
+        """Docstring."""
         if not hasattr(self, "grid_indicator") or not self.grid_indicator.visible:
-            self.show_toast("❌ 그리드가 활성화되지 않음", "#FF5555")
+            self.show_toast("Grid overlay is disabled", "#FF5555")
             return
         
         self.grid_indicator.offset_x += dx
@@ -2763,11 +3025,11 @@ class AppView:
         self.lbl_grid_offset.configure(text=f"OFFSET: ({self.grid_indicator.offset_x}, {self.grid_indicator.offset_y})")
         self.grid_indicator.update_position()
         
-        # 오프셋을 config.json에 저장
+        # ?ㅽ봽?뗭쓣 config.json?????
         self.save_grid_offset()
     
     def save_grid_offset(self):
-        """그리드 오프셋을 config.json에 저장"""
+        """Save the grid indicator offset into config.json."""
         if not hasattr(self, "grid_indicator"):
             return
         config_file = os.path.join(SCRIPT_DIR, "config.json")
@@ -2799,25 +3061,25 @@ class AppView:
         curr = getattr(reg, attr)
         setattr(reg, attr, curr + delta)
         
-        # 저장
+        # ???
         conf = load_config()
         conf[target] = asdict(reg)
         save_config(conf)
-        # 즉시 피드백
+        # 利됱떆 ?쇰뱶諛?
         if hasattr(self, "indicator") and self.indicator.visible:
             self.indicator.update_position(reader_thread.regions)
 
     def auto_connect_hardware(self):
-        """프로그램 시작 시 아두이노 자동 연결 시도"""
+        """Docstring."""
         global hw
         try:
-            # 사용 가능한 시리얼 포트 스캔
+            # ?ъ슜 媛?ν븳 ?쒕━???ы듃 ?ㅼ틪
             comports = serial.tools.list_ports.comports()
             all_ports = [p.device for p in comports]
             if all_ports and hasattr(self, "cb_port"):
                 self.cb_port.configure(values=all_ports)
                 
-            # USB나 특정 키워드가 포함된 포트만 필터링 (메인보드 가상 COM포트 제외)
+            # USB???뱀젙 ?ㅼ썙?쒓? ?ы븿???ы듃留??꾪꽣留?(硫붿씤蹂대뱶 媛??COM?ы듃 ?쒖쇅)
             ports = []
             for p in comports:
                 desc = (p.description or "").upper()
@@ -2826,53 +3088,59 @@ class AppView:
                     ports.append(p.device)
                     
             if not ports:
-                print("[Hardware] 자동 연결 가능한 USB 시리얼 포트 없음 (가상 포트 제외됨)")
+                print("[Hardware] Auto-connect failed: no USB serial ports found (non-USB ports skipped)")
                 return
             
-            # 모든 호환 포트 순차적으로 시도
+            # Try each detected port in order.
             for port in ports:
                 if hw.connect(port):
                     self.btn_hw_connect.configure(text="DISCONNECT", fg_color="#EF4444")
-                    self.lbl_hw_status.configure(text=f"🔌 HARDWARE: {port}", text_color="#10B981")
+                    self.lbl_hw_status.configure(text=f"[Hardware] {port}", text_color="#10B981")
                     self.cb_port.set(port)
-                    print(f"[Hardware] 자동 연결 성공: {port}")
                     self.show_toast("HARDWARE SECURELY CONNECTED")
                     return
                 else:
-                    print(f"[Hardware] 연결 실패: {port}, 다음 포트 시도...")
-            
-            print("[Hardware] 호환 포트 연결 실패, 수동 선택 필요")
+                    print(f"[Hardware] Connect failed: {port}, trying next port...")
+
+            print("[Hardware] Auto-connect failed, manual selection required")
         except Exception as e:
-            print(f"[Hardware] 자동 연결 오류: {e}")
+            print(f"[Hardware] Auto-connect error: {e}")
 
     def toggle_hardware(self):
         global hw
         if hw.ser and hw.ser.is_open:
             hw.disconnect()
             self.btn_hw_connect.configure(text="CONNECT ESP32", fg_color="#6366F1")
-            self.lbl_hw_status.configure(text="🔌 HARDWARE: NONE", text_color="#FF5555")
+            self.lbl_hw_status.configure(text="[Hardware] NONE", text_color="#FF5555")
             self.show_toast("HARDWARE DISCONNECTED", "#FFB800")
         else:
             port = self.cb_port.get()
             if hw.connect(port):
                 self.btn_hw_connect.configure(text="DISCONNECT", fg_color="#EF4444")
-                self.lbl_hw_status.configure(text=f"🔌 HARDWARE: {port}", text_color="#10B981")
+                self.lbl_hw_status.configure(text=f"[Hardware] {port}", text_color="#10B981")
                 self.show_toast("HARDWARE SECURELY CONNECTED")
             else:
                 self.show_toast("CONNECTION FAILED", "#FF5555")
 
     def set_role(self, role: str):
-        """역할 설정 및 상태 동기화"""
-        self.state.role = role
-        self.show_toast(f"Role set to: {role}")
+        """Toggle F1 route mode."""
+        normalized = self._normalize_role_name(role)
+        self.state.role = normalized
+        self.state.network_role = normalized
+        if hasattr(self, "cb_role") and self.cb_role.winfo_exists():
+            try:
+                self.cb_role.set(self._display_role_name(normalized))
+            except Exception:
+                pass
+        self.show_toast(f"Role set to: {self._display_role_name(normalized)}")
 
     def toggle_sentinel(self):
-        """SentinelThread 활성화/비활성화 토글"""
+        """Docstring."""
         self.state.sentinel_enabled = not self.state.sentinel_enabled
         status = "ON" if self.state.sentinel_enabled else "OFF"
         color = "#10B981" if self.state.sentinel_enabled else "#343A40"
         
-        # 버튼 텍스트와 색상 변경
+        # 踰꾪듉 ?띿뒪?몄? ?됱긽 蹂寃?
         if hasattr(self, 'btn_sentinel'):
             self.btn_sentinel.configure(text=f"SENTINEL {status}", fg_color=color)
         
@@ -2880,49 +3148,35 @@ class AppView:
         print(f"[GUI] Sentinel Toggle: {status}")
 
     def toggle_service(self):
-        global action_thread
-        action_thread.task_active = not action_thread.task_active
-        
-        # UI 업데이트는 메인 스레드에서 실행 (RuntimeError 방지)
-        def _update_ui():
-            status = "STOPPED" if not action_thread.task_active else "ACTIVE"
-            btn_text = "RUN (F2)" if not action_thread.task_active else "STOP (F2)"
-            btn_color = "#10B981" if not action_thread.task_active else "#EF4444"
-            self.btn_macro.configure(text=btn_text, fg_color=btn_color)
-            self.show_toast(f"SERVICE: {status}")
-            
-        try:
-            self.root.after(0, _update_ui)
-        except:
-            pass
+        self._toggle_control_mode("FOLLOW_SERVICE", "Follow+Service")
 
     def set_game_scale(self, scale: float):
-        """게임 창 배율 설정 및 윈도우 크기 변경"""
+        """Worker for the F1 route thread."""
         new_w, new_h = self.state.set_game_scale(scale)
         
-        # 게임 창 크기 변경
+        # 寃뚯엫 李??ш린 蹂寃?
         hwnd = self.state.hwnd
         if hwnd:
             try:
                 win32gui.SetWindowPos(hwnd, 0, 0, 0, new_w, new_h, 
                                      win32con.SWP_NOMOVE | win32con.SWP_NOZORDER)
-                self.show_toast(f"해상도 변경: {new_w}x{new_h} ({int(scale)}배)")
+                self.show_toast(f"Game size changed: {new_w}x{new_h} ({int(scale)}x)")
             except Exception as e:
-                self.show_toast(f"해상도 변경 실패: {e}")
+                self.show_toast(f"Game size change failed: {e}")
         
-        # 해상도 표시 업데이트
+        # ?댁긽???쒖떆 ?낅뜲?댄듃
         self.update_resolution_display()
 
     def update_resolution_display(self):
-        """해상도 표시 업데이트"""
+        """Docstring."""
         try:
-            # 실제 게임창 해상도 가져오기
+            # ?ㅼ젣 寃뚯엫李??댁긽??媛?몄삤湲?
             hwnd = find_game_window(WIN_KEY)
             if hwnd:
                 rect = win32gui.GetWindowRect(hwnd)
                 game_w = rect[2] - rect[0]
                 game_h = rect[3] - rect[1]
-                # 클라이언트 영역 크기 가져오기
+                # ?대씪?댁뼵???곸뿭 ?ш린 媛?몄삤湲?
                 client_rect = win32gui.GetClientRect(hwnd)
                 client_w = client_rect[2]
                 client_h = client_rect[3]
@@ -2932,21 +3186,380 @@ class AppView:
                 if hasattr(self, 'lbl_game_res') and self.lbl_game_res.winfo_exists():
                     self.lbl_game_res.configure(text="[Game] -")
         except Exception as e:
-            print(f"[GUI] 해상도 업데이트 오류: {e}")
+            print(f"[GUI] ?댁긽???낅뜲?댄듃 ?ㅻ쪟: {e}")
 
         try:
             gui_w, gui_h = self.root.winfo_width(), self.root.winfo_height()
             if hasattr(self, 'lbl_gui_res') and self.lbl_gui_res.winfo_exists():
                 self.lbl_gui_res.configure(text=f"[GUI] {gui_w}x{gui_h}")
         except Exception as e:
-            print(f"[GUI] GUI 해상도 업데이트 오류: {e}")
+            print(f"[GUI] GUI ?댁긽???낅뜲?댄듃 ?ㅻ쪟: {e}")
+
+    def _format_map_text(self, data: dict) -> str:
+        map_name = str(data.get("map_name") or data.get("current_map") or "").strip()
+        map_floor = str(data.get("map_floor") or data.get("current_floor") or "").strip()
+        if map_name and map_floor:
+            return f"{map_name}{map_floor}"
+        return map_name or "-"
+
+    def _format_coord_text(self, data: dict) -> tuple[str, str]:
+        x_text = str(data.get("x_str") or "").strip()
+        y_text = str(data.get("y_str") or "").strip()
+        if not x_text:
+            try:
+                x_text = f"{int(data.get('x', 0) or 0):04d}"
+            except Exception:
+                x_text = "-"
+        if not y_text:
+            try:
+                y_text = f"{int(data.get('y', 0) or 0):04d}"
+            except Exception:
+                y_text = "-"
+        return x_text or "-", y_text or "-"
+
+    def _format_hp_mp_text(self, data: dict) -> tuple[str, str]:
+        hp_text = str(data.get("hp_str") or "").strip()
+        mp_text = str(data.get("mp_str") or "").strip()
+        if not hp_text:
+            try:
+                hp_text = str(int(data.get("hp", 0) or 0))
+            except Exception:
+                hp_text = "-"
+        if not mp_text:
+            try:
+                mp_text = str(int(data.get("mp", 0) or 0))
+            except Exception:
+                mp_text = "-"
+        return hp_text or "-", mp_text or "-"
+
+    def _get_peer_snapshot_by_role(self, role_name: str) -> Optional[dict]:
+        best = None
+        best_ts = -1.0
+        for _sender, data in getattr(self.state, "other_pc_data", {}).items():
+            if not isinstance(data, dict):
+                continue
+            remote_role = str(data.get("role") or data.get("network_role") or "").strip()
+            if remote_role != role_name:
+                continue
+            rx_ts = float(data.get("_received_at") or 0.0)
+            if rx_ts >= best_ts:
+                best = dict(data)
+                best_ts = rx_ts
+        return best
+
+    def _format_rx_summary(self) -> str:
+        sender = str(getattr(self.state, "last_network_rx_sender", "") or "-")
+        seq = int(getattr(self.state, "last_network_rx_seq", 0) or 0)
+        role = str(getattr(self.state, "last_network_rx_role", "") or "-")
+        kind = str(getattr(self.state, "last_network_rx_kind", "") or "-")
+        peer = None
+        if sender != "-":
+            peer = getattr(self.state, "other_pc_data", {}).get(sender)
+            if not isinstance(peer, dict):
+                peer = None
+        if peer:
+            map_text = self._format_map_text(peer)
+            x_text, y_text = self._format_coord_text(peer)
+            return f"RX sender={sender} seq={seq} role={role} kind={kind} map={map_text} x={x_text} y={y_text}"
+        return f"RX sender={sender} seq={seq} role={role} kind={kind} map=- x=- y=-"
+
+    def _get_role_snapshot(self, role_name: str) -> Optional[dict]:
+        if role_name == self.state.role:
+            data = self.state.get_all()
+            data["_role_kind"] = "LOCAL"
+            data["_fresh"] = True
+            return data
+
+        peer = self._get_peer_snapshot_by_role(role_name)
+        if not peer:
+            return None
+
+        rx_ts = float(peer.get("_received_at") or 0.0)
+        peer["_role_kind"] = "REMOTE"
+        peer["_fresh"] = bool(rx_ts > 0 and (time.time() - rx_ts) <= 1.5)
+        return peer
+
+    def _role_style(self, role_name: str, snapshot: Optional[dict]) -> tuple[str, str, str]:
+        if snapshot is None:
+            return "#3F1D1D", "#F87171", "DISCONNECTED"
+
+        role_kind = str(snapshot.get("_role_kind") or "REMOTE")
+        fresh = bool(snapshot.get("_fresh", False))
+
+        if role_kind == "LOCAL":
+            return "#0B3B5A", "#38BDF8", "LOCAL"
+        if fresh:
+            return "#103B28", "#34D399", "REMOTE"
+        return "#3F1D1D", "#F87171", "DISCONNECTED"
+
+    def _display_role_name(self, role_name: str) -> str:
+        role_map = {
+            "도사": "Priest",
+            "격수": "Warrior",
+            "술사": "Shaman",
+            "Priest": "Priest",
+            "Warrior": "Warrior",
+            "Shaman": "Shaman",
+        }
+        return role_map.get(str(role_name).strip(), str(role_name).strip() or "-")
+
+    def _normalize_role_name(self, role_name: str) -> str:
+        role_map = {
+            "Priest": "도사",
+            "Warrior": "격수",
+            "Shaman": "술사",
+            "도사": "도사",
+            "격수": "격수",
+            "술사": "술사",
+        }
+        return role_map.get(str(role_name).strip(), str(role_name).strip() or "도사")
+
+    def _refresh_role_card(self, role_name: str):
+        card = getattr(self, "net_role_cards", {}).get(role_name)
+        if not card:
+            return
+
+        snapshot = self._get_role_snapshot(role_name)
+        border_color, status_color, status_text = self._role_style(role_name, snapshot)
+        try:
+            card["frame"].configure(border_color=border_color)
+        except Exception:
+            pass
+
+        if snapshot is None:
+            map_text = "-"
+            coord_text = "-"
+            hpmp_text = "-"
+        else:
+            map_text = self._format_map_text(snapshot)
+            x_text, y_text = self._format_coord_text(snapshot)
+            hp_text, mp_text = self._format_hp_mp_text(snapshot)
+            coord_text = f"{x_text} / {y_text}"
+            hpmp_text = f"{hp_text} / {mp_text}"
+
+        card["status"].configure(text=status_text, text_color=status_color)
+        card["title"].configure(text=self._display_role_name(role_name), text_color=status_color)
+        card["map"].configure(text=f"MAP: {map_text}")
+        card["coord"].configure(text=f"X/Y: {coord_text}")
+        card["hpmp"].configure(text=f"HP/MP: {hpmp_text}")
+
+    def _refresh_dosa_network_panel(self):
+        if self.state.role != "도사":
+            return
+        if not hasattr(self, "net_box") or not self.net_box.winfo_exists():
+            return
+
+        rx_text = self._format_rx_summary()
+        if rx_text != self.last_values.get("net_rx_text"):
+            self.lbl_rx_summary.configure(text=rx_text)
+            self.last_values["net_rx_text"] = rx_text
+
+        local_snapshot = self._get_role_snapshot(self.state.role)
+        local_border, local_color, local_status = self._role_style(self.state.role, local_snapshot)
+        if hasattr(self, "net_local_strip") and self.net_local_strip.winfo_exists():
+            try:
+                self.net_local_strip.configure(border_color=local_border)
+            except Exception:
+                pass
+        local_text = "OFFLINE"
+        if local_snapshot is not None:
+            map_text = self._format_map_text(local_snapshot)
+            x_text, y_text = self._format_coord_text(local_snapshot)
+            hp_text, mp_text = self._format_hp_mp_text(local_snapshot)
+            local_text = f"{local_status} | map={map_text} | x={x_text} y={y_text} | hp={hp_text} mp={mp_text}"
+        if local_text != self.last_values.get("net_local_text"):
+            self.lbl_local_status.configure(text=local_text, text_color=local_color)
+            self.last_values["net_local_text"] = local_text
+
+        for role_name in ("격수", "술사"):
+            self._refresh_role_card(role_name)
+
+    def _current_control_mode_label(self) -> str:
+        if getattr(self.state, "automation_paused", False):
+            return "PAUSED"
+        if getattr(self.state, "service_active", False) and getattr(self.state, "nav_follow_enabled", False):
+            return "FOLLOW+SERVICE"
+        if getattr(self.state, "nav_follow_enabled", False):
+            return "FOLLOW"
+        return "OFF"
+
+    def _sync_control_mode_widgets(self):
+        """Refresh navigation/status widgets on the main thread."""
+        def _apply():
+            try:
+                mode_label = self._current_control_mode_label()
+
+                if hasattr(self, "sw_follow") and self.sw_follow.winfo_exists():
+                    if mode_label in ("FOLLOW", "FOLLOW+SERVICE"):
+                        self.sw_follow.select()
+                    else:
+                        self.sw_follow.deselect()
+
+                if hasattr(self, "sw_route") and self.sw_route.winfo_exists():
+                    if getattr(self.state, "nav_route_enabled", False):
+                        self.sw_route.select()
+                    else:
+                        self.sw_route.deselect()
+
+                if hasattr(self, "sw_avoid") and self.sw_avoid.winfo_exists():
+                    if getattr(self.state, "nav_avoid_enabled", False):
+                        self.sw_avoid.select()
+                    else:
+                        self.sw_avoid.deselect()
+
+                if hasattr(self, "btn_macro") and self.btn_macro.winfo_exists():
+                    if getattr(self.state, "service_active", False):
+                        self.btn_macro.configure(text="STOP (F2)", fg_color="#EF4444")
+                    else:
+                        self.btn_macro.configure(text="RUN (F2)", fg_color="#10B981")
+
+                if hasattr(self, "lbl_nav_status") and self.lbl_nav_status.winfo_exists():
+                    self.lbl_nav_status.configure(text=f"MODE: {mode_label}")
+
+                if getattr(self.state, "role", "") == "도사":
+                    self._refresh_dosa_network_panel()
+            except Exception as exc:
+                print(f"[GUI] control mode sync error: {exc}")
+
+        try:
+            self.root.after(0, _apply)
+        except Exception:
+            pass
+
+    def _stop_all_inputs(self, disconnect: bool = False, repeat: int = 2, delay: float = 0.05):
+        global hw
+        try:
+            hw.stop_all_inputs(repeat=repeat, delay=delay, disconnect=disconnect)
+        except Exception as exc:
+            print(f"[Hardware] cleanup failed: {exc}")
+
+    def _apply_control_mode(self, mode: str, announce: bool = True):
+        normalized = str(mode or "NONE").strip().upper()
+        if normalized in {"FOLLOW_SERVICE", "SERVICE", "F2"}:
+            control_mode = "FOLLOW+SERVICE"
+            follow_enabled = True
+            route_enabled = False
+            avoid_enabled = True
+            service_enabled = True
+            auto_hunt_enabled = True
+        elif normalized in {"FOLLOW", "F1"}:
+            control_mode = "FOLLOW"
+            follow_enabled = True
+            route_enabled = False
+            avoid_enabled = True
+            service_enabled = False
+            auto_hunt_enabled = False
+        else:
+            control_mode = "NONE"
+            follow_enabled = False
+            route_enabled = False
+            avoid_enabled = False
+            service_enabled = False
+            auto_hunt_enabled = False
+
+        self.state.control_mode = control_mode
+        self.state.automation_paused = False
+        self.state.nav_follow_enabled = follow_enabled
+        self.state.nav_route_enabled = route_enabled
+        self.state.nav_avoid_enabled = avoid_enabled
+        self.state.service_active = service_enabled
+        self.state.auto_hunt = auto_hunt_enabled
+        self.state.sentinel_enabled = bool(follow_enabled or service_enabled)
+        self.state.is_combat_busy = False
+        self.state.combat_start_time = 0.0
+        if not service_enabled:
+            self.state.target_locked = False
+            self.state.target_name = ""
+
+        global action_thread
+        if action_thread is not None:
+            action_thread.task_active = service_enabled
+
+        self._sync_control_mode_widgets()
+        if announce:
+            print(f"[Hotkey] Mode set: {control_mode}")
+            self.show_toast(f"MODE: {control_mode}")
+
+    def _toggle_control_mode(self, mode: str, label: str):
+        normalized = str(mode or "NONE").strip().upper()
+        current = str(getattr(self.state, "control_mode", "NONE") or "NONE").strip().upper()
+        if getattr(self.state, "automation_paused", False):
+            self._paused_control_mode = "NONE"
+        if current == normalized and not getattr(self.state, "automation_paused", False):
+            self._apply_control_mode("NONE")
+            print(f"[Hotkey] {label}: OFF")
+            self.show_toast(f"{label}: OFF")
+            return
+
+        self._apply_control_mode(normalized)
+        print(f"[Hotkey] {label}: ON")
+        self.show_toast(f"{label}: ON")
 
     def toggle_follow(self):
-        """Follow 모드 토글 (F1)"""
-        self.state.nav_follow_enabled = not self.state.nav_follow_enabled
-        status = "ON" if self.state.nav_follow_enabled else "OFF"
-        print(f"[Hotkey] Follow Mode {status}")
-        self._update_status_display()
+        self._toggle_control_mode("FOLLOW", "Follow Mode")
+
+    def toggle_pause_resume(self):
+        if getattr(self.state, "automation_paused", False):
+            resume_mode = getattr(self, "_paused_control_mode", "NONE") or "NONE"
+            self._paused_control_mode = "NONE"
+            self._apply_control_mode(resume_mode, announce=False)
+            self.state.automation_paused = False
+            print(f"[Hotkey] Pause OFF -> {resume_mode}")
+            self.show_toast(f"RESUMED: {resume_mode}")
+            return
+
+        current_mode = str(getattr(self.state, "control_mode", "NONE") or "NONE").strip().upper()
+        if current_mode not in {"FOLLOW", "FOLLOW+SERVICE"}:
+            current_mode = "NONE"
+        self._paused_control_mode = current_mode
+        self.state.automation_paused = True
+        self.state.control_mode = "PAUSED"
+        self.state.nav_follow_enabled = False
+        self.state.nav_route_enabled = False
+        self.state.nav_avoid_enabled = False
+        self.state.service_active = False
+        self.state.auto_hunt = False
+        self.state.sentinel_enabled = False
+        self.state.is_combat_busy = False
+        self.state.combat_start_time = 0.0
+        self.state.target_locked = False
+        self.state.target_name = ""
+        global action_thread
+        if action_thread is not None:
+            action_thread.task_active = False
+        self._stop_all_inputs(disconnect=False, repeat=2, delay=0.05)
+        self._sync_control_mode_widgets()
+        print(f"[Hotkey] Pause ON (saved={self._paused_control_mode})")
+        self.show_toast("PAUSED")
+
+    def emergency_exit(self):
+        print("[PANIC] Emergency exit requested (F4)")
+        self.state.running = False
+        self.state.automation_paused = True
+        self.state.control_mode = "PAUSED"
+        self.state.nav_follow_enabled = False
+        self.state.nav_route_enabled = False
+        self.state.nav_avoid_enabled = False
+        self.state.service_active = False
+        self.state.auto_hunt = False
+        self.state.sentinel_enabled = False
+        self.state.is_combat_busy = False
+        self.state.combat_start_time = 0.0
+        self.state.target_locked = False
+        self.state.target_name = ""
+        global action_thread
+        if action_thread is not None:
+            action_thread.task_active = False
+        self._stop_all_inputs(disconnect=True, repeat=3, delay=0.05)
+        try:
+            self.close_calibration_popup()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+        os._exit(0)
 
     def debug_ocr(self):
         global reader_thread
@@ -2957,7 +3570,7 @@ class AppView:
         self.show_toast("DEBUG IMAGE SAVE DISABLED")
 
     def load_waypoints(self):
-        """과거 호환성 유지를 위한 더미 혹은 통합 리로드 함수"""
+        """Docstring."""
         self.load_hunting_sequence()
         self.show_toast("WAYPOINTS LOADED (CSV/JSON)")
 
@@ -2979,39 +3592,39 @@ class AppView:
         self.show_toast(f"[Loc] {target.upper()} MOVED 1PX")
 
     def toggle_route_f1_mode(self):
-        """F1: 전체 웨이포인트 순차 이동 토글 (Thread-safe)"""
-        # ── 중단(Stop) 로직: 핫키 스레드에서 즉시 처리 (속도 최우선) ──
+        """Docstring."""
+        # Route mode stop/start toggle
         if getattr(self, '_f1_route_active', False):
             self._f1_route_active = False
             try:
                 hw.panic_release()
             except:
                 pass
-            print("[Move] F1 경로 이동 중단 요청 (비상 정지 적용)")
-            self.show_toast("경로 이동 중단", color="#EF4444")
+            print("[Move] Route mode stop requested")
+            self.show_toast("Route mode stopped", color="#EF4444")
             return
 
-        # ── 시작(Start) 로직: Tkinter 위젯 접근을 위해 메인 스레드로 위임 ──
+        # Start on main thread via Tkinter
         try:
             self.root.after(0, self._start_route_f1_logic)
         except:
             pass
 
     def _start_route_f1_logic(self):
-        """F1 이동 시작을 위한 UI 기반 초기화 및 스레드 런칭 (Main Thread에서 실행)"""
+        """Docstring."""
         items = self.seq_tree.get_children()
         if not items:
-            self.show_toast("테이블에 항목 없음", color="#EF4444")
+            self.show_toast("No route items found", color="#EF4444")
             return
 
         self._f1_route_active = True
         self.last_f1_pos = (0, 0)
         self.f1_stuck_timer = time.time()
         self.f1_stuck_count = 0
-        print("[Move] F1 키 눌림 - 전체 경로 순차 이동 시작")
+        print("[Move] Route mode started - full route traversal begins")
 
         def move_process():
-            # 게임창 포커스 시도
+            # 寃뚯엫李??ъ빱???쒕룄
             try:
                 if self.hwnd and self.hwnd != 0:
                     win32gui.SetForegroundWindow(self.hwnd)
@@ -3019,19 +3632,19 @@ class AppView:
             except Exception:
                 pass
 
-            wp_index = 0  # 항상 Entry(첫 번째)부터 시작
+            wp_index = 0  # ??긽 Entry(泥?踰덉㎏)遺???쒖옉
 
             while self._f1_route_active and self.state.running:
-                # 현재 테이블 항목 조회 (UI 변경 대응)
+                # ?꾩옱 ?뚯씠釉???ぉ 議고쉶 (UI 蹂寃????
                 current_items = self.seq_tree.get_children()
                 if not current_items:
                     break
 
-                # 마지막까지 완료 → Entry부터 반복
+                # 留덉?留됯퉴吏 ?꾨즺 ??Entry遺??諛섎났
                 if wp_index >= len(current_items):
                     wp_index = 0
-                    print("[Move] 전체 경로 완료 → Entry부터 반복")
-                    self.show_toast("경로 완료! 처음부터 반복", color="#A855F7")
+                    print("[Move] ?꾩껜 寃쎈줈 ?꾨즺 ??Entry遺??諛섎났")
+                    self.show_toast("Route completed; looping from the first item", color="#A855F7")
                     time.sleep(0.3)
                     continue
 
@@ -3039,7 +3652,7 @@ class AppView:
                 values = self.seq_tree.item(item_id, "values")
                 row_type = values[0] if values else "?"
 
-                # x, y 파싱 (비어있거나 0이면 스킵)
+                # x, y ?뚯떛 (鍮꾩뼱?덇굅??0?대㈃ ?ㅽ궢)
                 try:
                     tx = int(values[1]) if len(values) > 1 and values[1] else 0
                     ty = int(values[2]) if len(values) > 2 and values[2] else 0
@@ -3047,50 +3660,50 @@ class AppView:
                     tx, ty = 0, 0
 
                 if tx == 0 and ty == 0:
-                    print(f"[Move] [{wp_index+1}/{len(current_items)}] {row_type} 좌표 없음 - 스킵")
+                    print(f"[Move] [{wp_index+1}/{len(current_items)}] {row_type} target missing - skip")
                     wp_index += 1
                     continue
 
-                print(f"[Move] [{wp_index+1}/{len(current_items)}] {row_type} → ({tx}, {ty}) 이동 시작")
-                self.show_toast(f"[{wp_index+1}/{len(current_items)}] {row_type} → ({tx},{ty})")
+                print(f"[Move] [{wp_index+1}/{len(current_items)}] {row_type} -> ({tx}, {ty}) start")
+                self.show_toast(f"[{wp_index+1}/{len(current_items)}] {row_type} -> ({tx},{ty})")
 
-                # stuck 감지 초기화 (waypoint 전환마다 리셋)
+                # stuck 媛먯? 珥덇린??(waypoint ?꾪솚留덈떎 由ъ뀑)
                 self.last_f1_pos = (0, 0)
                 self.f1_stuck_timer = time.time()
                 self.f1_stuck_count = 0
 
-                # ── 해당 waypoint 도달까지 루프 ──
+                # ?? ?대떦 waypoint ?꾨떖源뚯? 猷⑦봽 ??
                 waypoint_reached = False
                 while self._f1_route_active and self.state.running:
                     data = self.state.get_all()
                     cx, cy = data.get("x", 0), data.get("y", 0)
 
-                    # 도달 판정 (좌표 차이 2 미만, 인식 실패(0) 제외)
+                    # ?꾨떖 ?먯젙 (醫뚰몴 李⑥씠 2 誘몃쭔, ?몄떇 ?ㅽ뙣(0) ?쒖쇅)
                     if cx > 0 and cy > 0:
                         if abs(tx - cx) < 2 and abs(ty - cy) < 2:
-                            print(f"[Move] [{wp_index+1}] {row_type} 도달 완료: ({tx}, {ty})")
-                            self.show_toast(f"도달! {row_type} ({tx},{ty})", color="#10B981")
+                            print(f"[Move] [{wp_index+1}] {row_type} reached: ({tx}, {ty})")
+                            self.show_toast(f"Reached: {row_type} ({tx},{ty})", color="#10B981")
                             wp_index += 1
                             waypoint_reached = True
                             break
 
-                    # ── Stuck 감지 & 회피 기동 ──
+                    # ?? Stuck 媛먯? & ?뚰뵾 湲곕룞 ??
                     if self.state.nav_avoid_enabled:
                         now = time.time()
                         if (cx, cy) != self.last_f1_pos:
                             self.last_f1_pos = (cx, cy)
                             self.f1_stuck_timer = now
                             self.f1_stuck_count = 0
-                        elif now - self.f1_stuck_timer > 0.7:  # 1.5초 -> 0.7초 (판단 속도 2배 상향)
+                        elif now - self.f1_stuck_timer > 0.7:  # 1.5珥?-> 0.7珥?(?먮떒 ?띾룄 2諛??곹뼢)
                             self.f1_stuck_count += 1
                             self.f1_stuck_timer = now
-                            print(f"[F1-Stuck] 좌표 변화 없음 ({self.f1_stuck_count}회 연속)")
+                            print(f"[F1-Stuck] 醫뚰몴 蹂???놁쓬 ({self.f1_stuck_count}???곗냽)")
                             if self.f1_stuck_count >= 2:
-                                print("[F1-Stuck] 막힘 감지! 회피 기동 실행.")
+                                print("[F1-Stuck] 留됲옒 媛먯?! ?뚰뵾 湲곕룞 ?ㅽ뻾.")
                                 self._f1_escape_stuck()
                                 continue
 
-                    # ── 방향 결정: 거리 먼 축 우선 + 랜덤 ──
+                    # ?? 諛⑺뼢 寃곗젙: 嫄곕━ 癒?異??곗꽑 + ?쒕뜡 ??
                     dx_v, dy_v = tx - cx, ty - cy
 
                     if abs(dx_v) > abs(dy_v):
@@ -3113,38 +3726,38 @@ class AppView:
                         humanized_sleep(TIMING_CONFIG["nav_loop"])
                         continue
 
-                    # ── 하드웨어 이동 명령 ──
-                    print(f"[Move] 방향키: {direction}")
+                    # ?? ?섎뱶?⑥뼱 ?대룞 紐낅졊 ??
+                    print(f"[Move] 諛⑺뼢?? {direction}")
                     try:
                         hw.hold_move(direction, "move_hold")
                     except Exception as e:
-                        print(f"[Move] 이동 명령 실패: {e}")
+                        print(f"[Move] ?대룞 紐낅졊 ?ㅽ뙣: {e}")
                         self._f1_route_active = False
                         break
 
                     humanized_sleep(TIMING_CONFIG["nav_loop"])
 
                 if not waypoint_reached and not self._f1_route_active:
-                    break  # 중단 요청됨
+                    break  # 以묐떒 ?붿껌??
 
             self._f1_route_active = False
             
-            # 인터럽트 실패(무한 입력 방지): 스레드 종료 전 잔여 하드웨어 눌림을 아예 강제 해제합니다.
+            # ?명꽣?쏀듃 ?ㅽ뙣(臾댄븳 ?낅젰 諛⑹?): ?ㅻ젅??醫낅즺 ???붿뿬 ?섎뱶?⑥뼱 ?뚮┝???꾩삁 媛뺤젣 ?댁젣?⑸땲??
             try:
                 hw.panic_release()
             except Exception:
                 pass
                 
-            print("[Move] F1 경로 이동 스레드 종료")
+            print("[Move] F1 寃쎈줈 ?대룞 ?ㅻ젅??醫낅즺")
 
-        # UI 스레드 차단 방지를 위해 별도 스레드에서 실행
+        # UI ?ㅻ젅??李⑤떒 諛⑹?瑜??꾪빐 蹂꾨룄 ?ㅻ젅?쒖뿉???ㅽ뻾
         threading.Thread(target=move_process, daemon=True).start()
 
     def _f1_escape_stuck(self):
-        """F1 이동 전용 회피 기동 (svc_executor logic 복제)"""
-        print("[Warn] [F1-STUCK] 회피 기동 중...")
+        """Docstring."""
+        print("[Warn] [F1-STUCK] ?뚰뵾 湲곕룞 以?..")
         for _ in range(random.randint(2, 3)):
-            # 횡이동 랜덤
+            # ?≪씠???쒕뜡
             side_dir = random.choice(["left", "right", "up", "down"])
             hw.hold_move(side_dir, "stuck_side_hold")
             humanized_sleep(TIMING_CONFIG["key_gap"])
@@ -3152,15 +3765,15 @@ class AppView:
         self.f1_stuck_timer = time.time()
 
     def update_fast_labels(self):
-        """숫자 라벨 빠른 업데이트 (16ms = 60 FPS)"""
+        """Docstring."""
         try:
             if not self.root.winfo_exists(): return
         except tk.TclError:
-            return  # 윈도우 파괴 중이면 즉시 종료
+            return  # ?덈룄???뚭눼 以묒씠硫?利됱떆 醫낅즺
 
-        # Tab 렌더링 스위치 확인
+        # Tab ?뚮뜑留??ㅼ쐞移??뺤씤
         if not self.tab_enabled.get("dash", True):
-            # 탭 비활성화 시 타이머만 재등록하고 리턴
+            # ??鍮꾪솢?깊솕 ????대㉧留??щ벑濡앺븯怨?由ы꽩
             try:
                 if self.root.winfo_exists():
                     self.root.after(16, self.update_fast_labels)
@@ -3171,11 +3784,11 @@ class AppView:
         perf_start = time.perf_counter()
 
         try:
-            # 로컬 캐싱으로 속도 최적화
+            # 濡쒖뺄 罹먯떛?쇰줈 ?띾룄 理쒖쟻??
             state = self.state
 
-            # GameState 속성 직접 읽기 (큐 오버헤드 제거)
-            # 비전 엔진이 이미 GameState 속성을 업데이트하므로 직접 읽기가 더 빠름
+            # GameState ?띿꽦 吏곸젒 ?쎄린 (???ㅻ쾭?ㅻ뱶 ?쒓굅)
+            # 鍮꾩쟾 ?붿쭊???대? GameState ?띿꽦???낅뜲?댄듃?섎?濡?吏곸젒 ?쎄린媛 ??鍮좊쫫
             hp_val = state.hp_str or str(state.hp)
             mp_val = state.mp_str or str(state.mp)
             exp_val = state.exp_str or str(state.exp)
@@ -3206,8 +3819,21 @@ class AppView:
                 if char_grid_text != self.last_values.get("dash_char_grid"):
                     self.lbl_char_grid.configure(text=char_grid_text)
                     self.last_values["dash_char_grid"] = char_grid_text
+
+            # 네트워크 상태 표시
+            net_status = "CONNECTED" if getattr(state, "is_connected", False) else "DISCONNECTED"
+            if self.state.role == "도사" and getattr(state, "last_network_rx_sender", ""):
+                net_status = (
+                    f"CONNECTED | RX {state.last_network_rx_sender}"
+                    f"#{getattr(state, 'last_network_rx_seq', 0)}"
+                )
+            if net_status != self.last_values.get("dash_net"):
+                self.lbl_net.configure(text=f"[Net] {net_status}")
+                self.last_values["dash_net"] = net_status
+
+            self._refresh_dosa_network_panel()
             
-            # 성능 측정
+            # ?깅뒫 痢≪젙
             self.frame_count += 1
             perf_end = time.perf_counter()
             perf_ms = (perf_end - perf_start) * 1000
@@ -3223,9 +3849,9 @@ class AppView:
                 self.last_values["dash_perf_time"] = now
                     
         except Exception as e:
-            print(f"[GUI] update_fast_labels 오류: {e}")
+            print(f"[GUI] update_fast_labels error: {e}")
         finally:
-            # Tk 메인루프는 1ms 폴링보다 16ms 주기가 훨씬 안정적이고 부하가 적다.
+            # Tk 硫붿씤猷⑦봽??1ms ?대쭅蹂대떎 16ms 二쇨린媛 ?⑥뵮 ?덉젙?곸씠怨?遺?섍? ?곷떎.
             try:
                 if self.root.winfo_exists():
                     self.root.after(16, self.update_fast_labels)
@@ -3233,15 +3859,15 @@ class AppView:
                 pass
 
     def update_slow_ui(self):
-        """보조 UI 업데이트 (30초 주기, 상태 변경 시 즉시 반영)"""
+        """Docstring."""
         try:
             if not self.root.winfo_exists(): return
         except tk.TclError:
             return
 
-        # Tab 렌더링 스위치 확인
+        # Tab ?뚮뜑留??ㅼ쐞移??뺤씤
         if not self.tab_enabled.get("logic", True) and not self.tab_enabled.get("nav", True):
-            # 탭 비활성화 시 타이머만 재등록하고 리턴
+            # ??鍮꾪솢?깊솕 ????대㉧留??щ벑濡앺븯怨?由ы꽩
             try:
                 if self.root.winfo_exists():
                     self.root.after(30000, self.update_slow_ui)
@@ -3250,18 +3876,18 @@ class AppView:
             return
 
         try:
-            # [NAV] 네비게이션 상태 표시
+            # [NAV] ?ㅻ퉬寃뚯씠???곹깭 ?쒖떆
             if self.tab_enabled.get("nav", True):
                 try:
-                    nav_status = "ACTIVE" if self.state.nav_enabled else "IDLE"
+                    nav_status = self._current_control_mode_label()
                     if nav_status != self.last_values.get('nav_status'):
                         if hasattr(self, 'lbl_nav_status'):
-                            self.lbl_nav_status.configure(text=f"NAV: {nav_status}")
+                            self.lbl_nav_status.configure(text=f"MODE: {nav_status}")
                         self.last_values['nav_status'] = nav_status
                 except Exception:
                     pass
             
-            # [HARDWARE] 아두이노 연결 상태 표시 (터미널 출력으로 대체)
+            # [HARDWARE] ?꾨몢?대끂 ?곌껐 ?곹깭 ?쒖떆 (?곕???異쒕젰?쇰줈 ?泥?
             try:
                 global hw
                 if hw.ser and hw.ser.is_open:
@@ -3270,12 +3896,12 @@ class AppView:
                     hw_status = "DISCONNECTED"
                 
                 if hw_status != self.last_values.get('hw_status'):
-                    print(f"[Hardware] 상태: {hw_status}")
+                    print(f"[Hardware] Status: {hw_status}")
                     self.last_values['hw_status'] = hw_status
             except Exception:
                 pass
             
-            # 가이드 레이어 동기화
+            # 媛?대뱶 ?덉씠???숆린??
             try:
                 if hasattr(self, "indicator") and self.indicator.visible:
                     global reader_thread
@@ -3284,7 +3910,7 @@ class AppView:
             except Exception:
                 pass
 
-            # 스킬 플래그 동기화 (GUI -> State)
+            # ?ㅽ궗 ?뚮옒洹??숆린??(GUI -> State)
             if self.tab_enabled.get("logic", True):
                 try:
                     use_heal = self.sw_heal.get()
@@ -3293,7 +3919,7 @@ class AppView:
                     use_attack = self.sw_attack.get()
                     use_smart_ai = self.sw_ai.get()
 
-                    # 상태 변경 시에만 업데이트
+                    # ?곹깭 蹂寃??쒖뿉留??낅뜲?댄듃
                     if use_heal != self.last_values.get('use_heal'):
                         self.state.use_heal = use_heal
                         self.last_values['use_heal'] = use_heal
@@ -3312,9 +3938,9 @@ class AppView:
                 except Exception:
                     pass
         except Exception as e:
-            print(f"[GUI] update_slow_ui 오류: {e}")
+            print(f"[GUI] update_slow_ui error: {e}")
         finally:
-            # 타이머 재등록 (30초 = 30000ms)
+            # ??대㉧ ?щ벑濡?(30珥?= 30000ms)
             try:
                 if self.root.winfo_exists():
                     self.root.after(30000, self.update_slow_ui)
@@ -3322,16 +3948,18 @@ class AppView:
                 pass
 
     def on_close(self):
-        print("[System] 종료 시퀀스 시작. 모든 동작 중단 및 스레드 종료 요청...")
+        print("[System] Shutdown initiated. Stopping all activity and closing threads...")
         self.state.running = False
-        
-        # 아두이노 키보드/마우스 입력 해제 및 버퍼 초기화를 위한 RELEASE 전송
-        try:
-            hw.panic_release()
-            time.sleep(0.05) # 명령 전송 대기 타임
-            hw.disconnect()
-        except Exception:
-            pass
+        self.state.automation_paused = True
+        self.state.control_mode = "PAUSED"
+        self.state.nav_follow_enabled = False
+        self.state.nav_route_enabled = False
+        self.state.nav_avoid_enabled = False
+        self.state.service_active = False
+        self.state.auto_hunt = False
+        self.state.sentinel_enabled = False
+
+        self._stop_all_inputs(disconnect=True, repeat=3, delay=0.05)
             
         try:
             self.close_calibration_popup()
@@ -3341,46 +3969,46 @@ class AppView:
             pass
         self.root.destroy()
         
-        # 데몬 스레드들의 잔여 연산 차단 및 즉시 프로세스 종료
+        # Force process exit so lingering background threads cannot keep keys held.
         os._exit(0)
 
     def panic_shutdown(self):
-        """F3 비상 정지: 모든 지연된 스레드와 저장을 무시하고 즉각 하드웨어 릴리즈 후 강제 종료"""
-        print("\n!!! [PANIC] F3 비상 정지 활성화 !!!")
-        try:
-            hw.panic_release()
-        except:
-            pass
-        os._exit(0)
+        """Docstring."""
+        self.toggle_pause_resume()
 
     def run(self):
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
-        # 전역 핫키 설정
+        # ?꾩뿭 ?ロ궎 ?ㅼ젙
         try:
-            keyboard.add_hotkey("f1", self.toggle_route_f1_mode)
+            keyboard.add_hotkey("f1", self.toggle_follow)
             keyboard.add_hotkey("f2", self.toggle_service)
-            keyboard.add_hotkey("f3", self.panic_shutdown)  # 스레드 생성 오버헤드 제거하여 즉시 호출
+            keyboard.add_hotkey("f3", self.toggle_pause_resume)
+            keyboard.add_hotkey("f4", self.emergency_exit)
         except Exception as e:
             print(f"[Warn] Hotkey Registration Failed: {e}")
         
-        # 타이머는 __init__에서 이미 시작됨 (update_fast_labels, update_slow_ui)
+        # ??대㉧??__init__?먯꽌 ?대? ?쒖옉??(update_fast_labels, update_slow_ui)
         self.root.update()
         self.root.mainloop()
 
-# 전역 스레드 참조 및 엔진 변수
+# ?꾩뿭 ?ㅻ젅??李몄“ 諛??붿쭊 蹂??
 action_thread = None
 reader_thread = None
 nav_thread = None
-# hw는 svc_kernel에서 임포트됨
+# hw??svc_kernel?먯꽌 ?꾪룷?몃맖
 
-def main():
-    # 0. config.json 유효성 검사 (안전 빌드)
-    print("[Config] config.json 유효성 검사 중...")
+def main(
+    preset_role: Optional[str] = None,
+    preset_network_role: Optional[str] = None,
+    preset_auto_hunt: Optional[bool] = None,
+):
+    # 0. Validate config.json first.
+    print("[Config] Validating config.json...")
     config_file = os.path.join(os.path.dirname(__file__), "config.json")
     
     if not os.path.exists(config_file):
-        messagebox.showerror("오류", f"config.json 파일이 없습니다:\n{config_file}")
+        messagebox.showerror("Error", f"config.json not found:\n{config_file}")
         return
     
     try:
@@ -3393,78 +4021,102 @@ def main():
         dx = play_area.get("dx", 0)
         dy = play_area.get("dy", 0)
         
-        # play_area 좌표 유효성 검사
+        # play_area 醫뚰몴 ?좏슚??寃??
         if sx == 0 or sy == 0 or dx == 0 or dy == 0:
             messagebox.showerror(
-                "오류",
-                f"config.json의 play_area 좌표가 유효하지 않습니다.\n"
+                "Error",
+                f"config.json play_area coordinates are invalid.\n"
                 f"sx: {sx}, sy: {sy}, dx: {dx}, dy: {dy}\n"
-                f"모든 좌표는 0이 아니어야 합니다."
+                f"All coordinates must be non-zero."
             )
             return
         
         if sx >= dx or sy >= dy:
             messagebox.showerror(
-                "오류",
-                f"config.json의 play_area 좌표가 잘못되었습니다.\n"
-                f"sx({sx}) >= dx({dx}) 또는 sy({sy}) >= dy({dy})\n"
-                f"시작 좌표는 끝 좌표보다 작아야 합니다."
+                "Error",
+                f"config.json play_area coordinates are inverted.\n"
+                f"sx({sx}) >= dx({dx}) or sy({sy}) >= dy({dy})\n"
+                f"The start coordinate must be smaller than the end coordinate."
             )
             return
         
-        print(f"[Config] play_area 유효성 확인: ({sx}, {sy}) -> ({dx}, {dy})")
+        print(f"[Config] play_area validated: ({sx}, {sy}) -> ({dx}, {dy})")
         
     except Exception as e:
-        messagebox.showerror("오류", f"config.json 로드 실패:\n{e}")
+        messagebox.showerror("Error", f"Failed to load config.json:\n{e}")
         return
     
-    # 1. 스텔스 환경 체크 (Anti-Cheat 대응) - [Bypass for Test 73]
-    print("[Stealth] 환경 안전성 검사 중... (Bypass Enabled)")
+    # 1. Environment safety check (anti-cheat bypass remains disabled)
+    print("[Stealth] Checking environment safety... (Bypass Enabled)")
     # stealth_results = StealthChecker.run_all_checks()
     
     # if stealth_results['debugger_detected']:
-    #     print("[Stealth] [!] 디버거 탐지됨 - 실행 중단")
+    #     print("[Stealth] [!] ?붾쾭嫄??먯???- ?ㅽ뻾 以묐떒")
     #     return
     
     # if stealth_results['vm_detected']:
-    #     print("[Stealth] [!] 가상머신 환경 탐지됨 - 실행 중단")
+    #     print("[Stealth] [!] 媛?곷㉧???섍꼍 ?먯???- ?ㅽ뻾 以묐떒")
     #     return
     
     # if not stealth_results['process_integrity']:
-    #     print("[Stealth] [!] 프로세스 무결성 위반 - 실행 중단")
+    #     print("[Stealth] [!] ?꾨줈?몄뒪 臾닿껐???꾨컲 - ?ㅽ뻾 以묐떒")
     #     return
     
     # if not stealth_results['external_modules']:
-    #     print("[Stealth] [!] 의심스러운 외부 모듈 탐지 - 실행 중단")
+    #     print("[Stealth] [!] ?섏떖?ㅻ윭???몃? 紐⑤뱢 ?먯? - ?ㅽ뻾 以묐떒")
     #     return
     
-    print("[Stealth] [OK] 환경 안전성 확인 완료")
+    print("[Stealth] [OK] Environment safety check complete")
 
-    # 게임창을 0,0 좌표로 이동 및 크기 고정 (1920x1080 타겟)
+    # Move the game window to (0,0) and force a fixed size.
     hwnd = find_game_window(WIN_KEY)
     if hwnd:
         import win32con
-        # 윈도우 크기를 강제로 1920x1080로 고정
+        # Force the game window to 1920x1080.
         win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, 0, 0, 1920, 1080, win32con.SWP_SHOWWINDOW)
-        print(f"[Window] 게임창을 (0, 0) 좌표로 이동하고 크기를 1920x1080으로 고정했습니다.")
+        print("[Window] Game window moved to (0, 0) and resized to 1920x1080.")
     else:
-        print(f"[Warn] 게임창을 찾을 수 없습니다. (키워드: {WIN_KEY})")
+        print(f"[Warn] Game window not found. (title contains: {WIN_KEY})")
 
     global action_thread, reader_thread
     state = GameState()
-    state.hwnd = hwnd  # GameState에 핸들 저장
-    hw.set_state(state)  # DevInterface에 GameState 연결 (포커스 체크용)
+    if preset_role:
+        state.role = preset_role
+    if preset_network_role is None:
+        preset_network_role = preset_role
+    if preset_auto_hunt is not None:
+        state.auto_hunt = bool(preset_auto_hunt)
+        state.service_active = bool(preset_auto_hunt)
+    state.hwnd = hwnd  # GameState???몃뱾 ???
+    hw.set_state(state)  # DevInterface??GameState ?곌껐 (?ъ빱??泥댄겕??
+
+    def _cleanup_hardware_on_exit():
+        try:
+            hw.stop_all_inputs(disconnect=True, repeat=3, delay=0.05)
+        except Exception:
+            pass
+
+    atexit.register(_cleanup_hardware_on_exit)
     
-    # 각 워커 스레드 초기화 (bootstrap.py 기능 통합)
+    # 媛??뚯빱 ?ㅻ젅??珥덇린??(bootstrap.py 湲곕뒫 ?듯빀)
     config_file = os.path.join(SCRIPT_DIR, "config.json")
+    network_cfg = load_network_config()
+    if preset_network_role:
+        network_cfg["role"] = preset_network_role
+    state.network_role = network_cfg.get("role", state.network_role)
+    state.network_server_ip = network_cfg.get("server_ip", state.network_server_ip)
+    state.network_bind_host = network_cfg.get("bind_host", state.network_bind_host)
+    state.network_telemetry_port = int(network_cfg.get("telemetry_port", state.network_telemetry_port))
+    state.network_local_port = int(network_cfg.get("local_port", state.network_local_port))
+
     spell_db_file = os.path.join(SCRIPT_DIR, "spells_config.json")
 
-    # 1. 고속 캡처 스레드 가동 (모든 비전 스레드의 소스)
+    # 1. 怨좎냽 罹≪쿂 ?ㅻ젅??媛??(紐⑤뱺 鍮꾩쟾 ?ㅻ젅?쒖쓽 ?뚯뒪)
     capture_svc = CaptureSvc(state)
     capture_svc.start()
 
     try:
-        reader_thread = MonitorSvc(state, config_file)  # PatternMatcher 기반 OCR
+        reader_thread = MonitorSvc(state, config_file)  # PatternMatcher 湲곕컲 OCR
         print(f"[Worker] MonitorSvc initialized: {reader_thread is not None}")
     except Exception as e:
         print(f"[Worker] MonitorSvc initialization failed: {e}")
@@ -3472,25 +4124,25 @@ def main():
         traceback.print_exc()
         return
     
-    numeric_scanner = NumericFieldScanner(state, reader_thread.matcher, config_file, reader_thread)  # 고속 전용 스레드
-    sentinel_thread = SentinelThread(state, reader_thread.matcher) # 몬스터/아이템 탐지 전용
-    action_thread = LogicSvc(state)  # FSM 로직
-    nav_thread = RouteSvc(state)  # 네비게이션
-    network = NetworkThread(state, is_server=IS_SERVER)
+    numeric_scanner = NumericFieldScanner(state, reader_thread.matcher, config_file, reader_thread)  # 怨좎냽 ?꾩슜 ?ㅻ젅??
+    sentinel_thread = SentinelThread(state, reader_thread.matcher) # 紐ъ뒪???꾩씠???먯? ?꾩슜
+    action_thread = LogicSvc(state)  # FSM 濡쒖쭅
+    nav_thread = RouteSvc(state)  # ?ㅻ퉬寃뚯씠??
+    network = NetworkThread(state, network_cfg)
     logger = LoggerThread(state)
 
-    # GUI 생성 (hwnd 전달)
+    # GUI ?앹꽦 (hwnd ?꾨떖)
     gui = AppView(state, hwnd=hwnd)
 
-    # GUI 생성 후 grid_indicator 전달
+    # GUI ?앹꽦 ??grid_indicator ?꾨떖
     if hasattr(gui, 'grid_indicator'):
         sentinel_thread.grid_indicator = gui.grid_indicator
 
-    # 모든 스레드 시작
+    # 紐⑤뱺 ?ㅻ젅???쒖옉
     print(f"[Worker] About to start reader_thread...")
     reader_thread.start()
     print(f"[Worker] reader_thread started")
-    numeric_scanner.start()  # 고속 숫자 스캔 시작
+    numeric_scanner.start()  # 怨좎냽 ?レ옄 ?ㅼ틪 ?쒖옉
     sentinel_thread.start()
     action_thread.start()
     nav_thread.start()
@@ -3499,7 +4151,7 @@ def main():
 
     print("[OK] System started. (Production Mode)")
     
-    # GUI 실행
+    # GUI ?ㅽ뻾
     gui.run()
 
     print("[Stop] System closed.")
@@ -3512,3 +4164,4 @@ if __name__ == "__main__":
         print(f"\n[FATAL ERROR] {e}")
         traceback.print_exc()
         input("Press Enter to exit...")
+
