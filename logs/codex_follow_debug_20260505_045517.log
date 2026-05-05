@@ -1,0 +1,650 @@
+[Config] TIMING_CONFIG loaded: 28 items
+[Config] Validating config.local.json...
+[Config] play_area validated: (274, 50) -> (1191, 837)
+[Stealth] Checking environment safety... (Bypass Enabled)
+[Stealth] [OK] Environment safety check complete
+[Window] Game window moved to (0, 0) and resized to 1920x1080.
+[Camera] Attempting OBS virtual camera connection...
+[Worker] MonitorSvc initialized: True
+[Camera] Using OBS device: OBS Virtual Camera
+[Camera] OBS virtual camera connected (index: 0)
+[Hardware] Status: DISCONNECTED
+[Worker] About to start reader_thread...
+[Worker] reader_thread started
+[Logic] BIS Logic Engine started (role: 도사)
+[Nav] V5 Navigation Thread started...[Logic] Priority: Emergency -> Combat -> Moving
+
+[Log] Logger thread started...[OK] System started. (Production Mode)
+
+[Net] UDP hub connected: 0.0.0.0:5555 (role=도사)
+[Net][RX] sender=DESKTOP-I5M2TFL role=격수 kind=telemetry seq=1 addr=211.184.108.211:5556
+[Hotkey] F1 pressed
+[Hotkey] Follow Mode: ON | MODE=FOLLOW
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] waiting for movement settle (0.01s, seq=1356) pos=(12, 11)
+[Follow] move did not settle at (12, 11) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1368) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1379) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1391) pos=(12, 11)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] axis swap retry via up (no_progress=4, blocked=3)
+[Follow] waiting for movement settle (0.01s, seq=1403) pos=(12, 11)
+[Hardware] Status: READY
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Warn] [STUCK] follow detour try 3/4: up
+[Warn] [STUCK] follow detour try 4/4: down
+[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.
+[OK] [STUCK] follow detour complete, waiting for next fresh follow target.
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] waiting for movement settle (0.01s, seq=1440) pos=(12, 11)
+[Follow] move did not settle at (12, 11) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1452) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1464) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1477) pos=(12, 11)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] axis swap retry via up (no_progress=4, blocked=3)
+[Follow] waiting for movement settle (0.01s, seq=1489) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Warn] [STUCK] follow detour try 3/4: up
+[Warn] [STUCK] follow detour try 4/4: down
+[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.
+[OK] [STUCK] follow detour complete, waiting for next fresh follow target.
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1526) pos=(12, 11)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] move did not settle at (12, 11) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1539) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1551) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1563) pos=(12, 11)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] axis swap retry via up (no_progress=4, blocked=3)
+[Follow] waiting for movement settle (0.01s, seq=1576) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Warn] [STUCK] follow detour try 3/4: up
+[Warn] [STUCK] follow detour try 4/4: down
+[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.
+[OK] [STUCK] follow detour complete, waiting for next fresh follow target.
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1611) pos=(12, 11)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] move did not settle at (12, 11) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1623) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.02s, seq=1635) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1647) pos=(12, 11)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] axis swap retry via up (no_progress=4, blocked=3)
+[Follow] waiting for movement settle (0.01s, seq=1659) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Warn] [STUCK] follow detour try 3/4: up
+[Warn] [STUCK] follow detour try 4/4: down
+[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.
+[OK] [STUCK] follow detour complete, waiting for next fresh follow target.
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1694) pos=(12, 11)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] move did not settle at (12, 11) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1706) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1718) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1731) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] axis swap retry via up (no_progress=4, blocked=3)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] waiting for movement settle (0.01s, seq=1743) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Warn] [STUCK] follow detour try 3/4: up
+[Warn] [STUCK] follow detour try 4/4: down
+[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.
+[OK] [STUCK] follow detour complete, waiting for next fresh follow target.
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1779) pos=(12, 11)
+[Follow] Target: (11, 4) | Pos: (12, 11)
+[Follow] move did not settle at (12, 11) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1791) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1804) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1815) pos=(12, 11)
+[Follow] waiting for movement settle (0.01s, seq=1818) pos=(11, 11)
+[Follow] move did not settle at (11, 11) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] Target: (11, 4) | Pos: (11, 11)
+[Follow] waiting for movement settle (0.01s, seq=1830) pos=(11, 11)
+[Follow] waiting for movement settle (0.01s, seq=1841) pos=(11, 12)
+[Follow] move did not settle at (11, 12) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=1853) pos=(11, 12)
+[Follow] waiting for movement settle (0.01s, seq=1864) pos=(11, 11)
+[Follow] Target: (11, 4) | Pos: (11, 11)
+[Follow] blocked cell remembered: (11, 10) via up for 20s
+[Follow] blocked move confirmed at (11, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 11); retrying local path
+[Follow] axis swap retry via up (no_progress=1, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=1876) pos=(11, 11)
+[Follow] blocked cell remembered: (11, 10) via up for 20s
+[Follow] blocked move confirmed at (11, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 11); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1889) pos=(11, 11)
+[Follow] waiting for movement settle (0.01s, seq=1900) pos=(11, 10)
+[Follow] move did not settle at (11, 10) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1913) pos=(11, 10)
+[Follow] Target: (11, 4) | Pos: (11, 10)
+[Follow] blocked cell remembered: (11, 9) via up for 20s
+[Follow] blocked move confirmed at (11, 10) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 10); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1926) pos=(11, 10)
+[Follow] blocked cell remembered: (11, 9) via up for 20s
+[Follow] blocked move confirmed at (11, 10) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 10); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1938) pos=(11, 10)
+[Follow] waiting for movement settle (0.01s, seq=1944) pos=(12, 10)
+[Follow] move did not settle at (12, 10) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1956) pos=(12, 10)
+[Follow] Target: (12, 5) | Pos: (12, 10)
+[Follow] blocked cell remembered: (12, 9) via up for 20s
+[Follow] blocked move confirmed at (12, 10) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 10); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1971) pos=(12, 9)
+[Follow] move did not settle at (12, 9) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=1983) pos=(12, 9)
+[Follow] blocked cell remembered: (12, 8) via up for 20s
+[Follow] blocked move confirmed at (12, 9) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 9); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=1996) pos=(12, 9)
+[Follow] Warrior is close (x-gap=0, y-gap=1)
+[Follow] Target: (13, 9) | Pos: (11, 9)
+[Follow] waiting for movement settle (0.01s, seq=2059) pos=(11, 9)
+[Follow] move did not settle at (11, 9) via right; retrying another axis before blocking
+[Follow] axis swap retry via right (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2072) pos=(11, 9)
+[Follow] blocked cell remembered: (12, 9) via right for 20s
+[Follow] blocked move confirmed at (11, 9) via right; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 9); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2087) pos=(11, 8)
+[Follow] move did not settle at (11, 8) via right; retrying another axis before blocking
+[Follow] axis swap retry via right (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2099) pos=(11, 8)
+[Follow] Target: (13, 9) | Pos: (11, 8)
+[Follow] blocked cell remembered: (12, 8) via right for 20s
+[Follow] blocked move confirmed at (11, 8) via right; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 8); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2111) pos=(11, 8)
+[Follow] waiting for movement settle (0.01s, seq=2121) pos=(11, 7)
+[Follow] move did not settle at (11, 7) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2133) pos=(11, 7)
+[Follow] Target: (14, 11) | Pos: (11, 7)
+[Follow] blocked cell remembered: (11, 8) via down for 20s
+[Follow] blocked move confirmed at (11, 7) via down; remembering cell and retrying
+[Follow] axis swap retry via right (no_progress=0, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=2145) pos=(11, 7)
+[Follow] waiting for movement settle (0.01s, seq=2153) pos=(11, 6)
+[Follow] move did not settle at (11, 6) via right; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2165) pos=(11, 6)
+[Follow] waiting for movement settle (0.01s, seq=2172) pos=(10, 6)
+[Follow] move did not settle at (10, 6) via right; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2184) pos=(10, 6)
+[Follow] Target: (12, 11) | Pos: (10, 6)
+[Follow] blocked cell remembered: (11, 6) via right for 20s
+[Follow] blocked move confirmed at (10, 6) via right; remembering cell and retrying
+[Follow] axis swap retry via down (no_progress=0, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=2198) pos=(10, 7)
+[Follow] move did not settle at (10, 7) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2210) pos=(10, 7)
+[Follow] waiting for movement settle (0.01s, seq=2220) pos=(10, 6)
+[Follow] Target: (10, 11) | Pos: (10, 6)
+[Follow] move did not settle at (10, 6) via down; retrying another axis before blocking
+[Follow] axis swap retry via down (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2232) pos=(10, 6)
+[Follow] blocked cell remembered: (10, 7) via down for 20s
+[Follow] blocked move confirmed at (10, 6) via down; remembering cell and retrying
+[Follow] cleared 2 blocked cells around (10, 6); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2244) pos=(10, 6)
+[Follow] blocked cell remembered: (10, 7) via down for 20s
+[Follow] blocked move confirmed at (10, 6) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (10, 6); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2258) pos=(10, 5)
+[Follow] move did not settle at (10, 5) via down; retrying another axis before blocking
+[Follow] axis swap retry via down (no_progress=1, blocked=0)
+[Follow] Target: (10, 11) | Pos: (10, 5)
+[Follow] waiting for movement settle (0.01s, seq=2268) pos=(10, 5)
+[Follow] blocked cell remembered: (10, 6) via down for 20s
+[Follow] blocked move confirmed at (10, 5) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (10, 5); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2280) pos=(10, 5)
+[Follow] blocked cell remembered: (10, 6) via down for 20s
+[Follow] blocked move confirmed at (10, 5) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (10, 5); retrying local path
+[Follow] waiting for movement settle (0.02s, seq=2294) pos=(9, 5)
+[Follow] move did not settle at (9, 5) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2306) pos=(9, 5)
+[Follow] Target: (7, 11) | Pos: (9, 5)
+[Follow] waiting for movement settle (0.01s, seq=2313) pos=(9, 6)
+[Follow] move did not settle at (9, 6) via left; retrying another axis before blocking
+[Follow] axis swap retry via down (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2325) pos=(9, 6)
+[Follow] move did not settle at (9, 6) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2337) pos=(9, 6)
+[Follow] waiting for movement settle (0.01s, seq=2341) pos=(9, 5)
+[Follow] move did not settle at (9, 5) via left; retrying another axis before blocking
+[Follow] Target: (7, 9) | Pos: (9, 5)
+[Follow] waiting for movement settle (0.01s, seq=2353) pos=(9, 5)
+[Follow] blocked cell remembered: (8, 5) via left for 20s
+[Follow] blocked move confirmed at (9, 5) via left; remembering cell and retrying
+[Follow] axis swap retry via down (no_progress=0, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=2365) pos=(9, 5)
+[Follow] waiting for movement settle (0.01s, seq=2373) pos=(9, 4)
+[Follow] move did not settle at (9, 4) via left; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2385) pos=(9, 4)
+[Follow] move did not settle at (9, 4) via down; retrying another axis before blocking
+[Follow] Target: (8, 7) | Pos: (9, 4)
+[Follow] waiting for movement settle (0.01s, seq=2396) pos=(9, 4)
+[Follow] blocked cell remembered: (9, 5) via down for 20s
+[Follow] blocked move confirmed at (9, 4) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (9, 4); retrying local path
+[Follow] axis swap retry via down (no_progress=0, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=2409) pos=(9, 4)
+[Follow] blocked cell remembered: (9, 5) via down for 20s
+[Follow] blocked move confirmed at (9, 4) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (9, 4); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2421) pos=(9, 4)
+[Follow] blocked cell remembered: (9, 5) via down for 20s
+[Follow] blocked move confirmed at (9, 4) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (9, 4); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2434) pos=(9, 4)
+[Follow] Target: (11, 7) | Pos: (9, 4)
+[Follow] blocked cell remembered: (9, 5) via down for 20s
+[Follow] blocked move confirmed at (9, 4) via down; remembering cell and retrying
+[Follow] obstacle blocked follow, escaping via detour... pos=(9, 4)
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Warn] [STUCK] follow detour try 3/4: down
+[Warn] [STUCK] follow detour try 4/4: up
+[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.
+[OK] [STUCK] follow detour complete, waiting for next fresh follow target.
+[Follow] waiting for movement settle (0.01s, seq=2470) pos=(9, 4)
+[Follow] move did not settle at (9, 4) via right; retrying another axis before blocking
+[Follow] axis swap retry via right (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2483) pos=(9, 4)
+[Follow] Target: (11, 7) | Pos: (9, 4)
+[Follow] blocked cell remembered: (10, 4) via right for 20s
+[Follow] blocked move confirmed at (9, 4) via right; remembering cell and retrying
+[Follow] cleared 2 blocked cells around (9, 4); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2495) pos=(9, 4)
+[Follow] move did not settle at (9, 4) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2507) pos=(9, 4)
+[Follow] blocked cell remembered: (10, 4) via right for 20s
+[Follow] blocked move confirmed at (9, 4) via right; remembering cell and retrying
+[Follow] axis swap retry via down (no_progress=4, blocked=2)
+[Follow] waiting for movement settle (0.01s, seq=2519) pos=(9, 4)
+[Follow] Target: (11, 7) | Pos: (9, 4)
+[Follow] blocked cell remembered: (9, 5) via down for 20s
+[Follow] blocked move confirmed at (9, 4) via down; remembering cell and retrying
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Warn] [STUCK] follow detour try 3/4: down
+[Warn] [STUCK] follow detour try 4/4: up
+[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.
+[OK] [STUCK] follow detour complete, waiting for next fresh follow target.
+[Follow] cleared 2 blocked cells around (9, 4); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2556) pos=(9, 4)
+[Follow] move did not settle at (9, 4) via right; retrying another axis before blocking
+[Follow] axis swap retry via down (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2568) pos=(9, 4)
+[Follow] Target: (11, 7) | Pos: (9, 4)
+[Follow] move did not settle at (9, 4) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2581) pos=(9, 4)
+[Follow] blocked cell remembered: (10, 4) via right for 20s
+[Follow] blocked move confirmed at (9, 4) via right; remembering cell and retrying
+[Follow] waiting for movement settle (0.01s, seq=2594) pos=(9, 4)
+[Follow] blocked cell remembered: (9, 5) via down for 20s
+[Follow] blocked move confirmed at (9, 4) via down; remembering cell and retrying
+[Follow] cleared 2 blocked cells around (9, 4); retrying local path
+[Follow] axis swap retry via right (no_progress=4, blocked=2)
+[Follow] waiting for movement settle (0.01s, seq=2607) pos=(9, 4)
+[Follow] Target: (11, 7) | Pos: (9, 4)
+[Follow] blocked cell remembered: (10, 4) via right for 20s
+[Follow] blocked move confirmed at (9, 4) via right; remembering cell and retrying
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Warn] [STUCK] follow detour try 3/4: down
+[Warn] [STUCK] follow detour try 4/4: up
+[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.
+[OK] [STUCK] follow detour complete, waiting for next fresh follow target.
+[Follow] waiting for movement settle (0.01s, seq=2642) pos=(9, 4)
+[Follow] move did not settle at (9, 4) via down; retrying another axis before blocking
+[Follow] axis swap retry via down (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2654) pos=(9, 4)
+[Follow] Target: (11, 7) | Pos: (9, 4)
+[Follow] blocked cell remembered: (9, 5) via down for 20s
+[Follow] blocked move confirmed at (9, 4) via down; remembering cell and retrying
+[Follow] cleared 2 blocked cells around (9, 4); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2667) pos=(9, 4)
+[Follow] move did not settle at (9, 4) via right; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2679) pos=(9, 4)
+[Follow] blocked cell remembered: (9, 5) via down for 20s
+[Follow] blocked move confirmed at (9, 4) via down; remembering cell and retrying
+[Follow] axis swap retry via right (no_progress=4, blocked=2)
+[Follow] waiting for movement settle (0.01s, seq=2691) pos=(9, 4)
+[Follow] blocked cell remembered: (10, 4) via right for 20s
+[Follow] blocked move confirmed at (9, 4) via right; remembering cell and retrying
+[Warn] [STUCK] follow mode active, doing a short detour before refollowing...
+[Warn] [STUCK] follow detour try 1/4: left
+[Warn] [STUCK] follow detour try 2/4: right
+[Follow] blocked cell released: (10, 4) (detour movement confirmed)
+[OK] [STUCK] follow detour moved (9, 4) -> (10, 4) via right
+[OK] [STUCK] follow detour complete, resume follow with latest warrior position.
+[Follow] Target: (11, 7) | Pos: (10, 4)
+[Follow] waiting for movement settle (0.01s, seq=2718) pos=(10, 4)
+[Follow] move did not settle at (10, 4) via down; retrying another axis before blocking
+[Follow] axis swap retry via down (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2731) pos=(10, 4)
+[Follow] blocked cell remembered: (10, 5) via down for 20s
+[Follow] blocked move confirmed at (10, 4) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (10, 4); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2743) pos=(10, 4)
+[Follow] waiting for movement settle (0.01s, seq=2749) pos=(11, 4)
+[Follow] move did not settle at (11, 4) via down; retrying another axis before blocking
+[Follow] axis swap retry via down (no_progress=1, blocked=0)
+[Follow] Target: (11, 7) | Pos: (11, 4)
+[Follow] waiting for movement settle (0.01s, seq=2761) pos=(11, 4)
+[Follow] waiting for movement settle (0.01s, seq=2769) pos=(12, 4)
+[Follow] move did not settle at (12, 4) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2781) pos=(12, 4)
+[Follow] blocked cell remembered: (12, 5) via down for 20s
+[Follow] blocked move confirmed at (12, 4) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 4); retrying local path
+[Follow] axis swap retry via down (no_progress=2, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=2794) pos=(12, 4)
+[Follow] waiting for movement settle (0.01s, seq=2800) pos=(12, 5)
+[Follow] Target: (11, 7) | Pos: (12, 5)
+[Follow] move did not settle at (12, 5) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2813) pos=(12, 5)
+[Follow] blocked cell remembered: (12, 6) via down for 20s
+[Follow] blocked move confirmed at (12, 5) via down; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 5); retrying local path
+[Follow] axis swap retry via down (no_progress=2, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=2826) pos=(12, 5)
+[Follow] waiting for movement settle (0.01s, seq=2836) pos=(13, 5)
+[Follow] move did not settle at (13, 5) via down; retrying another axis before blocking
+[Follow] Target: (11, 7) | Pos: (13, 5)
+[Follow] waiting for movement settle (0.01s, seq=2849) pos=(13, 5)
+[Follow] move did not settle at (13, 5) via left; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2861) pos=(13, 5)
+[Follow] waiting for movement settle (0.01s, seq=2865) pos=(14, 5)
+[Follow] move did not settle at (14, 5) via down; retrying another axis before blocking
+[Follow] axis swap retry via left (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2878) pos=(14, 5)
+[Follow] waiting for movement settle (0.01s, seq=2889) pos=(15, 5)
+[Follow] Target: (11, 8) | Pos: (15, 5)
+[Follow] move did not settle at (15, 5) via down; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=2901) pos=(15, 5)
+[Follow] waiting for movement settle (0.01s, seq=2913) pos=(15, 6)
+[Follow] move did not settle at (15, 6) via down; retrying another axis before blocking
+[Follow] axis swap retry via left (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2925) pos=(15, 6)
+[Follow] move did not settle at (15, 6) via left; retrying another axis before blocking
+[Follow] Target: (11, 8) | Pos: (15, 6)
+[Follow] waiting for movement settle (0.01s, seq=2937) pos=(15, 6)
+[Follow] waiting for movement settle (0.01s, seq=2945) pos=(15, 7)
+[Follow] move did not settle at (15, 7) via left; retrying another axis before blocking
+[Follow] axis swap retry via left (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2956) pos=(15, 7)
+[Follow] blocked cell remembered: (14, 7) via left for 20s
+[Follow] blocked move confirmed at (15, 7) via left; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (15, 7); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=2968) pos=(15, 7)
+[Follow] waiting for movement settle (0.01s, seq=2976) pos=(15, 8)
+[Follow] Target: (11, 8) | Pos: (15, 8)
+[Follow] move did not settle at (15, 8) via left; retrying another axis before blocking
+[Follow] axis swap retry via left (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=2988) pos=(15, 8)
+[Follow] waiting for movement settle (0.01s, seq=3001) pos=(15, 9)
+[Follow] move did not settle at (15, 9) via left; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3012) pos=(15, 9)
+[Follow] Target: (11, 8) | Pos: (15, 9)
+[Follow] blocked cell remembered: (14, 9) via left for 20s
+[Follow] blocked move confirmed at (15, 9) via left; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (15, 9); retrying local path
+[Follow] axis swap retry via left (no_progress=2, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=3024) pos=(15, 9)
+[Follow] blocked cell remembered: (14, 9) via left for 20s
+[Follow] blocked move confirmed at (15, 9) via left; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (15, 9); retrying local path
+[Follow] waiting for movement settle (0.02s, seq=3039) pos=(15, 10)
+[Follow] move did not settle at (15, 10) via up; retrying another axis before blocking
+[Follow] axis swap retry via left (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3051) pos=(15, 10)
+[Follow] waiting for movement settle (0.01s, seq=3060) pos=(15, 11)
+[Follow] Target: (11, 8) | Pos: (15, 11)
+[Follow] move did not settle at (15, 11) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3071) pos=(15, 11)
+[Follow] waiting for movement settle (0.01s, seq=3081) pos=(14, 11)
+[Follow] move did not settle at (14, 11) via up; retrying another axis before blocking
+[Follow] axis swap retry via left (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3092) pos=(14, 11)
+[Follow] move did not settle at (14, 11) via left; retrying another axis before blocking
+[Follow] Target: (11, 8) | Pos: (14, 11)
+[Follow] waiting for movement settle (0.01s, seq=3102) pos=(14, 11)
+[Follow] blocked cell remembered: (14, 10) via up for 20s
+[Follow] blocked move confirmed at (14, 11) via up; remembering cell and retrying
+[Follow] waiting for movement settle (0.01s, seq=3114) pos=(14, 11)
+[Follow] waiting for movement settle (0.01s, seq=3117) pos=(13, 11)
+[Follow] move did not settle at (13, 11) via left; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3129) pos=(13, 11)
+[Follow] waiting for movement settle (0.01s, seq=3141) pos=(12, 11)
+[Follow] Target: (11, 8) | Pos: (12, 11)
+[Follow] move did not settle at (12, 11) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3153) pos=(12, 11)
+[Follow] blocked cell remembered: (12, 10) via up for 20s
+[Follow] blocked move confirmed at (12, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 11); retrying local path
+[Follow] axis swap retry via up (no_progress=2, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=3164) pos=(12, 11)
+[Follow] waiting for movement settle (0.01s, seq=3168) pos=(11, 11)
+[Follow] move did not settle at (11, 11) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3181) pos=(11, 11)
+[Follow] Target: (11, 8) | Pos: (11, 11)
+[Follow] blocked cell remembered: (11, 10) via up for 20s
+[Follow] blocked move confirmed at (11, 11) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 11); retrying local path
+[Follow] axis swap retry via up (no_progress=2, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=3193) pos=(11, 11)
+[Follow] waiting for movement settle (0.01s, seq=3201) pos=(11, 12)
+[Follow] move did not settle at (11, 12) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3213) pos=(11, 12)
+[Follow] blocked cell remembered: (11, 11) via up for 20s
+[Follow] blocked move confirmed at (11, 12) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 12); retrying local path
+[Follow] axis swap retry via up (no_progress=2, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=3225) pos=(11, 12)
+[Follow] Target: (11, 8) | Pos: (11, 13)
+[Follow] waiting for movement settle (0.01s, seq=3233) pos=(11, 13)
+[Follow] move did not settle at (11, 13) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.02s, seq=3245) pos=(11, 13)
+[Follow] blocked cell remembered: (11, 12) via up for 20s
+[Follow] blocked move confirmed at (11, 13) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 13); retrying local path
+[Follow] axis swap retry via up (no_progress=2, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=3256) pos=(11, 13)
+[Follow] blocked cell remembered: (11, 12) via up for 20s
+[Follow] blocked move confirmed at (11, 13) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 13); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=3268) pos=(11, 13)
+[Follow] Target: (11, 8) | Pos: (10, 13)
+[Follow] waiting for movement settle (0.01s, seq=3273) pos=(10, 13)
+[Follow] move did not settle at (10, 13) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3285) pos=(10, 13)
+[Follow] waiting for movement settle (0.01s, seq=3297) pos=(10, 12)
+[Follow] move did not settle at (10, 12) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3309) pos=(10, 12)
+[Follow] Target: (11, 8) | Pos: (10, 12)
+[Follow] waiting for movement settle (0.01s, seq=3321) pos=(11, 12)
+[Follow] move did not settle at (11, 12) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3333) pos=(11, 12)
+[Follow] blocked cell remembered: (11, 11) via up for 20s
+[Follow] blocked move confirmed at (11, 12) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 12); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=3347) pos=(11, 12)
+[Follow] waiting for movement settle (0.01s, seq=3353) pos=(12, 12)
+[Follow] Target: (11, 8) | Pos: (12, 12)
+[Follow] move did not settle at (12, 12) via up; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3365) pos=(12, 12)
+[Follow] blocked cell remembered: (12, 11) via up for 20s
+[Follow] blocked move confirmed at (12, 12) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (12, 12); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=3378) pos=(12, 12)
+[Follow] waiting for movement settle (0.01s, seq=3389) pos=(11, 12)
+[Follow] blocked cell remembered: (11, 11) via up for 20s
+[Follow] blocked move confirmed at (11, 12) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 12); retrying local path
+[Follow] axis swap retry via up (no_progress=1, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=3402) pos=(11, 12)
+[Follow] Target: (11, 8) | Pos: (11, 12)
+[Follow] waiting for movement settle (0.01s, seq=3412) pos=(11, 11)
+[Follow] move did not settle at (11, 11) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3425) pos=(11, 11)
+[Follow] waiting for movement settle (0.01s, seq=3437) pos=(11, 12)
+[Follow] Target: (12, 8) | Pos: (11, 12)
+[Follow] blocked cell remembered: (11, 11) via up for 20s
+[Follow] blocked move confirmed at (11, 12) via up; remembering cell and retrying
+[Follow] cleared 1 blocked cells around (11, 12); retrying local path
+[Follow] axis swap retry via up (no_progress=0, blocked=1)
+[Follow] waiting for movement settle (0.01s, seq=3449) pos=(11, 12)
+[Follow] blocked cell remembered: (11, 11) via up for 20s
+[Follow] blocked move confirmed at (11, 12) via up; remembering cell and retrying
+[Follow] waiting for movement settle (0.01s, seq=3461) pos=(11, 12)
+[Follow] waiting for movement settle (0.01s, seq=3468) pos=(11, 13)
+[Follow] move did not settle at (11, 13) via right; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3480) pos=(11, 13)
+[Follow] Target: (14, 8) | Pos: (11, 13)
+[Follow] move did not settle at (11, 13) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.02s, seq=3493) pos=(11, 13)
+[Follow] blocked cell remembered: (12, 13) via right for 20s
+[Follow] blocked move confirmed at (11, 13) via right; remembering cell and retrying
+[Follow] waiting for movement settle (0.01s, seq=3505) pos=(11, 13)
+[Follow] waiting for movement settle (0.01s, seq=3509) pos=(10, 13)
+[Follow] move did not settle at (10, 13) via right; retrying another axis before blocking
+[Follow] axis swap retry via up (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3522) pos=(10, 13)
+[Follow] waiting for movement settle (0.01s, seq=3533) pos=(10, 12)
+[Follow] Target: (14, 8) | Pos: (10, 12)
+[Follow] move did not settle at (10, 12) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3545) pos=(10, 12)
+[Follow] waiting for movement settle (0.01s, seq=3553) pos=(10, 13)
+[Follow] move did not settle at (10, 13) via up; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3565) pos=(10, 13)
+[Follow] blocked cell remembered: (10, 12) via up for 20s
+[Follow] blocked move confirmed at (10, 13) via up; remembering cell and retrying
+[Follow] axis swap retry via right (no_progress=1, blocked=1)
+[Follow] Target: (14, 10) | Pos: (10, 13)
+[Follow] waiting for movement settle (0.01s, seq=3577) pos=(10, 13)
+[Follow] blocked cell remembered: (11, 13) via right for 20s
+[Follow] blocked move confirmed at (10, 13) via right; remembering cell and retrying
+[Follow] cleared 2 blocked cells around (10, 13); retrying local path
+[Follow] waiting for movement settle (0.01s, seq=3593) pos=(10, 14)
+[Follow] move did not settle at (10, 14) via up; retrying another axis before blocking
+[Follow] axis swap retry via right (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3605) pos=(10, 14)
+[Follow] move did not settle at (10, 14) via right; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3617) pos=(10, 14)
+[Follow] Target: (14, 11) | Pos: (10, 14)
+[Follow] waiting for movement settle (0.01s, seq=3624) pos=(9, 14)
+[Follow] move did not settle at (9, 14) via up; retrying another axis before blocking
+[Follow] axis swap retry via right (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3636) pos=(9, 14)
+[Follow] move did not settle at (9, 14) via right; retrying another axis before blocking
+[Follow] waiting for movement settle (0.01s, seq=3648) pos=(9, 14)
+[Follow] blocked cell remembered: (9, 13) via up for 20s
+[Follow] blocked move confirmed at (9, 14) via up; remembering cell and retrying
+[Follow] waiting for movement settle (0.01s, seq=3659) pos=(9, 14)
+[Follow] Target: (14, 11) | Pos: (9, 14)
+[Follow] waiting for movement settle (0.01s, seq=3664) pos=(9, 15)
+[Follow] move did not settle at (9, 15) via up; retrying another axis before blocking
+[Follow] axis swap retry via right (no_progress=1, blocked=0)
+[Follow] waiting for movement settle (0.01s, seq=3675) pos=(9, 15)
+[Hotkey] F1 pressed
+[Hotkey] Follow Mode: OFF | MODE=OFF

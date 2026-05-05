@@ -50,6 +50,27 @@ TIMING_CONFIG: dict = {
     "exit_hold"      : 1.0,      # 포탈/출구 진입 시 키 유지 시간
 }
 
+GAME_HOTKEY_ALIAS: dict[str, str] = {
+    "1": "a",
+    "2": "b",
+    "3": "c",
+    "4": "d",
+    "5": "e",
+    "6": "f",
+    "7": "g",
+    "8": "h",
+    "9": "i",
+    "0": "j",
+}
+
+
+def normalize_game_hotkey(key: str | None) -> str:
+    normalized = str(key or "").strip()
+    if not normalized:
+        return ""
+    return GAME_HOTKEY_ALIAS.get(normalized, normalized)
+
+
 def humanized_sleep(base_time: float, variance: float = 0.15) -> None:
     sigma  = base_time * variance * 0.5
     delay  = random.gauss(base_time, sigma)
@@ -92,8 +113,16 @@ class Skill:
     cooldown:       float         = 0.0
     last_cast_time: float         = 0.0
 
+    def __post_init__(self):
+        resolved = normalize_game_hotkey(self.hotkey or self.spell_char)
+        if resolved:
+            self.hotkey = resolved
+
     def is_ready(self) -> bool:
         return (time.time() - self.last_cast_time) >= self.cooldown
+
+    def effective_key(self) -> str:
+        return normalize_game_hotkey(self.hotkey or self.spell_char)
 
 @dataclass
 class Region:
@@ -151,6 +180,10 @@ class GameState:
         self.money   = 0
         self.x       = 0
         self.y       = 0
+        self.pos_x   = 0
+        self.pos_y   = 0
+        self.pos_last_update_time = 0.0
+        self.pos_update_seq = 0
         self.good_hp = 0
         self.good_mp = 0
         # OCR 원문(또는 누락 포함) 문자열. x/y는 4자리 고정, 누락은 'x'로 채움.
@@ -192,6 +225,7 @@ class GameState:
         self.win_y = None
         self.nav_follow_enabled = True
         self.nav_route_enabled  = True
+        self.route_waypoints_enabled = False
         # Grid overlay 관련 (SentinelThread가 GameState에서 참조)
         self.grid_overlay_enabled = False
         self.grid_offset = (0, 0)  # (offset_x, offset_y)
@@ -336,6 +370,10 @@ class GameState:
                 "hp": self.hp, "mp": self.mp,
                 "exp": self.exp, "money": self.money,
                 "x": self.x, "y": self.y,
+                "pos_x": getattr(self, "pos_x", self.x),
+                "pos_y": getattr(self, "pos_y", self.y),
+                "pos_last_update_time": getattr(self, "pos_last_update_time", 0.0),
+                "pos_update_seq": getattr(self, "pos_update_seq", 0),
                 "good_hp": self.good_hp,
                 "good_mp": self.good_mp,
                 "hp_str": getattr(self, "hp_str", ""),
@@ -421,264 +459,189 @@ class BisHardware:
         with self._lock:
             if self.ser and self.ser.is_open:
                 try:
+                    self._reset_serial_buffers()
+                except Exception:
+                    pass
+                try:
                     self.ser.close()
                 except Exception:
                     pass
                 self.ser = None
 
-    def send(self, cmd: str):
-        """
-        패킷 크기 가변화 로직 적용:
-        명령어 뒤에 무작위 길이의 패딩(공백)을 추가하여 전송 데이터 크기를 불규칙하게 만듦.
-        """
-        with self._lock:
-            current_hwnd = win32gui.GetForegroundWindow()
-            window_text = win32gui.GetWindowText(current_hwnd)
-            is_focused = False
-            
-            if self.state is not None:
-                # 1. 핸들 직접 비교
-                if current_hwnd == self.state.hwnd:
-                    is_focused = True
-                # 2. 전체화면 대응: 창 제목 키워드 포함 여부 확인
-                elif any(x in window_text for x in ["바람", "AION", "ory"]):
-                    is_focused = True
-            
-            # ── 듀얼 모니터 지능형 차단 ────────────────────
-            if not is_focused:
-                # 키 떼기(U:) 명령은 비상 정지 및 사후 처리를 위해 무조건 허용
-                if not cmd.startswith("U:"):
-                    print(f"[Hardware] 차단: {cmd} (포커스 아님, hwnd={current_hwnd}, state.hwnd={self.state.hwnd if self.state else None})")
-                    return
-
-            if self.ser and self.ser.is_open:
-                try:
-                    # 무작위 패딩(1~16자) 추가하여 패킷 크기 가변화
-                    padding = ' ' * random.randint(1, 16)
-                    payload = f"{cmd}{padding}\n".encode('ascii')
-                    self.ser.write(payload)
-                    print(f"[Hardware] 전송: {cmd} ({len(payload)}바이트)")
-                except Exception as e:
-                    print(f"[Hardware] 전송 실패: {cmd} - {e}")
-            else:
-                print(f"[Hardware] 미전송: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
-            # 소프트웨어 폴백(pydirectinput)은 보안상 완전히 제거됨
-
-    def send_force(self, cmd: str):
-        """포커스 체크 없이 무조건 전송 (F1 이동 등 포커스 제어가 이미 된 상황에서 사용)"""
-        with self._lock:
-            if self.ser and self.ser.is_open:
-                try:
-                    padding = ' ' * random.randint(1, 16)
-                    payload = f"{cmd}{padding}\n".encode('ascii')
-                    self.ser.write(payload)
-                    print(f"[Hardware] 강제전송: {cmd} ({len(payload)}바이트)")
-                except Exception as e:
-                    print(f"[Hardware] 강제전송 실패: {cmd} - {e}")
-            else:
-                print(f"[Hardware] 강제전송 불가: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
-
-    def panic_release(self):
-        """강제 정지 시 파이썬 측 통신 버퍼를 싹 비우고 아두이노에 키보드 즉시 해제 명령 강제 전송. (락 무시)"""
+    def _reset_serial_buffers(self):
+        """Best-effort: clear buffered serial I/O to reduce stuck input risk."""
         if self.ser and self.ser.is_open:
             try:
-                # 이미 쌓인 D:left, D:right 등의 발송 대기열 삭제
                 self.ser.reset_output_buffer()
                 self.ser.reset_input_buffer()
-                # 아두이노에 씹히지 않도록 연달아 발송
                 for _ in range(2):
                     self.ser.write(b"RELEASE_ALL\n")
-                self.ser.flush() # 물리적 회선으로 발송이 끝날때까지 대기
+                self.ser.flush()
             except Exception:
                 pass
 
-    def humanized_press(self, key: str, variance: float = 0.15):
-        # HumanBehaviorSimulator로 동작 간 휴식 시간 시뮬레이션
-        pause = HumanBehaviorSimulator.simulate_pause('click')
-        time.sleep(pause)
-        
-        self.send(f"D:{key}")
-        humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
-        self.send(f"U:{key}")
+    def _is_game_window_focused(self) -> bool:
+        try:
+            current_hwnd = win32gui.GetForegroundWindow()
+            if not current_hwnd:
+                return False
+            if self.state is not None and getattr(self.state, "hwnd", None):
+                if current_hwnd == self.state.hwnd:
+                    return True
+            try:
+                window_text = win32gui.GetWindowText(current_hwnd) or ""
+            except Exception:
+                window_text = ""
+            return any(keyword in window_text for keyword in ["??", "AION", "ory"])
+        except Exception:
+            return False
 
-    def press_with_gap(self, key: str, variance: float = 0.15):
-        self.humanized_press(key, variance)
-        # HumanBehaviorSimulator로 타이핑 동작 간 휴식 시간 시뮬레이션
-        pause = HumanBehaviorSimulator.simulate_pause('type')
-        time.sleep(pause)
+    def _write_serial_command(self, cmd: str, *, require_focus: bool = True, log_prefix: str = "[Hardware]") -> bool:
+        if require_focus and not self._is_game_window_focused():
+            print(f"{log_prefix} blocked: {cmd} (game window not focused)")
+            return False
+        if self.ser and self.ser.is_open:
+            try:
+                padding = ' ' * random.randint(1, 16)
+                payload = f"{cmd}{padding}\n".encode('ascii')
+                self.ser.write(payload)
+                print(f"{log_prefix} sent: {cmd} ({len(payload)} bytes)")
+                return True
+            except Exception as e:
+                print(f"{log_prefix} send failed: {cmd} - {e}")
+        else:
+            print(f"{log_prefix} not sent: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
+        return False
 
-    def panic_escape(self, count: int = None):
-        n = count if count is not None else random.randint(2, 3)
-        for _ in range(n):
-            self.humanized_press("esc")
-            humanized_sleep(TIMING_CONFIG["esc_gap"])
+    def send(self, cmd: str):
+        """
+        Packet size variability:
+        add a random-length padding to keep payload sizes irregular.
+        """
+        with self._lock:
+            self._write_serial_command(cmd, require_focus=True, log_prefix="[Hardware]")
+
+    def send_force(self, cmd: str):
+        """Send with the same foreground-window guard as normal input."""
+        with self._lock:
+            self._write_serial_command(cmd, require_focus=True, log_prefix="[Hardware]")
 
     def panic_release(self):
-        """모든 하드웨어 신호를 즉시 소거 (비상 정지용)"""
-        print("[Hardware] 모든 신호 강제 해제 (Panic Release)")
+        """?? ???? ??? ?? ?? (?? ???)"""
+        try:
+            self._reset_serial_buffers()
+        except Exception:
+            pass
+        print("[Hardware][Cleanup] ?? ?? ?? ?? (Panic Release)")
         keys = ["left", "right", "up", "down", "shift", "ctrl", "alt", "esc", "space", "enter"]
         for k in keys:
-            self.send(f"U:{k}")
-        self.send("U:all")
+            self._write_serial_command(f"U:{k}", require_focus=False, log_prefix="[Hardware][Cleanup]")
+        self._write_serial_command("U:all", require_focus=False, log_prefix="[Hardware][Cleanup]")
+
+    def stop_all_inputs(self, repeat: int = 2, delay: float = 0.05, disconnect: bool = False):
+        """Best-effort cleanup for GUI close / panic / pause transitions."""
+        tries = max(1, int(repeat or 1))
+        pause = max(0.0, float(delay or 0.0))
+        for idx in range(tries):
+            try:
+                self.panic_release()
+            except Exception:
+                pass
+            if idx + 1 < tries and pause:
+                time.sleep(pause)
+        if disconnect:
+            try:
+                self.disconnect()
+            except Exception:
+                pass
 
     def hold_move(self, direction: str, hold_key: str = "move_hold", variance: float = 0.15):
-        # HumanBehaviorSimulator로 이동 동작 간 휴식 시간 시뮬레이션
+        if not self._is_game_window_focused():
+            print(f"[Move] blocked: {direction} (game window not focused)")
+            return
+        # HumanBehaviorSimulator? ?? ?? ? ?? ?? ?????
         pause = HumanBehaviorSimulator.simulate_pause('move')
         time.sleep(pause)
         
-        print(f"[Move] 방향키: {direction}")
+        print(f"[Move] ???: {direction}")
         try:
             self.send_force(f"D:{direction}")
             humanized_sleep(TIMING_CONFIG[hold_key], variance)
         finally:
             self.send_force(f"U:{direction}")
-
-    def click(self, grid_x: int, grid_y: int, grid_manager=None):
-        """
-        Grid 좌표를 받아 Pixel 좌표로 변환 후 클릭
-        grid_x, grid_y: 그리드 좌표 (0-based)
-        grid_manager: GridManager 인스턴스 (선택사항, 없으면 state에서 가져옴)
-        """
-        if grid_manager is None and self.state:
-            # GameState에서 GridManager 인스턴스 가져오기 (필요시)
-            # 현재 구조에서는 직접 전달받는 것이 안전
-            pass
-        
-        if grid_manager:
-            pixel_pos = grid_manager.to_pixel(grid_x, grid_y)
-            if pixel_pos:
-                px, py = pixel_pos
-                print(f"[Click] Grid({grid_x}, {grid_y}) -> Pixel({px}, {py})")
-                # 마우스 클릭 구현 (win32api 사용)
-                try:
-                    import win32api
-                    import win32con
-                    # 절대 좌표로 클릭
-                    win32api.SetCursorPos((px, py))
-                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                    time.sleep(0.05)
-                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                except Exception as e:
-                    print(f"[Click] 마우스 클릭 실패: {e}")
-            else:
-                print(f"[Click] Grid 좌표 변환 실패: ({grid_x}, {grid_y})")
-        else:
-            print(f"[Click] GridManager가 없어 클릭 불가: ({grid_x}, {grid_y})")
-
 hw = BisHardware()
 
 
 # ============================================================
-# ⑤ GridManager  ─  픽셀/그리드 좌표 변환
+#  GridManager  -  Grid/Pixel coordinate conversion
 # ============================================================
 class GridManager:
-    """
-    픽셀 좌표와 그리드 좌표 간 변환을 담당하는 클래스
-    맵별 grid_cols, grid_rows를 지원하여 유연한 그리드 시스템 제공
-    """
     def __init__(self, state, grid_size=48):
         self.state = state
-        self.grid_size = grid_size  # 48px (2배 크기)
-        self.margin = 24  # 초기 여백
-        self.grid_start_x = None  # 격자 시작점
+        self.grid_size = grid_size
+        self.margin = 24
+        self.grid_start_x = None
         self.grid_start_y = None
-        self.grid_cols = 20  # 가로 타일 수 (맵별 설정으로 변경 가능)
-        self.grid_rows = 17  # 세로 타일 수 (맵별 설정으로 변경 가능)
-        self.play_area = None  # play_area 좌표 (sx, sy, dx, dy)
+        self.grid_cols = 20
+        self.grid_rows = 17
+        self.play_area = None
 
     def set_map_config(self, grid_cols, grid_rows, play_area=None):
-        """
-        맵별 그리드 설정 적용
-        grid_cols: 가로 타일 수
-        grid_rows: 세로 타일 수
-        play_area: (sx, sy, dx, dy) 튜플 (선택사항)
-        """
         self.grid_cols = grid_cols
         self.grid_rows = grid_rows
         if play_area:
             self.play_area = play_area
-            # play_area에서 격자 시작점 계산
             sx, sy, dx, dy = play_area
             self.grid_start_x = sx
             self.grid_start_y = sy
 
     def set_window_size(self, w, h):
-        """창 크기에서 격자 시작점 계산 (전체화면 grid_cols 기준)"""
         cell_w = w // self.grid_cols
         cell_h = h // self.grid_rows
-        
-        # D1 위치: col=3, row=0 (고정)
         d1_x = 3 * cell_w
         d1_y = 0 * cell_h
-        
-        # 격자 시작점 (D1 위치 + 24px 여백)
         self.grid_start_x = d1_x + self.margin
         self.grid_start_y = d1_y + self.margin
 
     def to_grid(self, pixel_x, pixel_y):
-        """
-        픽셀 좌표 → 그리드 좌표 변환 (정수 인덱스)
-        맵별 cols/rows를 사용하여 정확한 그리드 좌표 계산
-        GridX = (PixelX - play_area.sx) / (play_area.width / grid_cols)
-        GridY = (PixelY - play_area.sy) / (play_area.height / grid_rows)
-        """
         if self.play_area:
             sx, sy, dx, dy = self.play_area
             play_width = dx - sx
             play_height = dy - sy
-            
             if play_width > 0 and play_height > 0:
-                gx = (pixel_x - sx) / (play_width / self.grid_cols)
-                gy = (pixel_y - sy) / (play_height / self.grid_rows)
-                
-                # 유효성 검사
+                gx = (pixel_x - sx) // (play_width / self.grid_cols)
+                gy = (pixel_y - sy) // (play_height / self.grid_rows)
                 if gx < 0 or gy < 0 or gx >= self.grid_cols or gy >= self.grid_rows:
                     return None
-                
                 return (int(gx), int(gy))
-        
-        # play_area가 없는 경우 기존 방식 사용
+
         if self.grid_start_x is None or self.grid_start_y is None:
             return None
-        
+
         gx = (pixel_x - self.grid_start_x) // self.grid_size
         gy = (pixel_y - self.grid_start_y) // self.grid_size
-        
         if gx < 0 or gy < 0 or gx >= self.grid_cols or gy >= self.grid_rows:
             return None
-        
         return (int(gx), int(gy))
 
     def to_pixel(self, grid_x, grid_y):
-        """
-        그리드 좌표 → 픽셀 좌표 변환
-        맵별 cols/rows를 사용하여 정확한 픽셀 좌표 계산
-        PixelX = play_area.sx + (grid_x * play_area.width / grid_cols)
-        PixelY = play_area.sy + (grid_y * play_area.height / grid_rows)
-        """
         if self.play_area:
             sx, sy, dx, dy = self.play_area
             play_width = dx - sx
             play_height = dy - sy
-            
             if play_width > 0 and play_height > 0:
                 px = sx + (grid_x * play_width / self.grid_cols)
                 py = sy + (grid_y * play_height / self.grid_rows)
                 return (int(px), int(py))
-        
-        # play_area가 없는 경우 기존 방식 사용
+
         if self.grid_start_x is None or self.grid_start_y is None:
             return None
-        
+
         px = grid_x * self.grid_size + self.grid_start_x
         py = grid_y * self.grid_size + self.grid_start_y
         return (int(px), int(py))
 
     def get_surrounding_grids(self, center_grid_x, center_grid_y):
-        """
-        중심 그리드 좌표 기준 상하좌우 그리드 좌표 반환
-        반환: (현재, 왼쪽, 오른쪽, 위, 아래)
-        """
         current = (center_grid_x, center_grid_y)
         left = (center_grid_x - 1, center_grid_y)
         right = (center_grid_x + 1, center_grid_y)
@@ -687,12 +650,21 @@ class GridManager:
         return current, left, right, up, down
 
     def grid_to_name(self, grid_x, grid_y):
-        """
-        그리드 좌표 → 엑셀 방식 이름 변환
-        예: (0, 0) → "A1", (1, 1) → "B2"
-        """
         if grid_x < 0 or grid_y < 0:
             return None
         col_name = chr(ord('A') + grid_x)
         row_name = str(grid_y + 1)
         return f"{col_name}{row_name}"
+
+    def name_to_grid(self, grid_name):
+        if not grid_name or len(grid_name) < 2:
+            return None
+        grid_name = str(grid_name).strip().upper()
+        col = ord(grid_name[0]) - ord('A')
+        try:
+            row = int(grid_name[1:]) - 1
+        except Exception:
+            return None
+        if col < 0 or row < 0:
+            return None
+        return (col, row)

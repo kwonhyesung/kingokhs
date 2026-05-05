@@ -27,6 +27,7 @@ import win32gui
 
 from bis_core import GameState, find_game_window, Region
 from dataclasses import asdict
+from camera_utils import open_preferred_obs_capture
 
 def dict_to_region(data: dict) -> Region:
     """dict?Region 객체?변?하???퍼 ?수"""
@@ -37,19 +38,22 @@ def dict_to_region(data: dict) -> Region:
     raise ValueError(f"Invalid data type for Region: {type(data)}")
 
 def get_camera():
-    """OBS 가??카메???덱???동 감? ??결"""
-    for index in range(3):  # 0, 1, 2 ?서???도
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        if cap.isOpened():
-            # ?상??고정 ?정
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-            cap.set(cv2.CAP_PROP_FPS, 60)
-            print(f"[Camera] OBS 가??카메??연결 성공 (index: {index})")
-            return cap, index
-        cap.release()
-    print("[Camera] OBS 가??카메???결 실패")
+    """Prefer OBS virtual camera and avoid the built-in laptop camera."""
+    print("[Camera] Attempting OBS virtual camera connection...")
+    cap, index, devices = open_preferred_obs_capture(
+        log=print,
+        width=1920,
+        height=1080,
+        fps=60,
+    )
+    if cap is not None:
+        print(f"[Camera] OBS virtual camera connected (index: {index})")
+        return cap, index
+    print(f"[Camera] OBS virtual camera unavailable. devices={devices}")
     return None, -1
+
+
+
 
 
 # ?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?╗

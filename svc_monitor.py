@@ -23,6 +23,7 @@ import os
 import json
 import random
 import re
+from typing import Optional
 import cv2
 import numpy as np
 import win32gui
@@ -35,6 +36,7 @@ except Exception:
 from svc_kernel import GameState, find_game_window, Region
 from dataclasses import asdict
 from svc_findtext import FindTextEngine
+from camera_utils import open_preferred_obs_capture
 
 VERBOSE_MONITOR_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
 
@@ -52,27 +54,21 @@ def dict_to_region(data: dict) -> Region:
     raise ValueError(f"Invalid data type for Region: {type(data)}")
 
 def get_camera():
-    """OBS 가??카메???덱???동 감? ??결"""
-    _monitor_log("[Camera] Attempting to connect to camera...")
-    for index in range(3):  # 0, 1, 2 ?서???도
-        _monitor_log(f"[Camera] Trying index {index}...")
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        _monitor_log(f"[Camera] VideoCapture created for index {index}, isOpened={cap.isOpened()}")
-        if cap.isOpened():
-            # ?상??고정 ?정
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-            cap.set(cv2.CAP_PROP_FPS, 60)
-            # Reduce capture latency (best-effort; backend may ignore this).
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
-            _monitor_log(f"[Camera] OBS 가??카메??연결 성공 (index: {index})")
-            return cap, index
-        cap.release()
-    _monitor_log("[Camera] OBS 가??카메???결 실패")
+    """Prefer OBS virtual camera and avoid the built-in laptop camera."""
+    print("[Camera] Attempting OBS virtual camera connection...")
+    cap, index, devices = open_preferred_obs_capture(
+        log=print,
+        width=1920,
+        height=1080,
+        fps=60,
+    )
+    if cap is not None:
+        print(f"[Camera] OBS virtual camera connected (index: {index})")
+        return cap, index
+    print(f"[Camera] OBS virtual camera unavailable. devices={devices}")
     return None, -1
+
+
 
 
 
@@ -99,7 +95,7 @@ class CaptureSvc(threading.Thread):
             
             # 버퍼 비우기 및 최신 프레임 획득
             ok = True
-            for _ in range(3):
+            for _ in range(1):
                 if not self.cap.grab():
                     ok = False
                     break
@@ -125,7 +121,7 @@ class CaptureSvc(threading.Thread):
             self.state.last_frame_time = time.time()
             
             # 약 100~120 FPS 제한으로 CPU 부하 조절
-            time.sleep(0.005)
+            time.sleep(0.002)
 
     def stop(self):
         self._running = False
@@ -2012,11 +2008,46 @@ class NumericFieldScanner(threading.Thread):
             return result
         return self.findtext_engine.recognize_with_findtext(crop, override_threshold=self.state.bin_threshold, debug_name=debug_name)
 
+    def _scan_numeric_field(self, frame, name: str, reg) -> int | None:
+        """Scan a single numeric ROI and return the parsed integer when available."""
+        sx = int(reg.sx)
+        sy = int(reg.sy)
+        dx = int(reg.dx)
+        dy = int(reg.dy)
+
+        if sx >= dx or sy >= dy:
+            return None
+
+        pad = 1
+        h, w = frame.shape[:2]
+        sy_p, dy_p = max(0, sy - pad), min(h, dy + pad)
+        sx_p, dx_p = max(0, sx - pad), min(w, dx + pad)
+
+        crop = frame[sy_p:dy_p, sx_p:dx_p]
+        if crop.size == 0:
+            return None
+
+        result = self.recognize_with_findtext(crop, debug_name=name)
+        if result is None:
+            return None
+
+        result_str = str(result)
+        if name in ("x", "y"):
+            if len(result_str) < 4:
+                result_str = result_str.ljust(4, "x")
+            elif len(result_str) > 4:
+                result_str = result_str[:4]
+
+        setattr(self.state, f"{name}_str", result_str)
+        if not result_str.isdigit():
+            return None
+        return int(result_str)
+
     def run(self):
         while self._running and self.state.running:
             now = time.time()
             # 100 FPS 제한 (약 10ms 주기) - 병목 해소를 위해 상향
-            if now - self._last_run_time < 0.010:
+            if now - self._last_run_time < 0.004:
                 time.sleep(0.001)
                 continue
             self._last_run_time = now
@@ -2056,57 +2087,36 @@ class NumericFieldScanner(threading.Thread):
             except Exception:
                 pass
 
-            # GameState 직접 업데이트 (GUI 업데이트 큐 사용하지 않음)
-            for name, reg in self.numeric_regions.items():
-                ox, oy, scx, scy = getattr(self.state, "obs_params", (0, 0, 1.0, 1.0))
-                fh, fw = frame.shape[:2]
-                # [Test 73 - 1:1 Fix] 절대 1:1 좌표 강제
-                sx = int(reg.sx)
-                sy = int(reg.sy)
-                dx = int(reg.dx)
-                dy = int(reg.dy)
+            pending_xy = {}
 
-                if sx >= dx or sy >= dy:
+            # Fast path: always scan x/y first so movement sees the newest position sooner.
+            for name in ("x", "y"):
+                reg = self.numeric_regions.get(name)
+                if reg is None:
                     continue
+                val = self._scan_numeric_field(frame, name, reg)
+                if val is not None:
+                    pending_xy[name] = val
 
-                # 숫자 ROI는 설정값이 이미 촘촘해 과한 padding이 오히려 오인식을 만든다.
-                pad = 1
-                h, w = frame.shape[:2]
-                sy_p, dy_p = max(0, sy - pad), min(h, dy + pad)
-                sx_p, dx_p = max(0, sx - pad), min(w, dx + pad)
-                
-                crop = frame[sy_p:dy_p, sx_p:dx_p]
-                if crop.size == 0:
-                    continue
-                
-                # FindTextEngine으로 인식 (문자열로 우선 보존)
-                result = self.recognize_with_findtext(crop, debug_name=name)
-                if result is None:
-                    continue
+            if "x" in pending_xy and "y" in pending_xy:
+                with self.state._lock:
+                    self.state.x = pending_xy["x"]
+                    self.state.y = pending_xy["y"]
+                    self.state.pos_x = pending_xy["x"]
+                    self.state.pos_y = pending_xy["y"]
+                    self.state.my_world_pos = (pending_xy["x"], pending_xy["y"])
+                    self.state.pos_last_update_time = now
+                    self.state.pos_update_seq = int(getattr(self.state, "pos_update_seq", 0) or 0) + 1
 
-                result_str = str(result)
-                # x/y는 항상 4자리 고정 (누락은 'x')
-                if name in ("x", "y"):
-                    if len(result_str) < 4:
-                        result_str = result_str.ljust(4, "x")
-                    elif len(result_str) > 4:
-                        result_str = result_str[:4]
-
-                # 항상 *_str에 저장 (GUI/디버깅용)
-                setattr(self.state, f"{name}_str", result_str)
-
-                # 숫자-only일 때만 정수 값 갱신 (로직 안정성 유지)
-                if result_str.isdigit():
-                    val = int(result_str)
-                    setattr(self.state, name, val)
-
-                    # 좌표 연동 업데이트
-                    if name == "x":
-                        current_y = getattr(self.state, "y", 0)
-                        self.state.my_world_pos = (val, current_y)
-                    elif name == "y":
-                        current_x = getattr(self.state, "x", 0)
-                        self.state.my_world_pos = (current_x, val)
+            # Slow path: other numeric fields do not block coordinate refresh.
+            if self.frame_count % 3 == 0:
+                for name in ("hp", "mp", "exp", "money"):
+                    reg = self.numeric_regions.get(name)
+                    if reg is None:
+                        continue
+                    val = self._scan_numeric_field(frame, name, reg)
+                    if val is not None:
+                        setattr(self.state, name, val)
 
     def stop(self):
         self._running = False
@@ -3168,6 +3178,10 @@ class MonitorSvc(threading.Thread):
                             "screen": (feet_x, feet_y),
                             "last_seen": time.time(),
                         }
+                        try:
+                            self.state.char_grid = grid_pos
+                        except Exception:
+                            pass
                         if play_area_overlay is not None:
                             cv2.circle(play_area_overlay,
                                        (int(feet_x), int(feet_y)), 6, (0, 255, 0), -1)

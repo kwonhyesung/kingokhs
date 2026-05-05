@@ -146,8 +146,18 @@ class Skill:
     cooldown:       float         = 0.0
     last_cast_time: float         = 0.0
 
+    def __post_init__(self):
+        # Keep the resolved key normalized so callers can rely on hotkey alone.
+        resolved = normalize_game_hotkey(self.hotkey or self.spell_char)
+        if resolved:
+            self.hotkey = resolved
+
     def is_ready(self) -> bool:
         return (time.time() - self.last_cast_time) >= self.cooldown
+
+    def effective_key(self) -> str:
+        """Return the normalized key that should be sent to the game."""
+        return normalize_game_hotkey(self.hotkey or self.spell_char)
 
 @dataclass
 class Region:
@@ -223,6 +233,12 @@ class GameState:
     money: int = 0
     x: int = 0
     y: int = 0
+    # OCR로 읽은 실제 현재 위치. 기존 x/y와 동일한 값이지만,
+    # follow/stuck 로직에서는 이 좌표를 기준값으로 삼는다.
+    pos_x: int = 0
+    pos_y: int = 0
+    pos_last_update_time: float = 0.0
+    pos_update_seq: int = 0
     good_hp: int = 0
     good_mp: int = 0
     # OCR 원문(또는 누락 포함) 문자열. x/y는 4자리 고정, 누락은 'x'로 채움.
@@ -297,6 +313,7 @@ class GameState:
     nav_follow_enabled: bool = False
     nav_route_enabled: bool = False
     nav_avoid_enabled: bool = False
+    route_waypoints_enabled: bool = False
     reverse_mode: bool = False
     waypoints_db: Dict[str, Any] = field(default_factory=dict)
     current_map: str = "기본맵"
@@ -332,6 +349,7 @@ class GameState:
     automation_paused: bool = False
     control_mode: str = "NONE"
     f1_route_active: bool = False
+    shutting_down: bool = False
     
     # 네트워크 관리
     is_connected: bool = False
@@ -497,6 +515,9 @@ class GameState:
                 "hp": self.hp, "mp": self.mp,
                 "exp": self.exp, "money": self.money,
                 "x": self.x, "y": self.y,
+                "pos_x": self.pos_x, "pos_y": self.pos_y,
+                "pos_last_update_time": self.pos_last_update_time,
+                "pos_update_seq": self.pos_update_seq,
                 "good_hp": self.good_hp, "good_mp": self.good_mp,
                 "hp_str": self.hp_str, "mp_str": self.mp_str,
                 "exp_str": self.exp_str, "money_str": self.money_str,
@@ -541,6 +562,10 @@ class GameState:
                 "exp": self.exp,
                 "x": self.x,
                 "y": self.y,
+                "pos_x": self.pos_x,
+                "pos_y": self.pos_y,
+                "pos_last_update_time": self.pos_last_update_time,
+                "pos_update_seq": self.pos_update_seq,
                 "good_hp": self.good_hp,
                 "good_mp": self.good_mp,
                 "hp_str": self.hp_str,
@@ -608,6 +633,16 @@ class GameState:
                         self.update_other(str(peer_name), dict(peer_data))
         elif isinstance(payload, dict):
             snapshot = dict(payload)
+
+        # Backward compatibility: keep x/y and pos_x/pos_y aligned.
+        if "pos_x" not in snapshot and "x" in snapshot:
+            snapshot["pos_x"] = snapshot.get("x", 0)
+        if "pos_y" not in snapshot and "y" in snapshot:
+            snapshot["pos_y"] = snapshot.get("y", 0)
+        if "x" not in snapshot and "pos_x" in snapshot:
+            snapshot["x"] = snapshot.get("pos_x", 0)
+        if "y" not in snapshot and "pos_y" in snapshot:
+            snapshot["y"] = snapshot.get("pos_y", 0)
 
         seq = int(snapshot.get("_seq", payload.get("seq", 0) if isinstance(payload, dict) else 0) or 0)
         snapshot["_received_at"] = time.time()
@@ -726,6 +761,10 @@ class BisHardware:
         with self._lock:
             if self.ser and self.ser.is_open:
                 try:
+                    self._reset_serial_buffers()
+                except Exception:
+                    pass
+                try:
                     self.ser.close()
                 except Exception:
                     pass
@@ -733,72 +772,71 @@ class BisHardware:
 
     def send(self, cmd: str):
         """
-        패킷 크기 가변화 로직 적용:
-        명령어 뒤에 무작위 길이의 패딩(공백)을 추가하여 전송 데이터 크기를 불규칙하게 만듦.
+        Packet size variability:
+        add a random-length padding to keep payload sizes irregular.
         """
         with self._lock:
-            current_hwnd = win32gui.GetForegroundWindow()
-            window_text = win32gui.GetWindowText(current_hwnd)
-            is_focused = False
-            
-            if self.state is not None:
-                # 1. 핸들 직접 비교
-                if current_hwnd == self.state.hwnd:
-                    is_focused = True
-                # 2. 전체화면 대응: 창 제목 키워드 포함 여부 확인
-                elif any(x in window_text for x in ["바람", "AION", "ory"]):
-                    is_focused = True
-            
-            # ── 듀얼 모니터 지능형 차단 ────────────────────
-            if not is_focused:
-                # 키 떼기(U:) 명령은 비상 정지 및 사후 처리를 위해 무조건 허용
-                if not cmd.startswith("U:"):
-                    _hw_log(f"[Hardware] 차단: {cmd} (포커스 아님, hwnd={current_hwnd}, state.hwnd={self.state.hwnd if self.state else None})")
-                    return
-
-            if self.ser and self.ser.is_open:
-                try:
-                    # 무작위 패딩(1~16자) 추가하여 패킷 크기 가변화
-                    padding = ' ' * random.randint(1, 16)
-                    payload = f"{cmd}{padding}\n".encode('ascii')
-                    self.ser.write(payload)
-                    _hw_log(f"[Hardware] 전송: {cmd} ({len(payload)}바이트)")
-                except Exception as e:
-                    _hw_log(f"[Hardware] 전송 실패: {cmd} - {e}")
-            else:
-                _hw_log(f"[Hardware] 미전송: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
-            # 소프트웨어 폴백(pydirectinput)은 보안상 완전히 제거됨
+            self._write_serial_command(cmd, require_focus=True, log_prefix="[Hardware]")
 
     def send_force(self, cmd: str):
-        """포커스 체크 없이 무조건 전송 (F1 이동 등 포커스 제어가 이미 된 상황에서 사용)"""
+        """Send with the same foreground-window guard as normal input."""
         with self._lock:
-            if self.ser and self.ser.is_open:
-                try:
-                    padding = ' ' * random.randint(1, 16)
-                    payload = f"{cmd}{padding}\n".encode('ascii')
-                    self.ser.write(payload)
-                    _hw_log(f"[Hardware] 강제전송: {cmd} ({len(payload)}바이트)")
-                except Exception as e:
-                    _hw_log(f"[Hardware] 강제전송 실패: {cmd} - {e}")
-            else:
-                _hw_log(f"[Hardware] 강제전송 불가: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
+            self._write_serial_command(cmd, require_focus=True, log_prefix="[Hardware]")
 
     def _reset_serial_buffers(self):
         """Best-effort: clear buffered serial I/O to reduce stuck input risk."""
         if self.ser and self.ser.is_open:
             try:
-                # 이미 쌓인 D:left, D:right 등의 발송 대기열 삭제
+                # ?? ?? D:left, D:right ?? ?? ??? ??
                 self.ser.reset_output_buffer()
                 self.ser.reset_input_buffer()
-                # 아두이노에 씹히지 않도록 연달아 발송
+                # ????? ??? ??? ??? ??
                 for _ in range(2):
                     self.ser.write(b"RELEASE_ALL\n")
-                self.ser.flush() # 물리적 회선으로 발송이 끝날때까지 대기
+                self.ser.flush() # ??? ???? ??? ??? ??? ??
             except Exception:
                 pass
 
+    def _is_game_window_focused(self) -> bool:
+        try:
+            current_hwnd = win32gui.GetForegroundWindow()
+            if not current_hwnd:
+                return False
+            if self.state is not None and getattr(self.state, "hwnd", None):
+                if current_hwnd == self.state.hwnd:
+                    return True
+            try:
+                window_text = win32gui.GetWindowText(current_hwnd) or ""
+            except Exception:
+                window_text = ""
+            return any(keyword in window_text for keyword in ["??", "AION", "ory"])
+        except Exception:
+            return False
+
+    def _write_serial_command(self, cmd: str, *, require_focus: bool = True, log_prefix: str = "[Hardware]", allow_cleanup: bool = False) -> bool:
+        if self.state is not None and getattr(self.state, "shutting_down", False) and not allow_cleanup:
+            _hw_log(f"{log_prefix} blocked: {cmd} (shutdown in progress)")
+            return False
+        if require_focus and not self._is_game_window_focused():
+            _hw_log(f"{log_prefix} blocked: {cmd} (game window not focused)")
+            return False
+        if self.ser and self.ser.is_open:
+            try:
+                padding = ' ' * random.randint(1, 16)
+                payload = f"{cmd}{padding}\n".encode('ascii')
+                self.ser.write(payload)
+                _hw_log(f"{log_prefix} sent: {cmd} ({len(payload)} bytes)")
+                return True
+            except Exception as e:
+                _hw_log(f"{log_prefix} send failed: {cmd} - {e}")
+        else:
+            _hw_log(f"{log_prefix} not sent: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
+        return False
+
     def humanized_press(self, key: str, variance: float = 0.15):
         # HumanBehaviorSimulator로 동작 간 휴식 시간 시뮬레이션
+        if self.state is not None and getattr(self.state, "shutting_down", False):
+            return
         pause = HumanBehaviorSimulator.simulate_pause('click')
         time.sleep(pause)
         
@@ -811,12 +849,16 @@ class BisHardware:
         Ultra-fast key press (ft.ahk-style): no HumanBehaviorSimulator pause.
         Use this for trigger reactions where speed matters.
         """
+        if self.state is not None and getattr(self.state, "shutting_down", False):
+            return
         self.send(f"D:{key}")
         humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
         self.send(f"U:{key}")
 
     def force_press(self, key: str, variance: float = 0.15):
         """포커스 체크 없이 1회 키 입력. 이동 중 테스트 마법처럼 강제 전송이 필요할 때 사용."""
+        if self.state is not None and getattr(self.state, "shutting_down", False):
+            return
         # 단발 입력은 아두이노의 K,<key> 경로가 가장 안정적이다.
         # D/U 분리보다 전송 횟수가 적고, 키업 타이밍이 짧아지는 문제를 피한다.
         self.send_force(f"K,{key}")
@@ -834,25 +876,30 @@ class BisHardware:
             humanized_sleep(TIMING_CONFIG["esc_gap"])
 
     def panic_release(self):
-        """모든 하드웨어 신호를 즉시 소거 (비상 정지용)"""
-        # Combine: clear buffers + release keys.
+        """?? ???? ??? ?? ?? (?? ???)"""
         try:
             self._reset_serial_buffers()
         except Exception:
             pass
-        _hw_log("[Hardware] 모든 신호 강제 해제 (Panic Release)")
+        _hw_log("[Hardware][Cleanup] ?? ?? ?? ?? (Panic Release)")
         keys = ["left", "right", "up", "down", "shift", "ctrl", "alt", "esc", "space", "enter"]
         for k in keys:
-            self.send(f"U:{k}")
-        self.send("U:all")
+            self._write_serial_command(f"U:{k}", require_focus=False, log_prefix="[Hardware][Cleanup]", allow_cleanup=True)
+        self._write_serial_command("U:all", require_focus=False, log_prefix="[Hardware][Cleanup]", allow_cleanup=True)
 
     def hold_move(self, direction: str, hold_key: str = "move_hold",
                   variance: float = 0.15, duration: float = None):
-        # HumanBehaviorSimulator로 이동 동작 간 휴식 시간 시뮬레이션
+        if self.state is not None and getattr(self.state, "shutting_down", False):
+            _hw_log(f"[Move] blocked: {direction} (shutdown in progress)")
+            return
+        if not self._is_game_window_focused():
+            _hw_log(f"[Move] blocked: {direction} (game window not focused)")
+            return
+        # HumanBehaviorSimulator? ?? ?? ? ?? ?? ?????
         pause = HumanBehaviorSimulator.simulate_pause('move')
         time.sleep(pause)
         
-        _hw_log(f"[Move] 방향키: {direction}")
+        _hw_log(f"[Move] ???: {direction}")
         try:
             self.send_force(f"D:{direction}")
             if duration is not None:
@@ -864,35 +911,42 @@ class BisHardware:
 
     def click(self, grid_x: int, grid_y: int, grid_manager=None):
         """
-        Grid 좌표를 받아 Pixel 좌표로 변환 후 클릭
-        grid_x, grid_y: 그리드 좌표 (0-based)
-        grid_manager: GridManager 인스턴스 (선택사항, 없으면 state에서 가져옴)
+        Grid ??? ?? Pixel ??? ?? ? ??
+        grid_x, grid_y: ??? ?? (0-based)
+        grid_manager: GridManager ???? (????, ??? state?? ???)
         """
+        if self.state is not None and getattr(self.state, "shutting_down", False):
+            _hw_log(f"[Click] blocked: ({grid_x}, {grid_y}) (shutdown in progress)")
+            return
         if grid_manager is None and self.state:
-            # GameState에서 GridManager 인스턴스 가져오기 (필요시)
-            # 현재 구조에서는 직접 전달받는 것이 안전
+            # GameState?? GridManager ???? ???? (???)
+            # ?? ????? ?? ???? ?? ??
             pass
+
+        if not self._is_game_window_focused():
+            _hw_log(f"[Click] blocked: ({grid_x}, {grid_y}) (game window not focused)")
+            return
         
         if grid_manager:
             pixel_pos = grid_manager.to_pixel(grid_x, grid_y)
             if pixel_pos:
                 px, py = pixel_pos
                 _hw_log(f"[Click] Grid({grid_x}, {grid_y}) -> Pixel({px}, {py})")
-                # 마우스 클릭 구현 (win32api 사용)
+                # ??? ?? ?? (win32api ??)
                 try:
                     import win32api
                     import win32con
-                    # 절대 좌표로 클릭
+                    # ?? ??? ??
                     win32api.SetCursorPos((px, py))
                     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
                     time.sleep(0.05)
                     win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
                 except Exception as e:
-                    _hw_log(f"[Click] 마우스 클릭 실패: {e}")
+                    _hw_log(f"[Click] ??? ?? ??: {e}")
             else:
-                _hw_log(f"[Click] Grid 좌표 변환 실패: ({grid_x}, {grid_y})")
+                _hw_log(f"[Click] Grid ?? ?? ??: ({grid_x}, {grid_y})")
         else:
-            _hw_log(f"[Click] GridManager가 없어 클릭 불가: ({grid_x}, {grid_y})")
+            _hw_log(f"[Click] GridManager? ?? ?? ??: ({grid_x}, {grid_y})")
 
 hw = BisHardware()
 

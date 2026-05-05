@@ -16,7 +16,7 @@ import random
 
 from bis_core import (
     AppStatus, TargetType, hw, GameState,
-    TIMING_CONFIG, humanized_sleep, tc, GridManager
+    TIMING_CONFIG, humanized_sleep, tc, GridManager, Skill, normalize_game_hotkey
 )
 from bis_route import RouteManager
 
@@ -33,24 +33,38 @@ class LogicSvc(threading.Thread):
         self.current_state = AppStatus.IDLE
         self.last_load_time = time.time()
         self.task_active   = False  # 서비스 활성화 플래그
+        self._support_action_lock = threading.Lock()
         # Trigger reaction rate-limit (prevents input spam while keeping fast response).
         self._last_hp_recover_time = 0.0
         self._last_mp_recover_time = 0.0
         self._last_target_search_time = 0.0
         self._last_monster_seen_time = 0.0
+        # RouteSvc와 공유되던 pause 관련 필드를 안전하게 기본값으로 둔다.
+        self._was_in_combat = False
+        self._advance_waypoint_after_combat = False
+        self._combat_resume_context = None
+
+    def _clear_nav_context(self):
+        """LogicSvc는 네비게이션 컨텍스트를 사용하지 않으므로 no-op."""
+        self._was_in_combat = False
+        self._advance_waypoint_after_combat = False
+        self._combat_resume_context = None
 
     # ----------------------------------------------------------
     # ── 내부 헬퍼: 힐 시퀀스 ─────────────────────────────────
     # ----------------------------------------------------------
     def _execute_v3_heal(self, skill):
         """초고속 자가 회복: 스킬키 → Home → Enter (모두 humanized)."""
-        if skill.hotkey:
-            hw.humanized_press(skill.hotkey)
+        key = skill.effective_key() if skill is not None else ""
+        if not key:
+            return
+        hw.humanized_press(key)
         humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
         hw.humanized_press("home")
         humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
         hw.humanized_press("enter")
-        skill.last_cast_time = time.time()
+        if skill is not None:
+            skill.last_cast_time = time.time()
 
     def _press_fast(self, key: str, variance: float = 0.15):
         """
@@ -74,8 +88,8 @@ class LogicSvc(threading.Thread):
         try:
             if selected:
                 skill = next((s for s in self.state.spells if getattr(s, "name", "") == selected), None)
-                if skill is not None and getattr(skill, "hotkey", None):
-                    key = skill.hotkey
+                if skill is not None and getattr(skill, "effective_key", None):
+                    key = skill.effective_key()
                 elif isinstance(selected, str) and len(selected) == 1:
                     key = selected
         except Exception:
@@ -85,6 +99,73 @@ class LogicSvc(threading.Thread):
         if not key:
             key = default_key
         return key, skill
+
+    def _find_spell_by_name(self, *names: str) -> Skill | None:
+        for name in names:
+            if not name:
+                continue
+            needle = str(name).strip()
+            if not needle:
+                continue
+            skill = next((s for s in self.state.spells if getattr(s, "name", "") == needle), None)
+            if skill is not None:
+                return skill
+        return None
+
+    def _resolve_support_cast(self, spell_ref: Skill | str | None = None, *, fallback_names: tuple[str, ...] = (), fallback_key: str | None = None) -> tuple[str, Skill | None]:
+        skill = None
+        if isinstance(spell_ref, Skill):
+            skill = spell_ref
+        elif isinstance(spell_ref, str):
+            raw_ref = str(spell_ref).strip()
+            skill = self._find_spell_by_name(raw_ref)
+            if skill is None and raw_ref and (
+                len(raw_ref) == 1 or raw_ref.lower() in {
+                    "esc", "enter", "home", "tab", "up", "down", "left", "right",
+                    "space", "shift", "ctrl", "alt", "f1", "f2", "f3", "f4"
+                }
+            ):
+                return normalize_game_hotkey(raw_ref), None
+
+        if skill is None and fallback_names:
+            skill = self._find_spell_by_name(*fallback_names)
+
+        if skill is not None:
+            return skill.effective_key(), skill
+
+        key = normalize_game_hotkey(fallback_key)
+        return key, None
+
+    def _stop_inputs_best_effort(self, repeat: int = 1, delay: float = 0.03, disconnect: bool = False):
+        stop_fn = getattr(hw, "stop_all_inputs", None)
+        if callable(stop_fn):
+            try:
+                stop_fn(repeat=repeat, delay=delay, disconnect=disconnect)
+                return True
+            except Exception:
+                pass
+
+        release_fn = getattr(hw, "panic_release", None)
+        if callable(release_fn):
+            try:
+                release_fn()
+                if disconnect:
+                    try:
+                        hw.disconnect()
+                    except Exception:
+                        pass
+                return True
+            except Exception:
+                return False
+        return False
+
+    def _press_cast_key(self, key: str, gap_key: str = "spell_cast_gap") -> bool:
+        if not key:
+            return False
+        hw.humanized_press(key)
+        if gap_key:
+            humanized_sleep(TIMING_CONFIG.get(gap_key, TIMING_CONFIG["spell_cast_gap"]))
+        return True
 
     def _get_visible_monsters(self) -> list[dict]:
         monsters = self.state.entities.get("monsters", [])
@@ -242,6 +323,184 @@ class LogicSvc(threading.Thread):
                 pass
         humanized_sleep(min(0.05, float(TIMING_CONFIG.get("key_gap", 0.05))))
 
+    def cast_geumgang(self, spell_ref: Skill | str | None = None, *, fallback_key: str | None = None) -> bool:
+        """금강(자기자신 버프): explicit spell or configured fallback key."""
+        if not self._support_action_lock.acquire(blocking=False):
+            return False
+        try:
+            key, skill = self._resolve_support_cast(spell_ref, fallback_names=("금강",), fallback_key=fallback_key)
+            if not key:
+                print("[Support] 금강 스킬을 찾지 못했습니다.")
+                return False
+
+            self._stop_inputs_best_effort(repeat=1, delay=0.02, disconnect=False)
+            self._press_cast_key(key)
+            if skill is not None:
+                skill.last_cast_time = time.time()
+            return True
+        finally:
+            self._support_action_lock.release()
+
+    def cast_bomu(self, protection_ref: Skill | str | None = None, armor_ref: Skill | str | None = None) -> bool:
+        """보무: 보호 -> 무장 순서로 시전."""
+        if not self._support_action_lock.acquire(blocking=False):
+            return False
+        try:
+            protection_key, protection_skill = self._resolve_support_cast(
+                protection_ref,
+                fallback_names=("보호",),
+            )
+            armor_key, armor_skill = self._resolve_support_cast(
+                armor_ref,
+                fallback_names=("무장",),
+            )
+            if not protection_key or not armor_key:
+                print("[Support] 보무 스킬을 찾지 못했습니다.")
+                return False
+
+            self._stop_inputs_best_effort(repeat=1, delay=0.02, disconnect=False)
+            now = time.time()
+            self._press_cast_key(protection_key)
+            humanized_sleep(TIMING_CONFIG["bomu_spell_gap"])
+            self._press_cast_key(armor_key)
+            self.state.last_bomu_time = now
+            if protection_skill is not None:
+                protection_skill.last_cast_time = now
+            if armor_skill is not None:
+                armor_skill.last_cast_time = now
+            return True
+        finally:
+            self._support_action_lock.release()
+
+    def cast_revival(
+        self,
+        revive_ref: Skill | str | None = None,
+        heal_ref: Skill | str | None = None,
+    ) -> bool:
+        """유령(부활): 부활 -> Home -> Enter -> 힐 -> Enter -> 힐 -> Enter."""
+        if not self._support_action_lock.acquire(blocking=False):
+            return False
+        try:
+            revive_key, revive_skill = self._resolve_support_cast(revive_ref, fallback_names=("부활",))
+            heal_key, heal_skill = self._resolve_support_cast(
+                heal_ref if heal_ref is not None else getattr(self.state, "recovery_hp_spell", ""),
+                fallback_names=("태양의기원", "공력증강"),
+            )
+            if not revive_key or not heal_key:
+                print("[Support] 부활/힐 스킬을 찾지 못했습니다.")
+                return False
+
+            self._stop_inputs_best_effort(repeat=1, delay=0.02, disconnect=False)
+            now = time.time()
+            self._press_cast_key("esc", gap_key="key_gap")
+            self._press_cast_key(revive_key, gap_key="spell_cast_gap")
+            self._press_cast_key("home", gap_key="spell_cast_gap")
+            self._press_cast_key("enter", gap_key="spell_cast_gap")
+            self._press_cast_key(heal_key, gap_key="spell_cast_gap")
+            self._press_cast_key("enter", gap_key="spell_cast_gap")
+            self._press_cast_key(heal_key, gap_key="spell_cast_gap")
+            self._press_cast_key("enter", gap_key="spell_cast_gap")
+
+            if revive_skill is not None:
+                revive_skill.last_cast_time = now
+            if heal_skill is not None:
+                heal_skill.last_cast_time = now
+            self._clear_target_state(reset_combat_timer=True)
+            return True
+        finally:
+            self._support_action_lock.release()
+
+    def cast_self_heal(self, heal_ref: Skill | str | None = None) -> bool:
+        """자힐: ESC -> 힐 -> Home -> Enter -> 힐 -> Enter -> 힐 -> Enter."""
+        if not self._support_action_lock.acquire(blocking=False):
+            return False
+        try:
+            heal_key, heal_skill = self._resolve_support_cast(
+                heal_ref if heal_ref is not None else getattr(self.state, "recovery_hp_spell", ""),
+                fallback_names=("태양의기원", "공력증강"),
+            )
+            if not heal_key:
+                print("[Support] 자힐 스킬을 찾지 못했습니다.")
+                return False
+
+            self._stop_inputs_best_effort(repeat=1, delay=0.02, disconnect=False)
+            now = time.time()
+            self._press_cast_key("esc", gap_key="key_gap")
+            self._press_cast_key(heal_key, gap_key="spell_cast_gap")
+            self._press_cast_key("home", gap_key="spell_cast_gap")
+            self._press_cast_key("enter", gap_key="spell_cast_gap")
+            self._press_cast_key(heal_key, gap_key="spell_cast_gap")
+            self._press_cast_key("enter", gap_key="spell_cast_gap")
+            self._press_cast_key(heal_key, gap_key="spell_cast_gap")
+            self._press_cast_key("enter", gap_key="spell_cast_gap")
+
+            if heal_skill is not None:
+                heal_skill.last_cast_time = now
+            return True
+        finally:
+            self._support_action_lock.release()
+
+    def cast_gongjeung(self, buff_ref: Skill | str | None = None) -> bool:
+        """공증: MP가 매우 낮으면 emergency branch 후 버프 키를 시전."""
+        if not self._support_action_lock.acquire(blocking=False):
+            return False
+        try:
+            buff_key, buff_skill = self._resolve_support_cast(
+                buff_ref if buff_ref is not None else getattr(self.state, "recovery_mp_spell", ""),
+                fallback_names=("공력증강",),
+            )
+            if not buff_key:
+                print("[Support] 공증 스킬을 찾지 못했습니다.")
+                return False
+
+            self._stop_inputs_best_effort(repeat=1, delay=0.02, disconnect=False)
+            now = time.time()
+            current_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
+            if current_mp < 200:
+                hw.humanized_press("u")
+                humanized_sleep(0.20)
+                hw.humanized_press(random.choice(["e", "f", "g", "h"]))
+                humanized_sleep(0.10)
+
+            self._press_cast_key(buff_key)
+            if buff_skill is not None:
+                buff_skill.last_cast_time = now
+            return True
+        finally:
+            self._support_action_lock.release()
+
+    def cast_hon(self, debuff_ref: Skill | str | None = None, *, cycles: int = 1) -> bool:
+        """혼 디버프: ESC -> 혼 -> LEFT -> ENTER 반복."""
+        if not self._support_action_lock.acquire(blocking=False):
+            return False
+        try:
+            debuff_key, debuff_skill = self._resolve_support_cast(
+                debuff_ref if debuff_ref is not None else getattr(self.state, "recovery_debuff_spell", ""),
+                fallback_names=("혼돈", "혼"),
+            )
+            if not debuff_key:
+                print("[Support] 혼 디버프 스킬을 찾지 못했습니다.")
+                return False
+
+            self._stop_inputs_best_effort(repeat=1, delay=0.02, disconnect=False)
+            now = time.time()
+            self._press_cast_key("esc", gap_key="key_gap")
+
+            loops = max(1, int(cycles or 1))
+            for idx in range(loops):
+                self._press_cast_key(debuff_key, gap_key="debuff_key_wait")
+                self._press_cast_key("left", gap_key="debuff_up_wait")
+                self._press_cast_key("enter", gap_key="debuff_ocr_wait")
+                if idx + 1 < loops:
+                    humanized_sleep(TIMING_CONFIG["key_gap"])
+
+            if debuff_skill is not None:
+                debuff_skill.last_cast_time = now
+            self.state.last_debuff_x, self.state.last_debuff_y = self._get_current_pos()
+            return True
+        finally:
+            self._support_action_lock.release()
+
     def _recover_party_hp(self, snapshot: dict | None):
         """Cast the configured HP heal for the currently supported warrior snapshot."""
         if not snapshot or not self._needs_hp_recovery_for(snapshot):
@@ -296,18 +555,9 @@ class LogicSvc(threading.Thread):
     # ── 보무(Buff) 자동 관리 ─────────────────────────────────
     # ----------------------------------------------------------
     def _execute_bomu_buff_v3(self):
-        """보무 버프: 8 → Home → Enter → 간격 → 9 → Home → Enter."""
-        print("[Buff] 보무 버프 시전 중 (8 -> 9 순차)...")
-        for key in ("8", "9"):
-            hw.humanized_press(key)
-            humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-            hw.humanized_press("home")
-            humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-            hw.humanized_press("enter")
-            if key == "8":
-                humanized_sleep(TIMING_CONFIG["bomu_spell_gap"])
-        self.state.last_bomu_time = time.time()
-        print("[OK] 보무 버프 완료.")
+        """보무 버프: 보호 -> 무장 순차 시전."""
+        if self.cast_bomu():
+            print("[OK] 보무 버프 완료.")
 
     # ----------------------------------------------------------
     # ── 지능형 디버프 스캔 ────────────────────────────────────
@@ -338,7 +588,7 @@ class LogicSvc(threading.Thread):
                 break
 
             # 1. 저주 키
-            hw.humanized_press(skill.hotkey)
+            hw.humanized_press(skill.effective_key())
             humanized_sleep(TIMING_CONFIG["debuff_key_wait"])
             # 2. Up (다음 타겟)
             hw.humanized_press("up")
@@ -358,8 +608,7 @@ class LogicSvc(threading.Thread):
             else:
                 fail_count = 0
 
-        self.state.last_debuff_x = self.state.x
-        self.state.last_debuff_y = self.state.y
+        self.state.last_debuff_x, self.state.last_debuff_y = self._get_current_pos()
         print("[OK] 디버프 스캔 완료.")
 
     # ----------------------------------------------------------
@@ -520,7 +769,7 @@ class LogicSvc(threading.Thread):
         # ── 공격 마법 시전 ──────────────────────────────────
         for s in self.state.spells:
             if s.category == "공격" and s.is_ready():
-                hw.humanized_press(s.hotkey)
+                hw.humanized_press(s.effective_key())
                 humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
                 s.last_cast_time = time.time()
                 break
@@ -532,6 +781,8 @@ class LogicSvc(threading.Thread):
         print(f"[Logic] BIS Logic Engine started (role: {self.state.role})")
         print("[Logic] Priority: Emergency -> Combat -> Moving")
         while self.state.running:
+            if getattr(self.state, "shutting_down", False):
+                break
             if getattr(self.state, "automation_paused", False):
                 self._clear_nav_context()
                 self._was_in_combat = False
@@ -692,8 +943,9 @@ class LogicSvc(threading.Thread):
             self._execute_bomu_buff_v3()
 
         # 디버프 스캔 (격수도 필요)
-        dist_change = (abs(self.state.x - self.state.last_debuff_x) +
-                       abs(self.state.y - self.state.last_debuff_y))
+        cur_x, cur_y = self._get_current_pos()
+        dist_change = (abs(cur_x - self.state.last_debuff_x) +
+                       abs(cur_y - self.state.last_debuff_y))
         if self.state.auto_debuff_enabled and dist_change > 15:
             self._execute_debuff_scan_v3()
 
@@ -729,8 +981,9 @@ class LogicSvc(threading.Thread):
             self._execute_bomu_buff_v3()
 
         # 디버프 스캔
-        dist_change = (abs(self.state.x - self.state.last_debuff_x) +
-                       abs(self.state.y - self.state.last_debuff_y))
+        cur_x, cur_y = self._get_current_pos()
+        dist_change = (abs(cur_x - self.state.last_debuff_x) +
+                       abs(cur_y - self.state.last_debuff_y))
         if self.state.auto_debuff_enabled and dist_change > 15:
             self._execute_debuff_scan_v3()
 
@@ -751,7 +1004,7 @@ class LogicSvc(threading.Thread):
         return monsters if isinstance(monsters, list) else []
 
     def _calc_monster_metrics(self):
-        me_pos = (int(getattr(self.state, "x", 0)), int(getattr(self.state, "y", 0)))
+        me_pos = self._get_current_pos()
         if me_pos[0] <= 0 and me_pos[1] <= 0:
             return None, [], 0
 
@@ -765,8 +1018,9 @@ class LogicSvc(threading.Thread):
                 grid = m.get("grid")
                 if not grid or len(grid) != 2:
                     continue
-                dx = int(grid[0]) - int(self.state.char_grid[0])
-                dy = int(grid[1]) - int(self.state.char_grid[1])
+                current_grid = self._get_current_grid()
+                dx = int(grid[0]) - int(current_grid[0])
+                dy = int(grid[1]) - int(current_grid[1])
             else:
                 dx = int(monster_pos[0]) - me_pos[0]
                 dy = int(monster_pos[1]) - me_pos[1]
@@ -817,7 +1071,7 @@ class LogicSvc(threading.Thread):
         return attack_skills[0]
 
     def _cast_attack_skill(self, skill):
-        hw.humanized_press(skill.hotkey)
+        hw.humanized_press(skill.effective_key())
         humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
         skill.last_cast_time = time.time()
 
@@ -883,8 +1137,9 @@ class LogicSvc(threading.Thread):
                 humanized_sleep(TIMING_CONFIG["nav_loop"])
 
         # 디버프 스캔
-        dist_change = (abs(self.state.x - self.state.last_debuff_x) +
-                       abs(self.state.y - self.state.last_debuff_y))
+        cur_x, cur_y = self._get_current_pos()
+        dist_change = (abs(cur_x - self.state.last_debuff_x) +
+                       abs(cur_y - self.state.last_debuff_y))
         if self.state.auto_debuff_enabled and dist_change > 15:
             self._execute_debuff_scan_v3()
 
@@ -979,8 +1234,9 @@ class LogicSvc(threading.Thread):
         # ══════════════════════════════════════════════════
         # 4. 좌표 기반 자동 디버프 스캔
         # ══════════════════════════════════════════════════
-        dist_change = (abs(self.state.x - self.state.last_debuff_x) +
-                       abs(self.state.y - self.state.last_debuff_y))
+        cur_x, cur_y = self._get_current_pos()
+        dist_change = (abs(cur_x - self.state.last_debuff_x) +
+                       abs(cur_y - self.state.last_debuff_y))
         if self.state.auto_debuff_enabled and dist_change > 15:
             self._execute_debuff_scan_v3()
 
@@ -1171,12 +1427,117 @@ class RouteSvc(threading.Thread):
         self._nav_attempt_pos = None
         self._nav_attempt_started_at = 0.0
         self._last_follow_close_log_time = 0.0
+        self._last_nav_debug_log_time = 0.0
+        self._last_nav_block_log_time = 0.0
+        self._last_nav_arrival_log_time = 0.0
+        self._last_focus_block_log_time = 0.0
+        self._last_follow_block_log_time = 0.0
+        self._last_move_command_at = 0.0
+        self._stuck_recovery_until = 0.0
+        self._follow_close_until = 0.0
+        self._follow_block_hits = 0
+        self._follow_same_pos_cycles = 0
+        self._follow_last_target_pos = None
+        self._follow_last_progress_score = None
+        self._follow_no_progress_cycles = 0
+        self._follow_blocked_cells = {}
+        self._follow_failed_moves = {}
+        self._follow_pending_attempt = None
+
+    def reset_runtime_state(self):
+        """Reset transient navigation state when switching modes."""
+        try:
+            self.last_pos = self._get_current_pos()
+        except Exception:
+            self.last_pos = (0, 0)
+        self.stuck_timer = 0.0
+        self.stuck_count = 0
+        self._nav_current_pos = None
+        self._clear_nav_attempt_state()
+        self._current_nav_context = None
+        self._was_in_combat = False
+        self._advance_waypoint_after_combat = False
+        self._combat_resume_context = None
+        self._last_move_command_at = 0.0
+        self._stuck_recovery_until = 0.0
+        self._follow_close_until = 0.0
+        self._last_follow_block_log_time = 0.0
+        self._follow_block_hits = 0
+        self._follow_same_pos_cycles = 0
+        self._follow_last_target_pos = None
+        self._follow_last_progress_score = None
+        self._follow_no_progress_cycles = 0
+        self._follow_blocked_cells = {}
+        self._follow_failed_moves = {}
+        self._follow_pending_attempt = None
+        try:
+            self.state.is_stuck = False
+            self.state.follow_target_pos = None
+            self.state.follow_anchor_offset = (0, 0)
+            self.state.last_key_context = "NONE"
+        except Exception:
+            pass
+
+    def _get_current_pos(self) -> tuple[int, int]:
+        """Return the canonical OCR-derived position for this character."""
+        try:
+            pos_x = int(getattr(self.state, "pos_x", 0) or 0)
+            pos_y = int(getattr(self.state, "pos_y", 0) or 0)
+            raw_x = int(getattr(self.state, "x", 0) or 0)
+            raw_y = int(getattr(self.state, "y", 0) or 0)
+            if pos_x or pos_y or (raw_x == 0 and raw_y == 0):
+                return pos_x, pos_y
+        except Exception:
+            pass
+        return int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0)
+
+    @staticmethod
+    def _get_remote_pos(remote_data: dict | None) -> tuple[int, int] | None:
+        if not remote_data:
+            return None
+        try:
+            return (
+                int(remote_data.get("pos_x", remote_data.get("x", 0)) or 0),
+                int(remote_data.get("pos_y", remote_data.get("y", 0)) or 0),
+            )
+        except Exception:
+            return None
+
+    def _get_current_grid(self) -> tuple[int, int]:
+        """Return the best available grid coordinate for blocker checks."""
+        try:
+            me = self.state.entities.get("me", {}) or {}
+            grid = me.get("grid")
+            if isinstance(grid, (list, tuple)) and len(grid) == 2:
+                return int(grid[0]), int(grid[1])
+        except Exception:
+            pass
+
+        try:
+            char_grid = getattr(self.state, "char_grid", None)
+            if isinstance(char_grid, (list, tuple)) and len(char_grid) == 2:
+                gx = int(char_grid[0])
+                gy = int(char_grid[1])
+                if gx or gy:
+                    return gx, gy
+        except Exception:
+            pass
+
+        return self._get_current_pos()
 
     # ----------------------------------------------------------
     def _check_stuck(self) -> bool:
         """Return True when a move key was sent and coordinates did not change for 1 second."""
         now = time.time()
-        current_pos = (self.state.x, self.state.y)
+        if self._stuck_recovery_until > now:
+            return False
+        try:
+            capture_age_ms = float(getattr(self.state, "capture_age_ms", 0.0) or 0.0)
+            if capture_age_ms > 260.0:
+                return False
+        except Exception:
+            pass
+        current_pos = self._get_current_pos()
 
         if self._nav_current_pos != current_pos:
             self.last_pos = self._nav_current_pos
@@ -1189,17 +1550,181 @@ class RouteSvc(threading.Thread):
         if self._nav_attempt_pos != current_pos:
             return False
 
-        if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= 1.0:
+        if self._nav_attempt_started_at <= 0.0:
+            return False
+
+        move_grace = max(0.45, float(TIMING_CONFIG.get("move_hold", 0.15)) * 2.5)
+        if self._last_move_command_at > 0.0 and (now - self._last_move_command_at) < move_grace:
+            return False
+
+        stuck_timeout = max(1.6, move_grace + 0.9)
+        if (now - self._nav_attempt_started_at) >= stuck_timeout:
             self.stuck_count += 1
-            print(f"[Stuck] no coord change for 1s ({self.stuck_count} consecutive) pos={current_pos}")
+            print(f"[Stuck] no coord change for {stuck_timeout:.1f}s ({self.stuck_count} consecutive) pos={current_pos}")
             return True
         return False
 
-    def _mark_nav_attempt(self):
-        current_pos = (self.state.x, self.state.y)
-        if self._nav_attempt_pos != current_pos:
+    def _mark_nav_attempt(self, force: bool = False):
+        current_pos = self._get_current_pos()
+        if force or self._nav_attempt_pos != current_pos:
             self._nav_attempt_pos = current_pos
             self._nav_attempt_started_at = time.time()
+
+    def _clear_nav_attempt_state(self):
+        self._nav_current_pos = self._get_current_pos()
+        self._nav_attempt_pos = None
+        self._nav_attempt_started_at = 0.0
+        self.stuck_count = 0
+        self._follow_block_hits = 0
+        self._follow_same_pos_cycles = 0
+        self._follow_last_target_pos = None
+        self._follow_last_progress_score = None
+        self._follow_no_progress_cycles = 0
+        self._follow_failed_moves = {}
+        self._follow_pending_attempt = None
+
+    def _build_follow_detour_directions(self, target_pos: tuple[int, int] | None = None) -> list[str]:
+        """follow stuck 시 순차적으로 시도할 우회 방향 목록을 만든다."""
+        if target_pos is None:
+            remote_data = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
+            target_pos = self._get_remote_pos(remote_data)
+
+        if not target_pos:
+            return []
+
+        cx, cy = self._get_current_pos()
+        tx, ty = target_pos
+        dx, dy = tx - cx, ty - cy
+        if dx == 0 and dy == 0:
+            return []
+
+        # 목표 축과 직교하는 방향을 먼저 시도하고, 그 다음에 목표 방향/반대 방향을 시도한다.
+        candidates: list[str] = []
+
+        def add(direction: str):
+            if direction not in candidates:
+                candidates.append(direction)
+
+        if abs(dx) >= abs(dy):
+            add("up")
+            add("down")
+            if dy >= 0:
+                add("down")
+                add("up")
+            else:
+                add("up")
+                add("down")
+            if dx > 0:
+                add("right")
+                add("left")
+            else:
+                add("left")
+                add("right")
+        else:
+            add("left")
+            add("right")
+            if dx >= 0:
+                add("right")
+                add("left")
+            else:
+                add("left")
+                add("right")
+            if dy > 0:
+                add("down")
+                add("up")
+            else:
+                add("up")
+                add("down")
+
+        for direction in self._ALL_DIRS:
+            add(direction)
+
+        return candidates
+
+    def _escape_stuck_follow(self):
+        """follow 전용 stuck 처리: 짧게 우회하고, 다음 루프에서 최신 격수좌표로 다시 추종한다."""
+        current_pos = self._get_current_pos()
+        remote_data = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
+        target_pos = self._get_remote_pos(remote_data)
+
+        print("[Warn] [STUCK] follow mode active, doing a short detour before refollowing...")
+        self.state.is_stuck = True
+        try:
+            stop_fn = getattr(hw, "stop_all_inputs", None)
+            if callable(stop_fn):
+                stop_fn(repeat=1, delay=0.03, disconnect=False)
+            else:
+                release_fn = getattr(hw, "panic_release", None)
+                if callable(release_fn):
+                    release_fn()
+        except Exception:
+            pass
+
+        humanized_sleep(TIMING_CONFIG["key_gap"])
+
+        detour_dirs = self._build_follow_detour_directions(target_pos=target_pos)
+        moved = False
+        for idx, detour_dir in enumerate(detour_dirs, start=1):
+            before_pos = self._get_current_pos()
+            print(f"[Warn] [STUCK] follow detour try {idx}/{len(detour_dirs)}: {detour_dir}")
+
+            try:
+                hw.fast_press(detour_dir, variance=0.05)
+            except Exception as exc:
+                print(f"[Warn] [STUCK] follow detour input failed on {detour_dir}: {exc}")
+                try:
+                    stop_fn = getattr(hw, "stop_all_inputs", None)
+                    if callable(stop_fn):
+                        stop_fn(repeat=1, delay=0.02, disconnect=False)
+                    else:
+                        release_fn = getattr(hw, "panic_release", None)
+                        if callable(release_fn):
+                            release_fn()
+                except Exception:
+                    pass
+                continue
+
+            humanized_sleep(max(0.08, TIMING_CONFIG["key_gap"] * 0.6))
+
+            after_pos = self._get_current_pos()
+            if after_pos != before_pos:
+                self._forget_follow_blocked_cell(after_pos, reason="detour movement confirmed")
+                print(f"[OK] [STUCK] follow detour moved {before_pos} -> {after_pos} via {detour_dir}")
+                moved = True
+                current_pos = after_pos
+                break
+
+            try:
+                hw.stop_all_inputs(repeat=1, delay=0.02, disconnect=False)
+            except Exception:
+                pass
+
+        if not moved:
+            print("[Warn] [STUCK] follow detour could not move character; retry will use fresh target next loop.")
+
+        try:
+            stop_fn = getattr(hw, "stop_all_inputs", None)
+            if callable(stop_fn):
+                stop_fn(repeat=1, delay=0.03, disconnect=False)
+            else:
+                release_fn = getattr(hw, "panic_release", None)
+                if callable(release_fn):
+                    release_fn()
+        except Exception:
+            pass
+
+        self._clear_nav_context()
+        self.state.is_stuck = False
+        self.stuck_count = 0
+        self.stuck_timer = 0.0
+        self._nav_current_pos = current_pos
+        self._clear_nav_attempt_state()
+        self._follow_close_until = 0.0
+        self._stuck_recovery_until = time.time() + (0.02 if moved else 0.06)
+        if moved:
+            print("[OK] [STUCK] follow detour complete, resume follow with latest warrior position.")
+        else:
+            print("[OK] [STUCK] follow detour complete, waiting for next fresh follow target.")
 
     # ----------------------------------------------------------
     def _escape_stuck(self, rewind_waypoint: bool = False):
@@ -1210,12 +1735,19 @@ class RouteSvc(threading.Thread):
         3) repeat a few times
         4) reset target state
         """
+        follow_only = bool(getattr(self.state, "nav_follow_enabled", False)) and not bool(
+            getattr(self.state, "nav_route_enabled", False)
+        )
+        if follow_only:
+            self._escape_stuck_follow()
+            return
+
         print("[Warn] [STUCK] blocked movement detected, escaping...")
         self.state.is_stuck = True
 
         for _ in range(random.randint(2, 3)):
             if isinstance(self.last_pos, tuple) and len(self.last_pos) == 2:
-                cx, cy = self.state.x, self.state.y
+                cx, cy = self._get_current_pos()
                 lx, ly = self.last_pos
                 dx, dy = lx - cx, ly - cy
                 if abs(dx) > abs(dy):
@@ -1236,8 +1768,8 @@ class RouteSvc(threading.Thread):
         self.state.is_stuck = False
         self.stuck_count = 0
         self.stuck_timer = 0.0
-        self._nav_attempt_pos = None
-        self._nav_attempt_started_at = 0.0
+        self._clear_nav_attempt_state()
+        self._stuck_recovery_until = time.time() + 0.5
         print("[OK] [STUCK] escape complete, continue navigation.")
 
     def _set_nav_context(self, kind: str, **kwargs):
@@ -1291,6 +1823,39 @@ class RouteSvc(threading.Thread):
                 return True
         return False
 
+    def _resolve_follow_anchor_offset(self, warrior_pos: tuple[int, int], warrior_dir: str | None = None) -> tuple[int, int]:
+        """
+        follow 중 사용할 고정 오프셋을 정한다.
+        follow는 pos 기준으로만 동작하므로 grid 기반 blocker 판정은 사용하지 않는다.
+        """
+        cx, cy = self._get_current_pos()
+        wx, wy = warrior_pos
+
+        offset = getattr(self.state, "follow_anchor_offset", (0, 0))
+        try:
+            ox = int(offset[0] or 0)
+            oy = int(offset[1] or 0)
+        except Exception:
+            ox, oy = 0, 0
+
+        if (ox, oy) in {(-1, 0), (1, 0)}:
+            return (ox, oy)
+
+        if cx < wx:
+            preferred = (-1, 0)
+        elif cx > wx:
+            preferred = (1, 0)
+        else:
+            if warrior_dir == "left":
+                preferred = (1, 0)
+            elif warrior_dir == "right":
+                preferred = (-1, 0)
+            else:
+                preferred = (-1, 0)
+
+        self.state.follow_anchor_offset = preferred
+        return preferred
+
     # ----------------------------------------------------------
     def _is_wall(self, gx: int, gy: int) -> bool:
         """현재 맵의 maps_db를 조회하여 해당 Grid가 벽인지 판별."""
@@ -1304,45 +1869,434 @@ class RouteSvc(threading.Thread):
     # ----------------------------------------------------------
     def _calc_follow_target(self) -> tuple[int, int] | None:
         """
-        격수의 last_move_dir을 기반으로 등 뒤 좌표 계산.
-        격수가 바라보는 방향의 반대편 1~2칸 뒤를 타겟으로 설정.
+        격수의 현재 pos_x/y를 그대로 follow 목표로 사용한다.
+        follow는 실시간 격수 좌표만 기준으로 동작한다.
         """
         # 네트워크에서 격수 데이터 확인
         remote_data = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
         if not remote_data:
             return None
 
-        dps_x = remote_data.get("x", 0)
-        dps_y = remote_data.get("y", 0)
-        dps_dir = remote_data.get("last_move_dir", None)
+        try:
+            remote_pos = self._get_remote_pos(remote_data)
+            if remote_pos is None:
+                return None
+            dps_x, dps_y = remote_pos
+        except Exception:
+            return None
 
-        # 방향이 없으면 격수 좌표 그대로 사용
-        if not dps_dir or dps_dir not in self._ALL_DIRS:
-            return (dps_x, dps_y)
+        target = (dps_x, dps_y)
+        self.state.follow_target_pos = target
 
-        # 방향 반대 매핑 (격수가 보는 방향의 반대가 등 뒤)
-        behind_offset = {
-            "up": (0, 1),      # 격수가 위를 보면 아래 1칸이 등 뒤
-            "down": (0, -1),    # 격수가 아래를 보면 위 1칸이 등 뒤
-            "left": (1, 0),     # 격수가 왼쪽을 보면 오른쪽 1칸이 등 뒤
-            "right": (-1, 0)    # 격수가 오른쪽을 보면 왼쪽 1칸이 등 뒤
-        }.get(dps_dir, (0, 0))
+        return target
 
-        target_x = dps_x + behind_offset[0]
-        target_y = dps_y + behind_offset[1]
+    def _is_remote_follow_target_fresh(self, remote_data: dict | None, max_age_s: float = 0.35) -> bool:
+        """follow는 최신 격수 telemetry만 사용한다."""
+        if not remote_data:
+            return False
+        try:
+            received_at = float(remote_data.get("_received_at", 0.0) or 0.0)
+        except Exception:
+            return False
+        if received_at <= 0.0:
+            return False
+        return (time.time() - received_at) <= max(0.05, float(max_age_s or 0.0))
 
-        return (target_x, target_y)
+    def _axis_from_direction(self, direction: str | None) -> str | None:
+        if direction in self._HORIZ:
+            return "x"
+        if direction in self._VERT:
+            return "y"
+        return None
+
+    def _direction_delta(self, direction: str | None) -> tuple[int, int]:
+        if direction == "left":
+            return (-1, 0)
+        if direction == "right":
+            return (1, 0)
+        if direction == "up":
+            return (0, -1)
+        if direction == "down":
+            return (0, 1)
+        return (0, 0)
+
+    def _opposite_direction(self, direction: str | None) -> str | None:
+        return {"left": "right", "right": "left", "up": "down", "down": "up"}.get(direction)
+
+    def _send_follow_move(self, direction: str) -> bool:
+        """
+        Follow movement needs a reliable short D/U pulse, but without the
+        HumanBehaviorSimulator pause used by hold_move().
+        """
+        duration = max(0.060, min(0.110, float(TIMING_CONFIG.get("move_hold", 0.15)) * 0.55))
+        opposite = self._opposite_direction(direction)
+        try:
+            send_force = getattr(hw, "send_force", None)
+            if callable(send_force):
+                if opposite:
+                    send_force(f"U:{opposite}")
+                send_force(f"U:{direction}")
+                send_force(f"D:{direction}")
+                humanized_sleep(duration, 0.04)
+                send_force(f"U:{direction}")
+                return True
+        except Exception:
+            pass
+
+        try:
+            hw.fast_press(direction, variance=0.04)
+            return True
+        except Exception:
+            try:
+                hw.hold_move(
+                    direction,
+                    "follow_move_hold",
+                    duration=max(0.060, min(0.120, TIMING_CONFIG.get("move_hold", 0.15) * 0.55)),
+                )
+                return True
+            except Exception:
+                return False
+
+    def _cleanup_follow_blocked_cells(self, now: float | None = None):
+        if now is None:
+            now = time.time()
+        blocked = getattr(self, "_follow_blocked_cells", None)
+        if not isinstance(blocked, dict):
+            self._follow_blocked_cells = {}
+            return
+        expired = [pos for pos, until in blocked.items() if until <= now]
+        for pos in expired:
+            blocked.pop(pos, None)
+
+    def _forget_follow_blocked_cell(self, pos: tuple[int, int], reason: str = ""):
+        blocked = getattr(self, "_follow_blocked_cells", None)
+        if not isinstance(blocked, dict):
+            return False
+        key = tuple(pos)
+        if key not in blocked:
+            return False
+        blocked.pop(key, None)
+        suffix = f" ({reason})" if reason else ""
+        print(f"[Follow] blocked cell released: {key}{suffix}")
+        return True
+
+    def _clear_follow_blocked_around(self, pos: tuple[int, int]) -> int:
+        blocked = getattr(self, "_follow_blocked_cells", None)
+        if not isinstance(blocked, dict):
+            return 0
+        px, py = int(pos[0]), int(pos[1])
+        neighbors = {(px + dx, py + dy) for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]}
+        removed = 0
+        for key in list(blocked.keys()):
+            if tuple(key) in neighbors:
+                blocked.pop(key, None)
+                removed += 1
+        if removed:
+            print(f"[Follow] cleared {removed} blocked cells around {pos}; retrying local path")
+        return removed
+
+    def _cleanup_follow_failed_moves(self, now: float | None = None):
+        if now is None:
+            now = time.time()
+        failed = getattr(self, "_follow_failed_moves", None)
+        if not isinstance(failed, dict):
+            self._follow_failed_moves = {}
+            return
+        expired = [key for key, item in failed.items() if float(item.get("until", 0.0) or 0.0) <= now]
+        for key in expired:
+            failed.pop(key, None)
+
+    def _record_follow_failed_move(self, origin: tuple[int, int], direction: str, now: float) -> int:
+        self._cleanup_follow_failed_moves(now=now)
+        failed = getattr(self, "_follow_failed_moves", None)
+        if not isinstance(failed, dict):
+            self._follow_failed_moves = {}
+            failed = self._follow_failed_moves
+        key = (tuple(origin), str(direction))
+        item = failed.get(key, {"count": 0, "until": 0.0})
+        count = int(item.get("count", 0) or 0) + 1
+        failed[key] = {"count": count, "until": now + 1.6}
+        return count
+
+    def _is_follow_cell_blocked(self, pos: tuple[int, int], now: float | None = None) -> bool:
+        self._cleanup_follow_blocked_cells(now=now)
+        blocked = getattr(self, "_follow_blocked_cells", {})
+        expiry = blocked.get(tuple(pos))
+        if expiry is None:
+            return False
+        if now is None:
+            now = time.time()
+        return expiry > now
+
+    def _remember_follow_blocked_cell(self, origin: tuple[int, int], direction: str, ttl: float = 20.0):
+        dx, dy = self._direction_delta(direction)
+        if dx == 0 and dy == 0:
+            return
+        blocked_pos = (int(origin[0]) + dx, int(origin[1]) + dy)
+        expiry = time.time() + max(1.0, float(ttl or 0.0))
+        self._follow_blocked_cells[blocked_pos] = expiry
+        print(f"[Follow] blocked cell remembered: {blocked_pos} via {direction} for {ttl:.0f}s")
+
+    def _build_follow_direction_candidates(
+        self,
+        dx: int,
+        dy: int,
+        *,
+        last_dir: str | None = None,
+        prefer_axis: str | None = None,
+    ) -> list[str]:
+        """follow 방향 후보를 AHK처럼 단순하게 만든다."""
+        if abs(dx) <= 1 and abs(dy) <= 1:
+            return []
+
+        candidates: list[str] = []
+
+        def add(direction: str):
+            if direction not in candidates:
+                candidates.append(direction)
+
+        if abs(dx) <= 1 and abs(dy) > 1:
+            primary_axis = "y"
+        elif abs(dy) <= 1 and abs(dx) > 1:
+            primary_axis = "x"
+        elif prefer_axis in {"x", "y"}:
+            primary_axis = prefer_axis
+        else:
+            primary_axis = "x" if abs(dx) >= abs(dy) else "y"
+
+        x_toward = "right" if dx > 0 else "left"
+        y_toward = "down" if dy > 0 else "up"
+
+        if primary_axis == "x":
+            if abs(dx) > 1:
+                add(x_toward)
+            if abs(dy) > 1:
+                add(y_toward)
+        else:
+            if abs(dy) > 1:
+                add(y_toward)
+            if abs(dx) > 1:
+                add(x_toward)
+
+        last_axis = self._axis_from_direction(last_dir)
+        if last_axis == "x" and abs(dy) > 1:
+            add(y_toward)
+        elif last_axis == "y" and abs(dx) > 1:
+            add(x_toward)
+        return candidates
+
+    def _resolve_follow_pending_attempt(self, current_pos: tuple[int, int], now: float) -> str:
+        """
+        Returns one of:
+        - none: no pending move
+        - wait: still waiting for the current move to settle
+        - moved: pending move resolved with a coordinate change
+        - blocked: pending move timed out without movement
+        """
+        pending = getattr(self, "_follow_pending_attempt", None)
+        if not isinstance(pending, dict):
+            return "none"
+
+        origin = pending.get("origin")
+        direction = pending.get("direction")
+        started_at = float(pending.get("started_at", 0.0) or 0.0)
+        start_seq = int(pending.get("pos_update_seq", -1) or -1)
+        if not isinstance(origin, tuple) or len(origin) != 2 or not direction:
+            self._follow_pending_attempt = None
+            return "none"
+
+        current_seq = int(getattr(self.state, "pos_update_seq", 0) or 0)
+        if tuple(current_pos) != tuple(origin):
+            self._follow_pending_attempt = None
+            self._follow_no_progress_cycles = 0
+            self._follow_same_pos_cycles = 0
+            self._follow_block_hits = 0
+            self._follow_failed_moves = {}
+            self._forget_follow_blocked_cell(tuple(current_pos), reason="movement confirmed")
+            return "moved"
+
+        settle_delay = max(0.22, min(0.35, float(TIMING_CONFIG.get("move_hold", 0.15)) * 1.6))
+        elapsed = now - started_at
+        # Do not judge a move until at least one fresh coordinate OCR update arrived after the key press.
+        if current_seq <= start_seq or elapsed < settle_delay:
+            wait_log_at = float(pending.get("wait_log_at", 0.0) or 0.0)
+            if now - wait_log_at >= 0.25:
+                print(f"[Follow] waiting for movement settle ({elapsed:.2f}s, seq={current_seq}) pos={current_pos}")
+                pending["wait_log_at"] = now
+            self._follow_pending_attempt = pending
+            return "wait"
+
+        fail_count = self._record_follow_failed_move(origin, str(direction), now)
+        self._follow_pending_attempt = None
+        self._follow_block_hits += 1 if fail_count >= 2 else 0
+        self._follow_same_pos_cycles += 1
+        self._follow_no_progress_cycles += 1
+        if fail_count >= 2:
+            self._remember_follow_blocked_cell(origin, str(direction), ttl=20.0)
+            print(f"[Follow] blocked move confirmed at {origin} via {direction}; remembering cell and retrying")
+        else:
+            print(f"[Follow] move did not settle at {origin} via {direction}; retrying another axis before blocking")
+        return "blocked"
+
+    def _choose_follow_step_direction(
+        self,
+        dx: int,
+        dy: int,
+        *,
+        last_dir: str | None = None,
+        prefer_axis: str | None = None,
+        current_pos: tuple[int, int] | None = None,
+        now: float | None = None,
+    ) -> tuple[str | None, str | None]:
+        """
+        AHK follow에 가깝게 축을 먼저 고른다.
+        기본은 더 가까운 축을 먼저, 막힘이 의심되면 반대 축을 우선 시도한다.
+        """
+        if abs(dx) <= 1 and abs(dy) <= 1:
+            return None, None
+
+        normal_axis = "x" if abs(dx) < abs(dy) else "y"
+        axis = prefer_axis if prefer_axis in {"x", "y"} else normal_axis
+        current_pos = current_pos or self._get_current_pos()
+        now = now if now is not None else time.time()
+
+        candidates = self._build_follow_direction_candidates(
+            dx,
+            dy,
+            last_dir=last_dir,
+            prefer_axis=axis,
+        )
+        for direction in candidates:
+            ddx, ddy = self._direction_delta(direction)
+            next_pos = (int(current_pos[0]) + ddx, int(current_pos[1]) + ddy)
+            if self._is_follow_cell_blocked(next_pos, now=now):
+                continue
+            return direction, self._axis_from_direction(direction)
+
+        return None, None
+
+    def _move_toward_follow(self, warrior_pos: tuple[int, int]) -> bool:
+        """follow 전용 direct steering: pos 기준으로만 이동한다."""
+        if self._is_in_combat():
+            return False
+
+        cx, cy = self._get_current_pos()
+        wx, wy = warrior_pos
+        dx, dy = wx - cx, wy - cy
+        now = time.time()
+        if now - self._last_nav_debug_log_time >= 1.0:
+            print(f"[Follow] Target: ({wx}, {wy}) | Pos: ({cx}, {cy})")
+            self._last_nav_debug_log_time = now
+        self._cleanup_follow_blocked_cells(now=now)
+        self._forget_follow_blocked_cell((cx, cy), reason="current position")
+
+        if abs(dx) <= 1 and abs(dy) <= 1:
+            self._follow_last_target_pos = warrior_pos
+            self._follow_last_progress_score = None
+            self._follow_no_progress_cycles = 0
+            self._follow_same_pos_cycles = 0
+            self._follow_pending_attempt = None
+            return True
+
+        pending_state = self._resolve_follow_pending_attempt((cx, cy), now)
+        if pending_state == "wait":
+            return False
+
+        if pending_state == "moved":
+            self._follow_last_progress_score = None
+            self._follow_no_progress_cycles = 0
+            self._follow_same_pos_cycles = 0
+        elif pending_state == "blocked":
+            self._follow_last_progress_score = None
+
+        target_changed = self._follow_last_target_pos != warrior_pos
+        if target_changed:
+            self._follow_last_target_pos = warrior_pos
+            self._follow_last_progress_score = None
+            self._follow_no_progress_cycles = 0
+            self._follow_same_pos_cycles = 0
+            if not getattr(self, "_follow_blocked_cells", {}):
+                self._follow_block_hits = 0
+
+        progress_score = abs(dx) + abs(dy)
+        last_progress = self._follow_last_progress_score
+        if last_progress is None:
+            self._follow_last_progress_score = progress_score
+        else:
+            if progress_score <= last_progress:
+                self._follow_no_progress_cycles = 0
+            self._follow_last_progress_score = progress_score
+
+        command_gap = 0.02
+        if self._last_move_command_at > 0.0 and (now - self._last_move_command_at) < command_gap:
+            return False
+
+        prefer_axis = None
+        if self._follow_no_progress_cycles >= 1 or self._follow_block_hits >= 1:
+            last_axis = self._axis_from_direction(getattr(self.state, "last_move_dir", None))
+            if last_axis == "x":
+                prefer_axis = "y"
+            elif last_axis == "y":
+                prefer_axis = "x"
+
+        if self._follow_block_hits >= 4 or self._follow_no_progress_cycles >= 5:
+            if now - self._last_follow_block_log_time >= 0.6:
+                print(f"[Follow] obstacle blocked follow, escaping via detour... pos=({cx}, {cy})")
+                self._last_follow_block_log_time = now
+            self._escape_stuck_follow()
+            return False
+
+        step_dir, _step_axis = self._choose_follow_step_direction(
+            dx,
+            dy,
+            last_dir=getattr(self.state, "last_move_dir", None),
+            prefer_axis=prefer_axis,
+            current_pos=(cx, cy),
+            now=now,
+        )
+        if step_dir is None:
+            if now - self._last_follow_block_log_time >= 0.6:
+                print(f"[Follow] no unblocked follow direction available; waiting for fresh path... pos=({cx}, {cy})")
+                self._last_follow_block_log_time = now
+            self._escape_stuck_follow()
+            return False
+
+        if (self._follow_no_progress_cycles >= 1 or self._follow_block_hits >= 1) and now - self._last_follow_block_log_time >= 0.6:
+            print(f"[Follow] axis swap retry via {step_dir} (no_progress={self._follow_no_progress_cycles}, blocked={self._follow_block_hits})")
+            self._last_follow_block_log_time = now
+
+        prev_pos = (cx, cy)
+        if not self._send_follow_move(step_dir):
+            print(f"[Follow] input failed: {step_dir}")
+            return False
+        self.state.last_move_dir = step_dir
+        self._last_move_command_at = time.time()
+        self._mark_nav_attempt(force=True)
+
+        step_dx, step_dy = self._direction_delta(step_dir)
+        self._follow_pending_attempt = {
+            "origin": prev_pos,
+            "direction": step_dir,
+            "started_at": time.time(),
+            "target": (prev_pos[0] + step_dx, prev_pos[1] + step_dy),
+            "pos_update_seq": int(getattr(self.state, "pos_update_seq", 0) or 0),
+            "wait_log_at": 0.0,
+        }
+        return False
 
     def _move_toward(self, tx: int, ty: int) -> bool:
         """Move one step toward a world target, avoiding walls / monsters / users."""
         if self._is_in_combat():
             return False
 
-        cx, cy = self.state.x, self.state.y
+        cx, cy = self._get_current_pos()
         dx, dy = tx - cx, ty - cy
-        print(f"[Nav] Target: ({tx}, {ty}) | Current: ({cx}, {cy}) | Grid: {self.state.char_grid}")
+        now = time.time()
+        if now - self._last_nav_debug_log_time >= 1.0:
+            print(f"[Nav] Target: ({tx}, {ty}) | Pos: ({cx}, {cy}) | Grid: {self._get_current_grid()}")
+            self._last_nav_debug_log_time = now
 
-        ccx, ccy = self.state.char_grid
+        ccx, ccy = self._get_current_grid()
         step_dir, next_grid, blockers = nav_pick_step_direction(
             self.state,
             (ccx, ccy),
@@ -1353,7 +2307,11 @@ class RouteSvc(threading.Thread):
 
         if step_dir is None:
             if blockers:
-                print(f"[Nav] blocked: {','.join(blockers)}")
+                if now - self._last_nav_block_log_time >= 1.0:
+                    print(f"[Nav] blocked: {','.join(blockers)}")
+                    self._last_nav_block_log_time = now
+            if self.state.nav_follow_enabled and not self.state.nav_route_enabled:
+                return False
             self._escape_stuck(rewind_waypoint=False)
             return False
 
@@ -1361,40 +2319,24 @@ class RouteSvc(threading.Thread):
         hold_time = max(0.050, min(0.300, random.gauss(base_hold, 0.010)))
         hw.hold_move(step_dir, "move_hold", duration=hold_time)
         self.state.last_move_dir = step_dir
+        self._last_move_command_at = time.time()
         self._mark_nav_attempt()
 
         arrived = abs(dx) <= 1 and abs(dy) <= 1
         if arrived:
-            print(f"[Nav] arrived: waypoint {self.wp_idx}")
+            if now - self._last_nav_arrival_log_time >= 1.0:
+                print(f"[Nav] arrived: waypoint {self.wp_idx}")
+                self._last_nav_arrival_log_time = now
         return arrived
 
     # [V5] 아이템 획득용 격자 기반 이동
     def _move_toward_grid(self, gx: int, gy: int) -> bool:
-        """Move one step toward a grid target, avoiding walls / monsters / users."""
-        ccx, ccy = self.state.char_grid
-        dgx, dgy = gx - ccx, gy - ccy
-
-        arrived = (abs(dgx) == 0 and abs(dgy) == 0)
-        if arrived:
-            return True
-
-        step_dir, next_grid, blockers = nav_pick_step_direction(
-            self.state,
-            (ccx, ccy),
-            dgx,
-            dgy,
-            include_entities=True,
-        )
-
-        if step_dir:
-            hw.hold_move(step_dir, "move_hold")
-            self.state.last_move_dir = step_dir
-            self._mark_nav_attempt()
-        elif blockers:
-            print(f"[Nav] blocked: {','.join(blockers)}")
-            self._escape_stuck(rewind_waypoint=False)
-
-        return False
+        """Move toward a target expressed in grid space, but resolve the move target in pos space."""
+        cx, cy = self._get_current_pos()
+        ccx, ccy = self._get_current_grid()
+        world_tx = gx + (cx - ccx)
+        world_ty = gy + (cy - ccy)
+        return self._move_toward(world_tx, world_ty)
 
     def _find_cluster_center(self) -> tuple[int, int] | None:
         """몬스터가 2마리 이상 뭉친 그리드의 중심점을 반환."""
@@ -1562,6 +2504,8 @@ class RouteSvc(threading.Thread):
     def run(self):
         print("[Nav] V5 Navigation Thread started...")
         while self.state.running:
+            if getattr(self.state, "shutting_down", False):
+                break
 
             if getattr(self.state, "automation_paused", False):
                 self._clear_nav_context()
@@ -1576,7 +2520,12 @@ class RouteSvc(threading.Thread):
                 self.last_load_time = time.time()
                 print("[Sync] [Nav] Reloading route settings...")
 
-            nav_requested = self.state.nav_route_enabled or self.state.nav_follow_enabled or self.state.nav_avoid_enabled
+            waypoint_routes_enabled = bool(getattr(self.state, "route_waypoints_enabled", False))
+            nav_requested = (
+                self.state.nav_follow_enabled
+                or self.state.nav_avoid_enabled
+                or (self.state.nav_route_enabled and waypoint_routes_enabled)
+            )
             if not self.state.auto_hunt and not nav_requested:
                 self._clear_nav_context()
                 self._was_in_combat = False
@@ -1589,12 +2538,36 @@ class RouteSvc(threading.Thread):
                 self.state.sentinel_enabled = True
                 print("[Nav] Sentinel auto-enabled for navigation")
 
+            focus_fn = getattr(hw, "_is_game_window_focused", None)
+            if callable(focus_fn) and not bool(focus_fn()):
+                now = time.time()
+                if now - self._last_focus_block_log_time >= 1.5:
+                    print("[Nav] Game window not focused; navigation paused.")
+                    self._last_focus_block_log_time = now
+                self._clear_nav_context()
+                self._clear_nav_attempt_state()
+                self.state.is_stuck = False
+                stop_fn = getattr(hw, "stop_all_inputs", None)
+                if callable(stop_fn):
+                    try:
+                        stop_fn(repeat=1, delay=0.02, disconnect=False)
+                    except Exception:
+                        pass
+                humanized_sleep(TIMING_CONFIG["idle_sleep"])
+                continue
+
             in_combat = bool(self.state.is_combat_busy)
             if in_combat and not self._was_in_combat:
                 self._mark_combat_pause()
             elif (not in_combat) and self._was_in_combat:
                 self._advance_waypoint_after_interrupt()
             self._was_in_combat = in_combat
+
+            follow_mode_active = bool(
+                self.state.is_connected
+                and self.state.nav_follow_enabled
+                and not self.state.nav_route_enabled
+            )
 
             # ── 0순위: 전투 중 이동 정지 (is_combat_busy 플래그 감시) ──
             if in_combat:
@@ -1604,7 +2577,7 @@ class RouteSvc(threading.Thread):
             self._clear_nav_context()
 
             # ── 1순위: Stuck Escape (막힘 감지 시 다른 로직 일시 중단) ──
-            if self._check_stuck():
+            if not follow_mode_active and self._check_stuck():
                 self._escape_stuck(rewind_waypoint=False)
                 humanized_sleep(TIMING_CONFIG["move_hold"])
                 continue
@@ -1628,26 +2601,60 @@ class RouteSvc(threading.Thread):
                     continue
 
             # ── 2순위: Group Follow Mode (is_connected && nav_follow_enabled) ──
-            if self.state.is_connected and self.state.nav_follow_enabled:
+            if follow_mode_active:
+                remote_data = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
+                warrior_pos = self._get_remote_pos(remote_data)
                 follow_target = self._calc_follow_target()
-                if follow_target:
-                    self._set_nav_context("follow")
-                    tx, ty = follow_target
-                    cx, cy = self.state.x, self.state.y
-                    gap_x = abs(tx - cx)
-                    gap_y = abs(ty - cy)
-                    if max(gap_x, gap_y) <= 1:
-                        now = time.time()
+                if warrior_pos:
+                    cx, cy = self._get_current_pos()
+                    now = time.time()
+                    warrior_x, warrior_y = warrior_pos
+                    if not self._is_remote_follow_target_fresh(remote_data, max_age_s=0.35):
+                        if now - self._last_follow_block_log_time >= 1.0:
+                            print("[Follow] waiting for fresh warrior telemetry...")
+                            self._last_follow_block_log_time = now
+                        self._clear_nav_attempt_state()
+                        self._follow_close_until = 0.0
+                        self._stuck_recovery_until = max(self._stuck_recovery_until, now + 0.03)
+                        self.state.is_stuck = False
+                        humanized_sleep(TIMING_CONFIG["nav_loop"])
+                        continue
+                    gap_x = abs(warrior_x - cx)
+                    gap_y = abs(warrior_y - cy)
+                    if gap_x <= 1 and gap_y <= 1:
                         if now - self._last_follow_close_log_time >= 1.5:
-                            print(f"[Follow] Within follow range (pos gap: dx={gap_x}, dy={gap_y})")
+                            print(f"[Follow] Warrior is close (x-gap={gap_x}, y-gap={gap_y})")
                             self._last_follow_close_log_time = now
+                        self._follow_close_until = max(self._follow_close_until, now + 0.06)
+                        self._clear_nav_attempt_state()
+                        self._stuck_recovery_until = now + 0.02
+                        self.state.is_stuck = False
                         humanized_sleep(TIMING_CONFIG["nav_loop"])
                         continue
 
-                    self._move_toward(tx, ty)
+                    if self._follow_close_until > now:
+                        self._clear_nav_attempt_state()
+                        self._stuck_recovery_until = max(self._stuck_recovery_until, now + 0.02)
+                        self.state.is_stuck = False
+                        humanized_sleep(TIMING_CONFIG["nav_loop"])
+                        continue
+                    self._follow_close_until = 0.0
+
+                    if follow_target:
+                        tx, ty = follow_target
+                        self._set_nav_context("follow", target=(tx, ty), warrior_pos=warrior_pos, current=(cx, cy))
+                        self._move_toward_follow(warrior_pos)
+                    else:
+                        self._clear_nav_attempt_state()
+                        humanized_sleep(TIMING_CONFIG["nav_loop"])
+                        continue
+                else:
+                    self._clear_nav_attempt_state()
+                    humanized_sleep(TIMING_CONFIG["nav_loop"])
+                    continue
 
             # ── 3순위: Waypoint Traversal (follow false/no target && is_in_combat false) ──
-            elif self.state.nav_route_enabled and not self._is_in_combat():
+            elif waypoint_routes_enabled and self.state.nav_route_enabled and not self._is_in_combat():
                 m   = self.state.current_map
                 map_data = self.state.waypoints_db.get(m, {})
                 

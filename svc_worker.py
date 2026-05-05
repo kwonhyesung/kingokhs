@@ -4,6 +4,7 @@ import threading
 import random
 import os
 import sys
+import subprocess
 import atexit
 import io
 import json
@@ -61,7 +62,7 @@ from typing import Tuple, Optional, Dict
 from enum import Enum, auto
 
 # 而ㅻ꼸 ?대옒???꾪룷??
-from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
+from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep, normalize_game_hotkey
 from config_profiles import load_profiled_config, load_local_config, save_local_config, LOCAL_CONFIG_FILE
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
@@ -480,16 +481,17 @@ class GridIndicator(tk.Toplevel):
 
             # GameState?먯꽌 理쒖떊 ?덈? 醫뚰몴 痍⑤뱷
             data = self.state.get_all() if hasattr(self.state, "get_all") else {}
-            my_world_x = int(data.get("x", getattr(self.state, "x", 0)))
-            my_world_y = int(data.get("y", getattr(self.state, "y", 0)))
+            my_world_x = int(data.get("pos_x", data.get("x", getattr(self.state, "x", 0))))
+            my_world_y = int(data.get("pos_y", data.get("y", getattr(self.state, "y", 0))))
 
-            # ?쒖떆?? x/y??4?먮━ 怨좎젙 臾몄옄??x_str/y_str) ?곗꽑 (?꾨씫? 'x')
-            my_world_x_str = str(data.get("x_str", ""))
-            my_world_y_str = str(data.get("y_str", ""))
-            if not my_world_x_str:
-                my_world_x_str = f"{my_world_x:04d}"
-            if not my_world_y_str:
-                my_world_y_str = f"{my_world_y:04d}"
+            try:
+                my_world_x_str = f"{int(data.get('pos_x', my_world_x)):04d}"
+            except Exception:
+                my_world_x_str = str(data.get("x_str", "")).strip() or f"{my_world_x:04d}"
+            try:
+                my_world_y_str = f"{int(data.get('pos_y', my_world_y)):04d}"
+            except Exception:
+                my_world_y_str = str(data.get("y_str", "")).strip() or f"{my_world_y:04d}"
 
             # 罹먮┃?곌? ?붾㈃?곸뿉 ?덈뒗 ?ㅼ젣 ?숈쟻 ???醫뚰몴(me_grid)瑜?媛?몄샂
             me_data = self.state.entities.get("me", {}) if hasattr(self.state, "entities") else {}
@@ -967,6 +969,7 @@ class AppView:
         self.last_values = {}  # Dirty Checking??罹먯떆
         self.frame_count = 0  # ?깅뒫 痢≪젙???꾨젅??移댁슫??
         self._paused_control_mode = "NONE"
+        self._restart_requested = False
         
         # Tab蹂??뚮뜑留??ㅼ쐞移?(由ъ냼??愿由?
         self.tab_enabled = {
@@ -1145,7 +1148,7 @@ class AppView:
 
                 map_lbl = ctk.CTkLabel(card, text="MAP: -", font=("Inter", 10, "bold"), text_color="#93C5FD", anchor="w", justify="left")
                 map_lbl.pack(fill="x", padx=6, pady=(1, 1))
-                coord_lbl = ctk.CTkLabel(card, text="X/Y: -", font=("Inter", 11, "bold"), text_color="#FDE68A", anchor="w", justify="left")
+                coord_lbl = ctk.CTkLabel(card, text="POS: -", font=("Inter", 11, "bold"), text_color="#FDE68A", anchor="w", justify="left")
                 coord_lbl.pack(fill="x", padx=6, pady=(0, 1))
                 hpmp_lbl = ctk.CTkLabel(card, text="HP/MP: -", font=("Inter", 9, "bold"), text_color="#A7F3D0", anchor="w", justify="left")
                 hpmp_lbl.pack(fill="x", padx=6, pady=(0, 5))
@@ -1960,9 +1963,32 @@ class AppView:
         self.load_hunting_sequence()
 
     def update_nav_flags(self):
-        self.state.nav_follow_enabled = self.sw_follow.get()
-        self.state.nav_route_enabled = self.sw_route.get()
-        self.state.nav_avoid_enabled = self.sw_avoid.get()
+        follow_enabled = bool(self.sw_follow.get())
+        waypoint_routes_enabled = bool(getattr(self.state, "route_waypoints_enabled", False))
+        route_enabled = bool(self.sw_route.get()) and waypoint_routes_enabled
+        avoid_enabled = bool(self.sw_avoid.get())
+
+        if follow_enabled:
+            route_enabled = False
+            avoid_enabled = True
+        elif not waypoint_routes_enabled:
+            route_enabled = False
+
+        self.state.nav_follow_enabled = follow_enabled
+        self.state.nav_route_enabled = route_enabled
+        self.state.nav_avoid_enabled = avoid_enabled
+
+        if getattr(self.state, "automation_paused", False):
+            self.state.control_mode = "PAUSED"
+        elif self.state.service_active and follow_enabled:
+            self.state.control_mode = "FOLLOW+SERVICE"
+        elif follow_enabled:
+            self.state.control_mode = "FOLLOW"
+        else:
+            self.state.control_mode = "NONE"
+
+        self._reset_nav_runtime_state(stop_inputs=True)
+        self._sync_control_mode_widgets()
         self.show_toast("Navigation flags updated")
 
     def sync_user_opts(self):
@@ -2289,7 +2315,8 @@ class AppView:
             return
         
         data = self.state.get_all()
-        x, y = data.get("x", 0), data.get("y", 0)
+        x = data.get("pos_x", data.get("x", 0))
+        y = data.get("pos_y", data.get("y", 0))
         seq_data = self.state.waypoints_db[current_map][current_floor]
         seq_data["points"].append(f"{x},{y}")
         self.save_waypoints()
@@ -2733,22 +2760,36 @@ class AppView:
                 self.spell_db = json.load(f)
         else:
             self.spell_db = []
+        self._refresh_state_spells_from_db()
         self.sync_slots_from_db()
 
     def save_spells_db(self):
         with open(self.spell_db_path, 'w', encoding='utf-8') as f:
             json.dump(self.spell_db, f, indent=4, ensure_ascii=False)
-        # GameState ?숆린??
+        self._refresh_state_spells_from_db()
+
+    def _refresh_state_spells_from_db(self):
+        """Synchronize the active spell database into GameState.spells."""
+        if not hasattr(self, "state") or self.state is None:
+            return
+
         self.state.spells.clear()
         for s in self.spell_db:
-            if s.get("slot") and s.get("use", True):
-                self.state.spells.append(Skill(
-                    name=s["name"],
-                    target_type=s["target_type"],
-                    hotkey=s["slot"] if len(s["slot"]) == 1 and s["slot"].isdigit() else None,
-                    spell_char=s["slot"] if not (len(s["slot"]) == 1 and s["slot"].isdigit()) else None,
-                    category=s.get("category", "怨듦꺽")
-                ))
+            if not s.get("slot") or not s.get("use", True):
+                continue
+
+            slot = str(s.get("slot", "") or "").strip()
+            if not slot:
+                continue
+
+            self.state.spells.append(Skill(
+                name=str(s.get("name", "") or "").strip(),
+                target_type=str(s.get("target_type", "") or "").strip(),
+                hotkey=normalize_game_hotkey(slot) or None,
+                spell_char=slot or None,
+                enable_red_tab=bool(s.get("enable_red_tab", False)),
+                category=str(s.get("category", "OTHER") or "OTHER").strip() or "OTHER",
+            ))
 
     def sync_slots_from_db(self):
         # UI ?낅뜲?댄듃 濡쒖쭅 (build ?댄썑 ?몄텧 媛??
@@ -3169,18 +3210,15 @@ class AppView:
         return map_name or "-"
 
     def _format_coord_text(self, data: dict) -> tuple[str, str]:
-        x_text = str(data.get("x_str") or "").strip()
-        y_text = str(data.get("y_str") or "").strip()
-        if not x_text:
-            try:
-                x_text = f"{int(data.get('x', 0) or 0):04d}"
-            except Exception:
-                x_text = "-"
-        if not y_text:
-            try:
-                y_text = f"{int(data.get('y', 0) or 0):04d}"
-            except Exception:
-                y_text = "-"
+        try:
+            x_text = f"{int(data.get('pos_x', data.get('x', 0)) or 0):04d}"
+        except Exception:
+            x_text = str(data.get("x_str") or "").strip() or "-"
+        try:
+            y_text = f"{int(data.get('pos_y', data.get('y', 0)) or 0):04d}"
+        except Exception:
+            y_text = str(data.get("y_str") or "").strip() or "-"
+        return x_text or "-", y_text or "-"
         return x_text or "-", y_text or "-"
 
     def _format_hp_mp_text(self, data: dict) -> tuple[str, str]:
@@ -3215,7 +3253,6 @@ class AppView:
 
     def _format_rx_summary(self) -> str:
         sender = str(getattr(self.state, "last_network_rx_sender", "") or "-")
-        seq = int(getattr(self.state, "last_network_rx_seq", 0) or 0)
         role = str(getattr(self.state, "last_network_rx_role", "") or "-")
         kind = str(getattr(self.state, "last_network_rx_kind", "") or "-")
         peer = None
@@ -3226,8 +3263,8 @@ class AppView:
         if peer:
             map_text = self._format_map_text(peer)
             x_text, y_text = self._format_coord_text(peer)
-            return f"RX sender={sender} seq={seq} role={role} kind={kind} map={map_text} x={x_text} y={y_text}"
-        return f"RX sender={sender} seq={seq} role={role} kind={kind} map=- x=- y=-"
+            return f"RX sender={sender} role={role} kind={kind} map={map_text} x={x_text} y={y_text}"
+        return f"RX sender={sender} role={role} kind={kind} map=- x=- y=-"
 
     def _get_role_snapshot(self, role_name: str) -> Optional[dict]:
         if role_name == self.state.role:
@@ -3306,7 +3343,7 @@ class AppView:
         card["status"].configure(text=status_text, text_color=status_color)
         card["title"].configure(text=self._display_role_name(role_name), text_color=status_color)
         card["map"].configure(text=f"MAP: {map_text}")
-        card["coord"].configure(text=f"X/Y: {coord_text}")
+        card["coord"].configure(text=f"POS: {coord_text}")
         card["hpmp"].configure(text=f"HP/MP: {hpmp_text}")
 
     def _refresh_dosa_network_panel(self):
@@ -3332,7 +3369,7 @@ class AppView:
             map_text = self._format_map_text(local_snapshot)
             x_text, y_text = self._format_coord_text(local_snapshot)
             hp_text, mp_text = self._format_hp_mp_text(local_snapshot)
-            local_text = f"{local_status} | map={map_text} | x={x_text} y={y_text} | hp={hp_text} mp={mp_text}"
+            local_text = f"{local_status} | map={map_text} | pos={x_text},{y_text} | hp={hp_text} mp={mp_text}"
         if local_text != self.last_values.get("net_local_text"):
             self.lbl_local_status.configure(text=local_text, text_color=local_color)
             self.last_values["net_local_text"] = local_text
@@ -3395,9 +3432,74 @@ class AppView:
     def _stop_all_inputs(self, disconnect: bool = False, repeat: int = 2, delay: float = 0.05):
         global hw
         try:
-            hw.stop_all_inputs(repeat=repeat, delay=delay, disconnect=disconnect)
+            stop_fn = getattr(hw, "stop_all_inputs", None)
+            if callable(stop_fn):
+                stop_fn(repeat=repeat, delay=delay, disconnect=disconnect)
+                return
+            release_fn = getattr(hw, "panic_release", None)
+            if callable(release_fn):
+                release_fn()
+                if disconnect:
+                    try:
+                        hw.disconnect()
+                    except Exception:
+                        pass
+                return
+            print("[Hardware] cleanup failed: stop_all_inputs unavailable")
         except Exception as exc:
             print(f"[Hardware] cleanup failed: {exc}")
+
+    def _process_pending_restart(self) -> bool:
+        if not getattr(self, "_restart_requested", False):
+            return False
+        self._restart_requested = False
+        self.request_restart()
+        return True
+
+    def _restart_dispatch_worker(self):
+        """Hotkey thread와 GUI 루프가 동시에 막혀도 재시작을 밀어 넣는다."""
+        try:
+            time.sleep(0.05)
+        except Exception:
+            pass
+        try:
+            self._process_pending_restart()
+        except Exception as exc:
+            print(f"[PANIC] Restart dispatch failed: {exc}")
+
+    def _reset_nav_runtime_state(self, stop_inputs: bool = True):
+        """Clear stale navigation motion so mode switches do not keep drifting."""
+        global nav_thread
+        try:
+            if nav_thread is not None and hasattr(nav_thread, "reset_runtime_state"):
+                nav_thread.reset_runtime_state()
+        except Exception as exc:
+            print(f"[Warn] Navigation runtime reset failed: {exc}")
+
+        try:
+            with self.state._lock:
+                self.state.is_stuck = False
+                self.state.follow_target_pos = None
+                self.state.follow_anchor_offset = (0, 0)
+                self.state.last_key_context = "NONE"
+                self.state.stuck_start_time = 0.0
+                self.state.last_move_dir = None
+        except Exception:
+            pass
+
+        if stop_inputs:
+            self._stop_all_inputs(disconnect=False, repeat=1, delay=0.03)
+
+    def _is_game_window_focused(self) -> bool:
+        """Return True only when the game window is the foreground window."""
+        try:
+            if not getattr(self, "hwnd", None):
+                return False
+            if not win32gui.IsWindow(self.hwnd):
+                return False
+            return win32gui.GetForegroundWindow() == self.hwnd
+        except Exception:
+            return False
 
     def _apply_control_mode(self, mode: str, announce: bool = True):
         normalized = str(mode or "NONE").strip().upper()
@@ -3441,6 +3543,7 @@ class AppView:
         if action_thread is not None:
             action_thread.task_active = service_enabled
 
+        self._reset_nav_runtime_state(stop_inputs=True)
         self._sync_control_mode_widgets()
         if announce:
             print(f"[Hotkey] Mode set: {control_mode}")
@@ -3461,8 +3564,70 @@ class AppView:
         print(f"[Hotkey] {label}: ON")
         self.show_toast(f"{label}: ON")
 
+    def _set_follow_enabled_from_hotkey(self, enabled: bool, announce: bool = True):
+        try:
+            if enabled and not self._is_game_window_focused():
+                print("[Hotkey] Follow ignored: game window not focused")
+                if announce:
+                    self.show_toast("Follow ignored: game window not focused")
+                return False
+            with self.state._lock:
+                enabled = bool(enabled)
+                if enabled:
+                    self.state.nav_follow_enabled = True
+                    self.state.nav_route_enabled = False
+                    self.state.nav_avoid_enabled = True
+                    self.state.service_active = False
+                    self.state.auto_hunt = False
+                    self.state.sentinel_enabled = True
+                    if getattr(self.state, "automation_paused", False):
+                        self.state.control_mode = "PAUSED"
+                    else:
+                        self.state.control_mode = "FOLLOW"
+                else:
+                    self.state.nav_follow_enabled = False
+                    self.state.nav_route_enabled = False
+                    self.state.nav_avoid_enabled = False
+                    self.state.service_active = False
+                    self.state.auto_hunt = False
+                    self.state.sentinel_enabled = False
+                    if getattr(self.state, "automation_paused", False):
+                        self.state.control_mode = "PAUSED"
+                    else:
+                        self.state.control_mode = "NONE"
+        except Exception as exc:
+            print(f"[Warn] Follow state update failed: {exc}")
+
+        self._reset_nav_runtime_state(stop_inputs=True)
+
+        def _apply():
+            try:
+                if hasattr(self, "sw_follow") and self.sw_follow.winfo_exists():
+                    if enabled:
+                        self.sw_follow.select()
+                    else:
+                        self.sw_follow.deselect()
+                self._sync_control_mode_widgets()
+                mode = self._current_control_mode_label()
+                print(f"[Hotkey] Follow Mode: {'ON' if enabled else 'OFF'} | MODE={mode}")
+                if announce:
+                    self.show_toast(f"Follow Mode: {'ON' if enabled else 'OFF'}")
+            except Exception as exc:
+                print(f"[Warn] Follow hotkey sync failed: {exc}")
+        try:
+            self.root.after(0, _apply)
+        except Exception:
+            _apply()
+
     def toggle_follow(self):
-        self._toggle_control_mode("FOLLOW", "Follow Mode")
+        print("[Hotkey] F1 pressed")
+        current = bool(getattr(self.state, "nav_follow_enabled", False))
+        if hasattr(self, "sw_follow") and self.sw_follow.winfo_exists():
+            try:
+                current = bool(self.sw_follow.get())
+            except Exception:
+                pass
+        self._set_follow_enabled_from_hotkey(not current)
 
     def toggle_pause_resume(self):
         if getattr(self.state, "automation_paused", False):
@@ -3493,14 +3658,47 @@ class AppView:
         global action_thread
         if action_thread is not None:
             action_thread.task_active = False
+        self._reset_nav_runtime_state(stop_inputs=True)
         self._stop_all_inputs(disconnect=False, repeat=2, delay=0.05)
         self._sync_control_mode_widgets()
         print(f"[Hotkey] Pause ON (saved={self._paused_control_mode})")
         self.show_toast("PAUSED")
 
-    def emergency_exit(self):
-        print("[PANIC] Emergency exit requested (F4)")
+    def _launch_restart_process(self):
+        launcher = os.path.abspath(sys.argv[0]) if sys.argv else ""
+        if not launcher or not os.path.exists(launcher):
+            launcher = os.path.join(SCRIPT_DIR, "svc_dosa.py")
+        env = os.environ.copy()
+        env["DOSA_RESTART_DELAY"] = "0.75"
+        cmd = [sys.executable, launcher, *sys.argv[1:]]
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(
+            cmd,
+            cwd=SCRIPT_DIR,
+            env=env,
+            creationflags=creationflags,
+        )
+        print(f"[System] Restart process launched: {os.path.basename(launcher)}")
+
+    def request_restart(self):
+        if getattr(self, "_restart_pending", False):
+            print("[PANIC] Restart already pending; ignoring duplicate request.")
+            return
+        self._restart_pending = True
+        print("[PANIC] Restarting now (F4)")
+
+        try:
+            self._launch_restart_process()
+        except Exception as exc:
+            print(f"[PANIC] Restart launch failed: {exc}")
+            self._restart_pending = False
+            self.show_toast("RESTART FAILED", color="#EF4444")
+            return
+
         self.state.running = False
+        self.state.shutting_down = True
         self.state.automation_paused = True
         self.state.control_mode = "PAUSED"
         self.state.nav_follow_enabled = False
@@ -3516,16 +3714,47 @@ class AppView:
         global action_thread
         if action_thread is not None:
             action_thread.task_active = False
-        self._stop_all_inputs(disconnect=True, repeat=3, delay=0.05)
+
+        self._reset_nav_runtime_state(stop_inputs=True)
+        try:
+            self._stop_all_inputs(disconnect=True, repeat=3, delay=0.05)
+        except Exception:
+            pass
         try:
             self.close_calibration_popup()
         except Exception:
             pass
         try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        try:
+            save_gui_state(self.root.geometry(), self.ui_scale, self.calibration_geometry)
+        except Exception:
+            pass
+
+        try:
             self.root.destroy()
         except Exception:
             pass
         os._exit(0)
+
+    def emergency_exit(self):
+        self._queue_restart_request()
+
+    def _queue_restart_request(self):
+        if getattr(self, "_restart_requested", False):
+            return
+        self._restart_requested = True
+        print("[PANIC] Restart requested (F4)")
+        try:
+            threading.Thread(
+                target=self._restart_dispatch_worker,
+                name="RestartDispatchThread",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            print(f"[PANIC] Failed to start restart dispatch thread: {exc}")
 
     def debug_ocr(self):
         global reader_thread
@@ -3559,6 +3788,10 @@ class AppView:
 
     def toggle_route_f1_mode(self):
         """Docstring."""
+        if not bool(getattr(self.state, "route_waypoints_enabled", False)):
+            print("[Move] Waypoint CSV route is disabled for now")
+            self.show_toast("Waypoint CSV route disabled", color="#F59E0B")
+            return
         # Route mode stop/start toggle
         if getattr(self, '_f1_route_active', False):
             self._f1_route_active = False
@@ -3578,6 +3811,10 @@ class AppView:
 
     def _start_route_f1_logic(self):
         """Docstring."""
+        if not bool(getattr(self.state, "route_waypoints_enabled", False)):
+            print("[Move] Waypoint CSV route is disabled for now")
+            self.show_toast("Waypoint CSV route disabled", color="#F59E0B")
+            return
         items = self.seq_tree.get_children()
         if not items:
             self.show_toast("No route items found", color="#EF4444")
@@ -3737,6 +3974,9 @@ class AppView:
         except tk.TclError:
             return  # ?덈룄???뚭눼 以묒씠硫?利됱떆 醫낅즺
 
+        if self._process_pending_restart():
+            return
+
         # Tab ?뚮뜑留??ㅼ쐞移??뺤씤
         if not self.tab_enabled.get("dash", True):
             # ??鍮꾪솢?깊솕 ????대㉧留??щ벑濡앺븯怨?由ы꽩
@@ -3759,10 +3999,14 @@ class AppView:
             mp_val = state.mp_str or str(state.mp)
             exp_val = state.exp_str or str(state.exp)
             money_val = state.money_str or str(state.money)
-            x_val = state.x_str or f"{state.x:04d}"
-            y_val = state.y_str or f"{state.y:04d}"
-            char_grid = state.char_grid
-
+            try:
+                x_val = f"{int(getattr(state, 'pos_x', state.x)):04d}"
+            except Exception:
+                x_val = state.x_str or f"{state.x:04d}"
+            try:
+                y_val = f"{int(getattr(state, 'pos_y', state.y)):04d}"
+            except Exception:
+                y_val = state.y_str or f"{state.y:04d}"
             if hp_val != self.last_values.get("dash_hp"):
                 self.lbl_hp.configure(text=hp_val)
                 self.last_values["dash_hp"] = hp_val
@@ -3780,25 +4024,13 @@ class AppView:
             if xy_text != self.last_values.get("dash_xy"):
                 self.lbl_xy.configure(text=xy_text)
                 self.last_values["dash_xy"] = xy_text
-            if hasattr(self, 'lbl_char_grid'):
-                char_grid_text = f"GRID: {char_grid[0]},{char_grid[1]}"
-                if char_grid_text != self.last_values.get("dash_char_grid"):
-                    self.lbl_char_grid.configure(text=char_grid_text)
-                    self.last_values["dash_char_grid"] = char_grid_text
 
-            # 네트워크 상태 표시
+            # 네트워크 상태는 연결 여부만 표시하고, seq 상세값은 갱신하지 않는다.
             net_status = "CONNECTED" if getattr(state, "is_connected", False) else "DISCONNECTED"
-            if self.state.role == "도사" and getattr(state, "last_network_rx_sender", ""):
-                net_status = (
-                    f"CONNECTED | RX {state.last_network_rx_sender}"
-                    f"#{getattr(state, 'last_network_rx_seq', 0)}"
-                )
             if net_status != self.last_values.get("dash_net"):
                 self.lbl_net.configure(text=f"[Net] {net_status}")
                 self.last_values["dash_net"] = net_status
 
-            self._refresh_dosa_network_panel()
-            
             # ?깅뒫 痢≪젙
             self.frame_count += 1
             perf_end = time.perf_counter()
@@ -3829,6 +4061,9 @@ class AppView:
         try:
             if not self.root.winfo_exists(): return
         except tk.TclError:
+            return
+
+        if self._process_pending_restart():
             return
 
         # Tab ?뚮뜑留??ㅼ쐞移??뺤씤
@@ -3916,6 +4151,7 @@ class AppView:
     def on_close(self):
         print("[System] Shutdown initiated. Stopping all activity and closing threads...")
         self.state.running = False
+        self.state.shutting_down = True
         self.state.automation_paused = True
         self.state.control_mode = "PAUSED"
         self.state.nav_follow_enabled = False
@@ -3950,7 +4186,7 @@ class AppView:
             keyboard.add_hotkey("f1", self.toggle_follow)
             keyboard.add_hotkey("f2", self.toggle_service)
             keyboard.add_hotkey("f3", self.toggle_pause_resume)
-            keyboard.add_hotkey("f4", self.emergency_exit)
+            keyboard.add_hotkey("f4", self._queue_restart_request)
         except Exception as e:
             print(f"[Warn] Hotkey Registration Failed: {e}")
         
