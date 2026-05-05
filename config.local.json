@@ -186,12 +186,5 @@
             0,
             0
         ]
-    },
-"network": {
-    "role": "도사",
-    "server_ip": "211.184.106.24",
-    "bind_host": "0.0.0.0",
-    "telemetry_port": 5555,
-    "local_port": 5556
-}
+    }
 }

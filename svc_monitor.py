@@ -32,6 +32,7 @@ try:
 except Exception:
     pass
 
+from typing import Optional, Union, Any, List, Dict, Tuple
 from svc_kernel import GameState, find_game_window, Region
 from dataclasses import asdict
 from svc_findtext import FindTextEngine
@@ -42,6 +43,14 @@ VERBOSE_MONITOR_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
 def _monitor_log(*args, **kwargs):
     if VERBOSE_MONITOR_LOGS:
         print(*args, **kwargs)
+
+def imread_unicode(path, flags=cv2.IMREAD_COLOR):
+    """한글 경로 등 유니코드 경로를 포함한 이미지를 읽기 위한 헬퍼 함수"""
+    try:
+        return cv2.imdecode(np.fromfile(path, dtype=np.uint8), flags)
+    except Exception as e:
+        _monitor_log(f"[Error] imread_unicode failed for {path}: {e}")
+        return None
 
 def dict_to_region(data: dict) -> Region:
     """dict?Region 객체?변?하???퍼 ?수"""
@@ -310,7 +319,7 @@ class PatternMatcher:
         for i in range(10):
             path = os.path.join(digits_path, f"{i}.png")
             if not os.path.exists(path): continue
-            img = cv2.imread(path)
+            img = imread_unicode(path)
             if img is None: continue
 
             hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -349,7 +358,7 @@ class PatternMatcher:
                 img_path = os.path.join(folder_path, fn)
                 if not os.path.exists(img_path):
                     continue
-                img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+                img = imread_unicode(img_path)
                 if img is not None:
                     name = os.path.splitext(fn)[0]
                     self.templates[folder][name] = img

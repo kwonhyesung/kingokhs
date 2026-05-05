@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import time
 import threading
 import random
@@ -712,7 +712,7 @@ class LoggerThread(threading.Thread):
 # 6. ZeroMQ ?ㅽ듃?뚰겕 ?ㅻ젅??(PUB/SUB)
 # --------------------------------------------------------------------------------
 class NetworkThread(threading.Thread):
-    def __init__(self, state: GameState, network_cfg: Optional[dict] = None):
+    def __init__(self, state: GameState, network_cfg: Optional[dict] = None, on_connection_change=None):
         super().__init__(daemon=True)
         self.state = state
         self.cfg = dict(network_cfg or load_network_config())
@@ -731,6 +731,7 @@ class NetworkThread(threading.Thread):
         self._seen_rx_senders: set[str] = set()
         self.send_interval = 0.05
         self.broadcast_interval = 0.05
+        self.on_connection_change = on_connection_change  # 연결 상태 변경 시 호출할 콜백
 
         self.state.network_role = self.role
         self.state.network_server_ip = self.server_ip
@@ -865,6 +866,8 @@ class NetworkThread(threading.Thread):
                     )
                     self._warned_server_ip = True
             self.state.is_connected = True
+            if self.on_connection_change:
+                self.on_connection_change(True)
 
             while self.state.running:
                 now = time.time()
@@ -934,6 +937,8 @@ class NetworkThread(threading.Thread):
         except Exception as e:
             print(f'[Net] Error: {e}')
             self.state.is_connected = False
+            if self.on_connection_change:
+                self.on_connection_change(False)
         finally:
             try:
                 if self.sock:
@@ -3821,14 +3826,16 @@ class AppView:
                     self.last_values["dash_char_grid"] = char_grid_text
 
             # 네트워크 상태 표시
-            net_status = "CONNECTED" if getattr(state, "is_connected", False) else "DISCONNECTED"
+            is_connected = getattr(state, "is_connected", False)
+            net_status = "연결됨" if is_connected else "연결 끊김"
+            
             if self.state.role == "도사" and getattr(state, "last_network_rx_sender", ""):
-                net_status = (
-                    f"CONNECTED | RX {state.last_network_rx_sender}"
-                    f"#{getattr(state, 'last_network_rx_seq', 0)}"
-                )
+                net_status = f"연결됨 (격수PC: {state.last_network_rx_sender})"
+            
+            # 연결 상태 변경 시 즉시 UI 업데이트
             if net_status != self.last_values.get("dash_net"):
-                self.lbl_net.configure(text=f"[Net] {net_status}")
+                text_color = "#10B981" if is_connected else "#EF4444"
+                self.lbl_net.configure(text=f"[Net] {net_status}", text_color=text_color)
                 self.last_values["dash_net"] = net_status
 
             self._refresh_dosa_network_panel()
@@ -4128,11 +4135,16 @@ def main(
     sentinel_thread = SentinelThread(state, reader_thread.matcher) # 紐ъ뒪???꾩씠???먯? ?꾩슜
     action_thread = LogicSvc(state)  # FSM 濡쒖쭅
     nav_thread = RouteSvc(state)  # ?ㅻ퉬寃뚯씠??
-    network = NetworkThread(state, network_cfg)
-    logger = LoggerThread(state)
-
+    
     # GUI ?앹꽦 (hwnd ?꾨떖)
     gui = AppView(state, hwnd=hwnd)
+    
+    # 연결 상태 변경 콜백 함수 (UI 업데이트는 AppView에서 주기적으로 수행함)
+    def on_connection_change(is_connected):
+        pass
+    
+    network = NetworkThread(state, network_cfg, on_connection_change)
+    logger = LoggerThread(state)
 
     # GUI ?앹꽦 ??grid_indicator ?꾨떖
     if hasattr(gui, 'grid_indicator'):

@@ -479,18 +479,23 @@ class BisHardware:
                 print(f"[Hardware] 강제전송 불가: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
 
     def panic_release(self):
-        """강제 정지 시 파이썬 측 통신 버퍼를 싹 비우고 아두이노에 키보드 즉시 해제 명령 강제 전송. (락 무시)"""
+        """강제 정지 시 통신 버퍼를 비우고 모든 키를 해제합니다. (락 무시)"""
+        print("[Hardware] 모든 신호 강제 해제 (Panic Release)")
         if self.ser and self.ser.is_open:
             try:
-                # 이미 쌓인 D:left, D:right 등의 발송 대기열 삭제
                 self.ser.reset_output_buffer()
                 self.ser.reset_input_buffer()
                 # 아두이노에 씹히지 않도록 연달아 발송
                 for _ in range(2):
                     self.ser.write(b"RELEASE_ALL\n")
-                self.ser.flush() # 물리적 회선으로 발송이 끝날때까지 대기
+                self.ser.flush()
             except Exception:
                 pass
+        
+        # 명시적인 개별 키 해제 신호 송신
+        keys = ["left", "right", "up", "down", "shift", "ctrl", "alt", "esc", "space", "enter"]
+        for k in keys:
+            self.send_force(f"U:{k}")
 
     def humanized_press(self, key: str, variance: float = 0.15):
         # HumanBehaviorSimulator로 동작 간 휴식 시간 시뮬레이션
@@ -513,23 +518,27 @@ class BisHardware:
             self.humanized_press("esc")
             humanized_sleep(TIMING_CONFIG["esc_gap"])
 
-    def panic_release(self):
-        """모든 하드웨어 신호를 즉시 소거 (비상 정지용)"""
-        print("[Hardware] 모든 신호 강제 해제 (Panic Release)")
-        keys = ["left", "right", "up", "down", "shift", "ctrl", "alt", "esc", "space", "enter"]
-        for k in keys:
-            self.send(f"U:{k}")
-        self.send("U:all")
+    def stop_all_inputs(self, disconnect: bool = False, repeat: int = 1, delay: float = 0.05):
+        """모든 입력을 중단하고 선택적으로 연결을 해제합니다."""
+        for _ in range(repeat):
+            self.panic_release()
+            if delay > 0:
+                time.sleep(delay)
+        if disconnect:
+            self.disconnect()
 
-    def hold_move(self, direction: str, hold_key: str = "move_hold", variance: float = 0.15):
+    def hold_move(self, direction: str, hold_key: str = "move_hold", variance: float = 0.15, duration: float = None):
         # HumanBehaviorSimulator로 이동 동작 간 휴식 시간 시뮬레이션
         pause = HumanBehaviorSimulator.simulate_pause('move')
         time.sleep(pause)
         
-        print(f"[Move] 방향키: {direction}")
+        # duration이 명시되면 해당 시간을 사용, 없으면 설정값 사용
+        hold_time = duration if duration is not None else TIMING_CONFIG.get(hold_key, 0.15)
+        
+        print(f"[Move] 방향키: {direction} ({hold_time:.3f}s)")
         try:
             self.send_force(f"D:{direction}")
-            humanized_sleep(TIMING_CONFIG[hold_key], variance)
+            humanized_sleep(hold_time, variance)
         finally:
             self.send_force(f"U:{direction}")
 

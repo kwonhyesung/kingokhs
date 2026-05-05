@@ -110,6 +110,12 @@ class OCRTesterApp:
 
         frame_count = 0
         last_time = time.time()
+        last_ui_update = 0
+        ui_update_interval = 0.1  # UI 업데이트 간격 (100ms)
+        
+        # 결과 캐시
+        last_results = {}
+        last_hashes = {}
         
         while self.running:
             for _ in range(2): cap.grab()
@@ -117,87 +123,108 @@ class OCRTesterApp:
             if not ret or frame is None: continue
 
             fh, fw = frame.shape[:2]
+            results = {}
+            
             for name, reg in self.regions.items():
                 sx, sy, dx, dy = int(reg.sx), int(reg.sy), int(reg.dx), int(reg.dy)
                 crop = frame[max(0,sy):min(fh,dy), max(0,sx):min(fw,dx)]
                 if crop.size == 0: continue
                 
+                # 해시 계산으로 변경 감지
+                cur_hash = hash(crop.tobytes())
+                if cur_hash == last_hashes.get(name):
+                    # 변경 없으면 이전 결과 재사용
+                    results[name] = last_results.get(name, ("", 0.0))
+                    continue
+                    
+                last_hashes[name] = cur_hash
+
                 # 1. 기존 고정밀 인식 수행
                 result_text, score = self.matcher.recognize_digit_bitwise(crop)
-                
-                # 2. FindText 패턴 매칭으로 인식 시도 (화면 전체에서 검색 후 ROI 필터링)
-                findtext_result = self.recognize_with_findtext(frame, sx, sy, dx, dy)
-                
-                # FindText 결과가 있으면 사용, 없으면 기존 결과 사용
-                if findtext_result:
-                    result_text = findtext_result
-                    score = 1.0  # FindText 매칭은 높은 점수 부여
-                
-                # 3. 시각화용 데이터 생성
-                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                # 시각화용 BIN은 첫 번째 인식된 숫자의 임계값을 사용하거나 기본 127 사용
-                viz_thr = 127
-                if result_text and result_text[0] in self.matcher._ahk_pattern_cache:
-                    viz_thr = self.matcher._ahk_pattern_cache[result_text[0]]["threshold"]
-                
-                _, viz_bin = cv2.threshold(gray, viz_thr, 255, cv2.THRESH_BINARY)
-                
-                matched_bitmap = np.zeros_like(viz_bin)
-                if result_text:
-                    curr_x = 0
-                    for char in result_text:
-                        data = self.matcher._ahk_pattern_cache.get(char)
-                        if data:
-                            tmpl = data["bitmap"]
-                            th, tw = tmpl.shape
-                            if curr_x + tw <= matched_bitmap.shape[1]:
-                                matched_bitmap[0:min(th, matched_bitmap.shape[0]), curr_x:curr_x+tw] = tmpl[0:min(th, matched_bitmap.shape[0]), :] * 255
-                                curr_x += tw + 1
-                
-                self.root.after(0, self.safe_update_ui, name, crop.copy(), viz_bin.copy(), matched_bitmap.copy(), result_text, score)
+
+                # 2. 실패 시에만 FindText 패턴 매칭 시도
+                if not result_text or score < 0.5:
+                    findtext_result = self.recognize_with_findtext(frame, sx, sy, dx, dy)
+                    if findtext_result:
+                        result_text = findtext_result
+                        score = 1.0
+
+                results[name] = (result_text, score)
+                last_results[name] = (result_text, score)
+
+            # UI 업데이트 (비동기, 제어된 간격)
+            current_time = time.time()
+            if current_time - last_ui_update >= ui_update_interval:
+                self.root.after(0, self.batch_update_ui, results, frame.copy())
+                last_ui_update = current_time
 
             frame_count += 1
-            if time.time() - last_time >= 1.0:
-                fps = frame_count / (time.time() - last_time)
+            if current_time - last_time >= 1.0:
+                fps = frame_count / (current_time - last_time)
                 self.root.after(0, lambda f=fps: self.lbl_fps.configure(text=f"FPS: {f:.1f}"))
                 frame_count = 0
-                last_time = time.time()
-            time.sleep(0.05)
+                last_time = current_time
+            time.sleep(0.02)  # 더 짧은 대기 시간으로 FPS 향상
 
         cap.release()
 
-    def safe_update_ui(self, name, raw, viz_bin, tmpl_bit, result, score):
+    def batch_update_ui(self, results, frame):
+        """모든 결과를 한 번에 업데이트하여 UI 부하 감소"""
         if not self.running: return
+        
         try:
-            w = self.widgets[name]
-            img_raw = Image.fromarray(cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)).resize((150, 40), Image.NEAREST)
-            self.img_refs[f"{name}_raw"] = ImageTk.PhotoImage(img_raw)
-            w["c_raw"].create_image(75, 20, image=self.img_refs[f"{name}_raw"])
+            fh, fw = frame.shape[:2]
             
-            img_bin = Image.fromarray(viz_bin).resize((150, 40), Image.NEAREST)
-            self.img_refs[f"{name}_bin"] = ImageTk.PhotoImage(img_bin)
-            w["c_bin"].create_image(75, 20, image=self.img_refs[f"{name}_bin"])
-            
-            img_tmpl = Image.fromarray(tmpl_bit).resize((150, 40), Image.NEAREST)
-            self.img_refs[f"{name}_tmpl"] = ImageTk.PhotoImage(img_tmpl)
-            w["c_tmpl"].create_image(75, 20, image=self.img_refs[f"{name}_tmpl"])
-            
-            # 결과를 정수로 변환하여 표시
-            int_result = ""
-            if result:
-                try:
-                    int_result = str(int(result))
-                except ValueError:
-                    int_result = result
-            
-            w["lbl_result"].configure(text=int_result if int_result else "FAIL",
-                                     text_color="#10B981" if int_result else "#FF5555")
-            w["lbl_score"].configure(text=f"Score: {score:.2f}")
-        except Exception: pass
+            for name, (result_text, score) in results.items():
+                if name not in self.widgets:
+                    continue
+                    
+                reg = self.regions[name]
+                sx, sy, dx, dy = int(reg.sx), int(reg.sy), int(reg.dx), int(reg.dy)
+                crop = frame[max(0,sy):min(fh,dy), max(0,sx):min(fw,dx)]
+                if crop.size == 0: continue
+                
+                w = self.widgets[name]
+                
+                # RAW 이미지만 업데이트 (성능 향상)
+                img_raw = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)).resize((150, 40), Image.NEAREST)
+                self.img_refs[f"{name}_raw"] = ImageTk.PhotoImage(img_raw)
+                w["c_raw"].create_image(75, 20, image=self.img_refs[f"{name}_raw"])
+                
+                # 시각화용 이미지는 선택적으로 업데이트
+                if hasattr(self, '_show_debug') and self._show_debug:
+                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    viz_thr = 127
+                    if result_text and result_text[0] in self.matcher._ahk_pattern_cache:
+                        viz_thr = self.matcher._ahk_pattern_cache[result_text[0]]["threshold"]
+                    
+                    _, viz_bin = cv2.threshold(gray, viz_thr, 255, cv2.THRESH_BINARY)
+                    img_bin = Image.fromarray(viz_bin).resize((150, 40), Image.NEAREST)
+                    self.img_refs[f"{name}_bin"] = ImageTk.PhotoImage(img_bin)
+                    w["c_bin"].create_image(75, 20, image=self.img_refs[f"{name}_bin"])
+                
+                # 결과 텍스트 업데이트
+                int_result = ""
+                if result_text:
+                    try:
+                        int_result = str(int(result_text))
+                    except ValueError:
+                        int_result = result_text
+                
+                w["lbl_result"].configure(text=int_result if int_result else "FAIL",
+                                         text_color="#10B981" if int_result else "#FF5555")
+                w["lbl_score"].configure(text=f"Score: {score:.2f}")
+                
+        except Exception as e:
+            pass  # UI 업데이트 실패 시 무시
+    
+    def safe_update_ui(self, name, raw, viz_bin, tmpl_bit, result, score):
+        """단일 UI 업데이트 (호환성 유지)"""
+        self.batch_update_ui({name: (result, score)}, raw)
 
     def recognize_with_findtext(self, full_frame: np.ndarray, sx: int, sy: int, dx: int, dy: int) -> str:
         """
-        FindText 패턴으로 숫자 인식
+        FindText 패턴으로 숫자 인식 (최적화 버전)
         """
         fh, fw = full_frame.shape[:2]
         crop = full_frame[max(0, sy):min(fh, dy), max(0, sx):min(fw, dx)]
@@ -207,15 +234,26 @@ class OCRTesterApp:
         # 그레이스케일 변환
         crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
         
+        # 캐시된 이진화 이미지 사용
+        crop_hash = hash(crop_gray.tobytes())
+        if hasattr(self, '_findtext_cache') and crop_hash in self._findtext_cache:
+            screen_bin = self._findtext_cache[crop_hash]
+        else:
+            screen_bin = (crop_gray > 127).astype(np.uint8)  # 더 빠른 이진화
+            if not hasattr(self, '_findtext_cache'):
+                self._findtext_cache = {}
+            self._findtext_cache[crop_hash] = screen_bin
+            
+            # 캐시 크기 제한
+            if len(self._findtext_cache) > 50:
+                self._findtext_cache.clear()
+        
         # 모든 숫자 패턴에 대해 검색
         all_matches = []
         
         for digit, (template_bin, threshold) in self.findtext_engine.template_cache.items():
             if template_bin is None:
                 continue
-            
-            # 고정 임계값으로 이진화 (AHK와 동일)
-            _, screen_bin = cv2.threshold(crop_gray, threshold, 1, cv2.THRESH_BINARY)
             
             # 매칭 수행
             matches = self.findtext_engine.match_bitmap(screen_bin, template_bin, threshold)
