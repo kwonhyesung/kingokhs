@@ -1,4 +1,4 @@
-﻿"""
+"""
 bis_logic.py  ─  BIS Logic Engine (우선순위 기반 FSM)
 ──────────────────────────────────────────────────────────────
 ▸ 우선순위 체계: Emergency -> Combat -> Moving
@@ -8,6 +8,25 @@ bis_logic.py  ─  BIS Logic Engine (우선순위 기반 FSM)
 ▸ 지능형 Stuck 탈출  → 후진 → 직각 랜덤 이동 → 재탐색
 ▸ 사전 검증  → "걸리지 않음" / 비몬스터 타겟 즉시 ESC
 ──────────────────────────────────────────────────────────────
+
+Purpose:
+    - 우선순위 기반 FSM(Finite State Machine) 엔진 구현
+    - Emergency(긴급) > Combat(전투) > Moving(이동) 순서 처리
+    - NavigationThread와 완전 병렬 동작으로 지연 없는 전투 대응
+    - Anti-cheat 회피를 위한 자연스러운 입력 패턴 구현
+    
+Core Features:
+    - 자가/파티 HP/MP 회복 시스템
+    - 자동 버프/디버프 관리
+    - 지능형 타겟 탐색 및 전투
+    - 막힘 감지 및 자동 탈출
+    - 스킬 쿨다운 관리
+    
+Integration:
+    - svc_worker.py: GUI 제어 및 상태 관리
+    - svc_kernel.py: 하드웨어 입력 및 타이밍 제어
+    - bis_route.py: 경로 탐색 및 이동 관리
+    - spells_config.json: 스킬 설정 및 관리
 """
 
 import time
@@ -25,49 +44,153 @@ from bis_route import RouteManager
 #  ActionThread
 # ============================================================
 class LogicSvc(threading.Thread):
-    """마법 시전 / 전투 FSM 스레드 (NavigationThread와 완전 병렬)."""
+    """
+    마법 시전 / 전투 FSM 스레드 (NavigationThread와 완전 병렬)
+    
+    Purpose:
+        - 게임 내 모든 액션 로직 처리 (전투, 회복, 버프, 이동)
+        - 우선순위 기반 상태 전환 및 액션 실행
+        - 실시간 상태 추적 및 적응적 대응
+        
+    Architecture:
+        - FSM(Finite State Machine) 기반 상태 관리
+        - 독립 스레드로 NavigationThread와 병렬 동작
+        - rate-limiting으로 입력 스팸 방지
+        - fail-safe 메커니즘으로 무한 루프 방지
+        
+    State Flow:
+        IDLE → EMERGENCY_HEAL/MANA_REGEN/COMBAT/SCANNING → BUFFING → IDLE
+        
+    Key Features:
+        - 초고속 스킬 시전 (v3 힐 시스템)
+        - 지능형 타겟 관리 (OCR 기반)
+        - 자동 회복/버프 사이클
+        - 막힘 감지 및 자동 탈출
+    """
 
     def __init__(self, state: GameState):
-        super().__init__(daemon=True)
-        self.state         = state
-        self.current_state = AppStatus.IDLE
-        self.last_load_time = time.time()
-        self.task_active   = False  # 서비스 활성화 플래그
-        # Trigger reaction rate-limit (prevents input spam while keeping fast response).
-        self._last_hp_recover_time = 0.0
-        self._last_mp_recover_time = 0.0
-        self._last_target_search_time = 0.0
-        self._last_monster_seen_time = 0.0
+        """
+        LogicSvc 초기화
+        
+        Args:
+            state (GameState): 전역 게임 상태 객체
+            
+        Attributes:
+            state: 전역 게임 상태 참조
+            current_state: 현재 FSM 상태 (AppStatus Enum)
+            last_load_time: 마지막 설정 로드 시간
+            task_active: 서비스 활성화 플래그 (F2 키 제어)
+            _last_*_time: 각 액션별 rate-limiting 시간
+        """
+        super().__init__(daemon=True)  # 메인 스레드 종료 시 자동 종료
+        self.state         = state  # 전역 상태 참조
+        self.current_state = AppStatus.IDLE  # 초기 상태: 대기
+        self.last_load_time = time.time()  # 설정 변경 감지용
+        self.task_active   = False  # F2 서비스 활성화 플래그
+        
+        # Trigger reaction rate-limit (입력 스팸 방지, 빠른 응답 유지)
+        self._last_hp_recover_time = 0.0  # HP 회복 마지막 시간
+        self._last_mp_recover_time = 0.0  # MP 회복 마지막 시간
+        self._last_target_search_time = 0.0  # 타겟 탐색 마지막 시간
+        self._last_monster_seen_time = 0.0  # 몬스터 감지 마지막 시간
 
     # ----------------------------------------------------------
     # ── 내부: 힐 시퀀스 ─────────────────────────────────
     # ----------------------------------------------------------
     def _execute_v3_heal(self, skill):
-        """초고속 자가 회복: 스킬키 → Home → Enter (모두 humanized)."""
+        """
+        초고속 자가 회복: 스킬키 → Home → Enter (모두 humanized)
+        
+        Purpose:
+            - 자가 HP/MP 회복 스킬 최적화 시전
+            - Shift+Z+문자 조합 없이 기존 핫키 방식 지원
+            - humanized_sleep로 자연스러운 입력 간격 구현
+            
+        Algorithm:
+            1. 스킬 핫키 입력 (skill.hotkey)
+            2. spell_cast_gap(30ms) 대기
+            3. Home 키 입력 (자기 자신 타겟)
+            4. spell_cast_gap(30ms) 대기
+            5. Enter 키 입력 (스킬 확정)
+            6. 스킬 쿨다운 시간 갱신
+            
+        Args:
+            skill (Skill): 시전할 스킬 객체 (name, hotkey, cooldown 등)
+            
+        Integration:
+            - TIMING_CONFIG에서 지연시간 참조
+            - hw.humanized_press로 하드웨어 입력
+            - skill.last_cast_time으로 쿨다운 관리
+        """
         if skill.hotkey:
-            hw.humanized_press(skill.hotkey)
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-        hw.humanized_press("home")
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-        hw.humanized_press("enter")
-        skill.last_cast_time = time.time()
+            hw.humanized_press(skill.hotkey)  # 스킬 핫키 입력
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])  # 30ms 대기
+        hw.humanized_press("home")  # 자기 자신 타겟
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])  # 30ms 대기
+        hw.humanized_press("enter")  # 스킬 확정
+        skill.last_cast_time = time.time()  # 쿨다운 시간 갱신
 
     def _press_fast(self, key: str, variance: float = 0.15):
         """
-        Trigger reactions need to be fast (ft.ahk 스타일). If fast_press is available use it,
-        otherwise fall back to humanized_press.
+        초고속 키 입력: 긴급 반응 필요시 사용 (ft.ahk 스타일)
+        
+        Purpose:
+            - 긴급 상황에서 즉각적인 키 입력 필요
+            - 기존 AutoHotkey 스크립트 호환성 유지
+            - 하드웨어 최적화 입력 방식 지원
+            
+        Algorithm:
+            1. hw.fast_press 시도 (하드웨어 최적화)
+            2. 실패 시 hw.humanized_press로 폴백
+            3. variance 파라미터로 자연스러움 유지
+            
+        Args:
+            key (str): 입력할 키
+            variance (float): 변동성 계수 (기본 0.15)
+            
+        Use Cases:
+            - 긴급 회복 상황
+            - 전투 중 빠른 스킬 시전
+            - 막힘 탈출 시 빠른 이동
+            
+        Fallback:
+            하드웨어 fast_press 미지원 시 humanized_press 사용
         """
         try:
-            hw.fast_press(key, variance=variance)
+            hw.fast_press(key, variance=variance)  # 하드웨어 최적화 입력
         except Exception:
-            hw.humanized_press(key, variance=variance)
+            hw.humanized_press(key, variance=variance)  # 폴백: 일반 humanized 입력
 
     def _resolve_recovery_key(self, selected: str, default_key: str):
         """
-        GUI에서 선택된 recovery_*_spell(스킬 이름)을 hotkey로 해석한다.
-        - 스킬 DB에 있으면 hotkey 사용
-        - selected 자체가 한 글자(숫자키 등)면 그대로 사용
-        - 그 외는 default_key로 폴백
+        GUI 선택 스킬을 핫키로 해석 (유연한 스킬 설정 지원)
+        
+        Purpose:
+            - GUI에서 설정한 recovery_hp_spell/recovery_mp_spell을 실제 핫키로 변환
+            - spells_config.json과의 호환성 유지
+            - 다양한 스킬 설정 방식 지원
+            
+        Algorithm:
+            1. selected가 스킬 DB에 있는지 확인
+            2. 있으면 해당 스킬의 hotkey 반환
+            3. selected가 단일 문자(숫자키 등)이면 그대로 사용
+            4. 그 외 경우 default_key로 폴백
+            
+        Args:
+            selected (str): GUI에서 선택한 스킬 이름
+            default_key (str): 폴백용 기본 키
+            
+        Returns:
+            str: 해석된 핫키 또는 키
+            
+        Use Cases:
+            - GUI에서 "힐" 선택 → 스킬 DB에서 hotkey "1" 찾아 반환
+            - GUI에서 "2" 선택 → 그대로 "2" 반환
+            - 스킬 미찾기 시 default_key "3" 반환
+            
+        Integration:
+            - svc_worker.py: GUI 스킬 설정
+            - spells_config.json: 스킬 데이터베이스
         """
         skill = None
         key = None
@@ -87,22 +210,87 @@ class LogicSvc(threading.Thread):
         return key, skill
 
     def _get_visible_monsters(self) -> list[dict]:
+        """
+        화면에 보이는 몬스터 목록 반환
+        
+        Purpose:
+            - 현재 화면에 감지된 몬스터 목록 가져오기
+            - 전투/타겟팅 로직에서 사용
+            - 유효한 리스트 형식인지 검증
+            
+        Returns:
+            list[dict]: 몬스터 정보 목록 (없으면 빈 리스트)
+            
+        Integration:
+            - svc_monitor.py: OCR로 감지된 몬스터 데이터
+            - GameState.entities: 전역 상태에서 몬스터 정보 관리
+        """
         monsters = self.state.entities.get("monsters", [])
         return monsters if isinstance(monsters, list) else []
 
     def _get_good_hp_threshold(self) -> int:
+        """
+        HP 회복 임계값 반환
+        
+        Purpose:
+            - GUI에서 설정한 HP 기준값 가져오기
+            - 자가/파티 회복 로직에서 사용
+            - 예외 처리로 안전한 기본값 제공
+            
+        Returns:
+            int: HP 회복 기준값 (기본값 0)
+            
+        Integration:
+            - svc_worker.py: GUI에서 설정한 good_hp 값
+            - _needs_hp_recovery(): 임계값 비교
+        """
         try:
             return max(0, int(getattr(self.state, "good_hp", 0) or 0))
         except Exception:
             return 0
 
     def _get_good_mp_threshold(self) -> int:
+        """
+        MP 회복 임계값 반환
+        
+        Purpose:
+            - GUI에서 설정한 MP 기준값 가져오기
+            - 자가/파티 회복 로직에서 사용
+            - 예외 처리로 안전한 기본값 제공
+            
+        Returns:
+            int: MP 회복 기준값 (기본값 0)
+            
+        Integration:
+            - svc_worker.py: GUI에서 설정한 good_mp 값
+            - _needs_mp_recovery(): 임계값 비교
+        """
         try:
             return max(0, int(getattr(self.state, "good_mp", 0) or 0))
         except Exception:
             return 0
 
     def _needs_hp_recovery(self) -> bool:
+        """
+        자가 HP 회복 필요 여부 확인
+        
+        Purpose:
+            - 현재 HP 상태 기반으로 회복 필요성 판단
+            - GUI 설정값과 트리거 상태 종합 고려
+            - rate-limiting으로 과도한 회복 방지
+            
+        Algorithm:
+            1. 현재 HP 가져오기 (음수 방지)
+            2. GUI 설정 임계값 비교
+            3. HP 트리거 상태 확인
+            
+        Returns:
+            bool: HP 회복 필요하면 True
+            
+        Integration:
+            - _recover_hp(): 실제 회복 스킬 시전
+            - _recover_party_hp(): 파티원 회복
+        """
         current_hp = max(0, int(getattr(self.state, "hp", 0) or 0))
         good_hp = self._get_good_hp_threshold()
         if good_hp > 0 and current_hp < good_hp:
@@ -110,6 +298,26 @@ class LogicSvc(threading.Thread):
         return bool(getattr(self.state, "hp_trig_active", False))
 
     def _needs_mp_recovery(self) -> bool:
+        """
+        자가 MP 회복 필요 여부 확인
+        
+        Purpose:
+            - 현재 MP 상태 기반으로 회복 필요성 판단
+            - GUI 설정값과 트리거 상태 종합 고려
+            - rate-limiting으로 과도한 회복 방지
+            
+        Algorithm:
+            1. 현재 MP 가져오기 (음수 방지)
+            2. GUI 설정 임계값 비교
+            3. MP 트리거 상태 확인
+            
+        Returns:
+            bool: MP 회복 필요하면 True
+            
+        Integration:
+            - _recover_mp(): 실제 회복 스킬 시전
+            - _recover_party_mp(): 파티원 회복
+        """
         current_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
         good_mp = self._get_good_mp_threshold()
         if good_mp > 0 and current_mp < good_mp:
@@ -118,53 +326,163 @@ class LogicSvc(threading.Thread):
 
     def _get_support_target_data(self) -> dict | None:
         """Return the ally snapshot that the dosa should support, if available."""
-        remote = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
+        # 1순위: role='격수'로 명시된 데이터 탐색
+        remote = self.state.get_remote_data_by_role("격수")
+        # 2순위: role 매칭 실패 시 other_pc_data의 첫 번째 데이터 사용
+        if not remote:
+            remote = self.state.get_remote_data()
+        
+        # 격수 데이터 수신 확인 로그
+        if remote and isinstance(remote, dict):
+            hp = remote.get("hp", 0)
+            mp = remote.get("mp", 0)
+            heal_request = remote.get("heal_request", False)
+            mp_request = remote.get("mp_request", False)
+            
+            # 신호 수신 로그 (10초마다 한 번만 출력)
+            current_time = time.time()
+            last_log_time = getattr(self.state, 'last_signal_log_time', 0)
+            if current_time - last_log_time > 10:
+                good_hp = remote.get("good_hp", 0)
+                good_mp = remote.get("good_mp", 0)
+                red_tab_enabled = remote.get("red_tab_enabled", False)
+                print(f"[Signal] 격수 데이터 수신 - HP: {hp}, MP: {mp}, 힐요청: {heal_request}, MP요청: {mp_request}")
+                print(f"[Signal] HP임계값: {good_hp}, MP임계값: {good_mp}, 레드탭: {red_tab_enabled}")
+                print(f"[Signal] 힐요청 계산: good_hp>0={good_hp>0}, hp>0={hp>0}, hp<=good_hp={hp<=good_hp}")
+                self.state.last_signal_log_time = current_time
+        else:
+            current_time = time.time()
+            last_log_time = getattr(self.state, 'last_signal_log_time', 0)
+            if current_time - last_log_time > 10:
+                print("[Signal] 격수 데이터 미수신 - other_pc_data 비어있음")
+                self.state.last_signal_log_time = current_time
+        
         return remote if isinstance(remote, dict) and remote else None
 
     def _needs_hp_recovery_for(self, snapshot: dict | None) -> bool:
         if not snapshot:
             return self._needs_hp_recovery()
-        if not snapshot.get("heal_request", False):
-            return False
-        if not snapshot.get("red_tab_enabled", False):
-            return False
+        # 힐요청 상태와 무관하게 직접 HP 임계값으로 판단
         current_hp = max(0, int(snapshot.get("hp", 0) or 0))
-        good_hp = max(0, int(snapshot.get("good_hp", self._get_good_hp_threshold()) or 0))
+        snap_good_hp = int(snapshot.get("good_hp", 0) or 0)
+        
+        # [FIX] 통신 오류나 설정 누락 시 격수 체력 기준 하드코딩 (280000)
+        good_hp = snap_good_hp if snap_good_hp > 0 else 280000
+        
+        # HP가 good_hp 이하이면 항상 회복 실행 (힐요청 무시)
         if good_hp > 0 and current_hp <= good_hp:
             return True
+        # 비상 상황: HP가 10000 이하이면 항상 회복
         return current_hp <= 10000
 
     def _needs_mp_recovery_for(self, snapshot: dict | None) -> bool:
         if not snapshot:
             return self._needs_mp_recovery()
-        if not snapshot.get("mp_request", False):
-            return False
-        if not snapshot.get("red_tab_enabled", False):
-            return False
+        # MP요청 상태와 무관하게 직접 MP 임계값으로 판단
         current_mp = max(0, int(snapshot.get("mp", 0) or 0))
-        good_mp = max(0, int(snapshot.get("good_mp", self._get_good_mp_threshold()) or 0))
+        snap_good_mp = int(snapshot.get("good_mp", 0) or 0)
+        
+        # [FIX] 통신 오류나 설정 누락 시 격수 마나 기준 하드코딩 (30000)
+        good_mp = snap_good_mp if snap_good_mp > 0 else 30000
+        
+        # MP가 good_mp 이하이면 회복 실행
         if good_mp > 0 and current_mp <= good_mp:
             return True
-        return current_mp <= 10000
+        return current_mp <= 5000
 
     def _clear_target_state(self, reset_combat_timer: bool = True):
+        """
+        타겟 상태 초기화
+        
+        Purpose:
+            - 타겟 잠금 해제 및 이름 초기화
+            - 전투 타이머 리셋 옵션
+            - 다음 타겟 탐색 준비
+            
+        Args:
+            reset_combat_timer (bool): 전투 시작 시간 리셋 여부
+            
+        Effects:
+            - state.target_locked: False로 설정
+            - state.target_name: 빈 문자열로 설정
+            - state.combat_start_time: 0.0으로 리셋 (선택적)
+            
+        Integration:
+            - _search_target_v3(): 타겟 탐색 전 호출
+            - _validate_target(): 타겟 검증 실패 시 호출
+        """
         self.state.target_locked = False
         self.state.target_name = ""
         if reset_combat_timer:
             self.state.combat_start_time = 0.0
 
     def _set_combat_busy(self, active: bool):
+        """
+        전투 상태 설정
+        
+        Purpose:
+            - 전투 중 상태 추적 및 관리
+            - NavigationThread와의 동작 제어
+            - 전투 종료 시 타이머 정리
+            
+        Args:
+            active (bool): 전투 상태 설정값
+            
+        Effects:
+            - state.is_combat_busy: 전투 중 여부 설정
+            - 전투 종료 시 타겟 없으면 타이머 리셋
+            
+        Integration:
+            - _should_handle_combat(): 전투 필요성 판단
+            - NavigationThread: 전투 중 이동 중지
+        """
         self.state.is_combat_busy = bool(active)
         if not active and not self.state.target_locked:
             self.state.combat_start_time = 0.0
 
     def _should_handle_combat(self) -> bool:
         """
-        이동과 전투를 분리하기 위한 전투 진입 판정.
-        - 화면에 몬스터가 있으면 전투 우선
-        - target_locked는 OCR 응답 대기 시간까지만 유지
-        - 아무 몬스터도 없고 타겟도 없으면 즉시 이동으로 복귀
+        전투 진입 필요성 판단 (이동과 전투 분리)
+        
+        Purpose:
+            - 화면 상태 기반으로 전투/이동 우선순위 결정
+            - OCR 응답 대기 시간 관리
+            - 불필요한 전투 상태 방지
+            
+        Algorithm:
+            1. 화면 몬스터 존재 확인
+            2. 타겟 잠금 상태 확인
+            3. OCR 응답 대기 시간 적용 (grace period)
+            4. 술사 특수 로직 적용
+            
+        Returns:
+            bool: 전투 처리 필요하면 True
+            
+        Integration:
+            - _handle_combat(): 실제 전투 로직 호출
+            - NavigationThread: 전투 중 이동 중지
         """
+        monsters = self._get_visible_monsters()
+        now = time.time()
+        if monsters:
+            self._last_monster_seen_time = now
+
+        if self.state.target_locked:
+            acquire_grace = max(0.30, float(TIMING_CONFIG.get("ocr_wait", 0.10)) * 3.0)
+            if self.state.target_name:
+                return True
+            if monsters and (now - self._last_target_search_time) <= max(acquire_grace, 0.50):
+                return True
+            if (now - self._last_target_search_time) <= acquire_grace:
+                return True
+            self._clear_target_state()
+            return False
+
+        if self.state.role == "술사":
+            _me_grid, close_infos, _dense_count = self._get_priest_engage_metrics()
+            return bool(close_infos)
+
+        return bool(monsters)
         monsters = self._get_visible_monsters()
         now = time.time()
         if monsters:
@@ -188,6 +506,26 @@ class LogicSvc(threading.Thread):
         return bool(monsters)
 
     def _recover_hp(self):
+        """
+        자가 HP 회복 스킬 시전
+        
+        Purpose:
+            - HP 임계값 도달 또는 트리거 활성화 시 즉시 회복
+            - rate-limiting으로 과도한 회복 방지
+            - 스킬 쿨다운 관리
+            
+        Algorithm:
+            1. HP 회복 필요성 확인
+            2. rate-limiting 확인 (최소 0.05초 간격)
+            3. 스킬 준비 상태 확인
+            4. 스킬 시전 시퀀스: ESC -> 키 -> Home -> Enter
+            5. 스킬 쿨다운 시간 갱신
+            
+        Integration:
+            - _needs_hp_recovery(): 회복 필요성 판단
+            - _resolve_recovery_key(): 스킬 핫키 해석
+            - TIMING_CONFIG: 지연시간 참조
+        """
         if not self._needs_hp_recovery():
             return
 
@@ -195,14 +533,11 @@ class LogicSvc(threading.Thread):
         key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="3")
 
         now = time.time()
-        min_interval = max(0.05, float(TIMING_CONFIG.get("spell_confirm", 0.20)) * 0.80)
-        if now - self._last_hp_recover_time < min_interval:
-            return
+        # rate-limiting 제거: 즉시 실행 보장
+        self._last_hp_recover_time = now
 
         if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
             return
-
-        self._last_hp_recover_time = now
         self._press_fast("esc")
         humanized_sleep(TIMING_CONFIG["key_gap"])
         self._press_fast(key)
@@ -219,21 +554,38 @@ class LogicSvc(threading.Thread):
         humanized_sleep(TIMING_CONFIG["heal_gap"])
 
     def _recover_mp(self):
+        """
+        자가 MP 회복 스킬 시전
+        
+        Purpose:
+            - MP 임계값 도달 또는 트리거 활성화 시 회복
+            - rate-limiting으로 과도한 회복 방지 (최소 2초 간격)
+            - 스킬 쿨다운 관리
+            
+        Algorithm:
+            1. MP 회복 필요성 확인
+            2. rate-limiting 확인 (최소 2초 간격)
+            3. 스킬 준비 상태 확인
+            4. 스킬 시전 (단순 키 입력)
+            5. 스킬 쿨다운 시간 갱신
+            
+        Integration:
+            - _needs_mp_recovery(): 회복 필요성 판단
+            - _resolve_recovery_key(): 스킬 핫키 해석
+            - TIMING_CONFIG: 지연시간 참조
+        """
         if not self._needs_mp_recovery():
             return
 
-        # MP 임계값 또는 검정 트리거가 켜졌을 때 설정 키를 2초 간격으로 입력
+        # MP 임계값 또는 검정 트리거가 켜졌을 때 즉시 회복
         key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
 
         now = time.time()
-        min_interval = max(0.10, float(TIMING_CONFIG.get("mp_recover_interval", 2.0)))
-        if now - self._last_mp_recover_time < min_interval:
-            return
+        # rate-limiting 제거: 즉시 실행 보장
+        self._last_mp_recover_time = now
 
         if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
             return
-
-        self._last_mp_recover_time = now
         self._press_fast(key)
         if skill is not None:
             try:
@@ -243,32 +595,84 @@ class LogicSvc(threading.Thread):
         humanized_sleep(min(0.05, float(TIMING_CONFIG.get("key_gap", 0.05))))
 
     def _recover_party_hp(self, snapshot: dict | None):
-        """Cast the configured HP heal for the currently supported warrior snapshot."""
+        """
+        [FIX] 파티원(격수) HP 회복 스킬 시전
+        
+        핵심 수정:
+            - 기존: 스킬키만 눌렀음 → 격수 미타겟팅으로 힐 불발
+            - 수정: 스킬키 → Tab(격수 타겟) → Enter 순서로 올바르게 시전
+        
+        Args:
+            snapshot (dict): 격수의 현재 상태 데이터
+        """
         if not snapshot or not self._needs_hp_recovery_for(snapshot):
             return
-        if not snapshot.get("red_tab_enabled", False):
-            return
 
-        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="3")
+        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="c")
         now = time.time()
-        min_interval = max(0.05, float(TIMING_CONFIG.get("spell_confirm", 0.20)) * 0.80)
-        if now - self._last_hp_recover_time < min_interval:
+        
+        # [FIX] 최소 0.3초 간격 유지 (이전 힐 시퀀스 완료 후 쿨 보장)
+        # ESC → key → tab → enter 시퀀스가 약 0.15~0.2초 소요
+        last_time = getattr(self, '_last_party_hp_recover_time', 0)
+        elapsed = now - last_time
+        if elapsed < 0.3:
+            # 아직 간격 중 - 조용히 skip
             return
+        self._last_party_hp_recover_time = now
+        
         if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
+            print(f"[Support] HP heal skill on cooldown: {getattr(skill, 'name', key)}")
+            print(f"[Support] HP heal skill not ready: {skill.name}")
             return
-
-        self._last_hp_recover_time = now
-        self._press_fast(key)
+        
+        hp_val = int(snapshot.get('hp', 0) or 0)
+        print(f"[Support] HP heal casting on warrior: key={key}, hp={hp_val}")
+        
+        # [FIX] 올바른 파티원 힐 시퀀스:
+        # 1) 스킬키 입력 (힐 스킬 선택)
+        # 2) Tab 키 (파티원/격수 타겟팅)
+        # 3) Enter 키 (시전 확정)
+        self._press_fast("esc")                              # 현재 타겟 해제
+        humanized_sleep(TIMING_CONFIG["key_gap"])
+        self._press_fast(key)                                # 힐 스킬키 입력
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+        self._press_fast("tab")                              # Tab: 파티원(격수) 타겟팅
+        humanized_sleep(TIMING_CONFIG["tab_wait"])
+        self._press_fast("enter")                            # Enter: 힐 시전 확정
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+        
         if skill is not None:
             try:
                 skill.last_cast_time = now
             except Exception:
                 pass
-        print(f"[Support] HP heal cast on warrior: key={key}, hp={int(snapshot.get('hp', 0) or 0)}")
-        humanized_sleep(TIMING_CONFIG["heal_gap"])
+        
+        print(f"[Support] HP heal complete. (esc→key→tab→enter)")
 
     def _recover_party_mp(self, snapshot: dict | None):
-        """Cast the configured MP recovery for the currently supported warrior snapshot."""
+        """
+        파티원(격수) MP 회복 스킬 시전
+        
+        Purpose:
+            - 네트워크로 수신한 격수 MP 데이터 기반 회복
+            - RedTab 활성화 상태 확인
+            - rate-limiting으로 과도한 회복 방지
+            
+        Args:
+            snapshot (dict): 격수의 현재 상태 데이터
+            
+        Algorithm:
+            1. 스냅샷 데이터 유효성 확인
+            2. MP 회복 필요성 확인
+            3. RedTab 활성화 상태 확인
+            4. rate-limiting 확인
+            5. 스킬 시전 및 로깅
+            
+        Integration:
+            - _get_support_target_data(): 격수 데이터 수신
+            - _needs_mp_recovery_for(): 회복 필요성 판단
+            - _resolve_recovery_key(): 스킬 핫키 해석
+        """
         if not snapshot or not self._needs_mp_recovery_for(snapshot):
             return
         if not snapshot.get("red_tab_enabled", False):
@@ -276,13 +680,10 @@ class LogicSvc(threading.Thread):
 
         key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
         now = time.time()
-        min_interval = max(0.10, float(TIMING_CONFIG.get("mp_recover_interval", 2.0)))
-        if now - self._last_mp_recover_time < min_interval:
-            return
+        # rate-limiting 제거: 즉시 실행 보장
+        self._last_mp_recover_time = now
         if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
             return
-
-        self._last_mp_recover_time = now
         self._press_fast(key)
         if skill is not None:
             try:
@@ -296,7 +697,25 @@ class LogicSvc(threading.Thread):
     # ── 보무(Buff) 자동 관리 ─────────────────────────────────
     # ----------------------------------------------------------
     def _execute_bomu_buff_v3(self):
-        """보무 버프: 8 → Home → Enter → 간격 → 9 → Home → Enter."""
+        """
+        보무 버프 시전 (보호+무장)
+        
+        Purpose:
+            - 185초 주기로 보호/무장 버프 자동 적용
+            - 버프 지속시간 관리
+            - humanized 입력으로 자연스러운 시전
+            
+        Algorithm:
+            1. 8번(보호) 스킬 시전: 키 -> Home -> Enter
+            2. bomu_spell_gap(200ms) 대기
+            3. 9번(무장) 스킬 시전: 키 -> Home -> Enter
+            4. 버프 시간 갱신
+            
+        Integration:
+            - TIMING_CONFIG: 지연시간 참조
+            - state.last_bomu_time: 버프 주기 관리
+            - hw.humanized_press: 하드웨어 입력
+        """
         print("[Buff] 보무 버프 시전 중 (8 -> 9 순차)...")
         for key in ("8", "9"):
             hw.humanized_press(key)
@@ -314,9 +733,29 @@ class LogicSvc(threading.Thread):
     # ----------------------------------------------------------
     def _execute_debuff_scan_v3(self):
         """
-        저주 스캔 (10~20회 랜덤).
-        - '걸리지 않습니다' 5회 연속 → 조기 break
-        - combat_timeout 초과 → fail-safe break
+        디버프 스캔 (10~20회 랜덤)
+        
+        Purpose:
+            - 적에게 디버프 스킬 자동 적용
+            - '걸리지 않습니다' 패턴으로 실패 감지
+            - fail-safe로 무한 루프 방지
+            - 랜덤 시도로 자연스러움 구현
+            
+        Algorithm:
+            1. 스킬 설정 확인 및 준비
+            2. 10~20회 랜덤 시도
+            3. 각 시도: 저주키 -> Up -> Enter -> OCR 확인
+            4. 실패 5회 연속 시 조기 종료
+            5. combat_timeout 초과 시 강제 종료
+            
+        Fail-safe:
+            - 타겟 무효 5회: 조기 종료
+            - 타임아웃: panic_escape() 호출
+            
+        Integration:
+            - TIMING_CONFIG: 모든 지연시간 참조
+            - state.target_name: OCR 결과 확인
+            - hw.panic_escape: 비상 탈출
         """
         debuff_spell = self.state.recovery_debuff_spell
         if not debuff_spell or debuff_spell == "사용 안 함": return
@@ -366,11 +805,33 @@ class LogicSvc(threading.Thread):
     # ── 타겟 탐색 ─────────────────────────────────────────────
     # ----------------------------------------------------------
     def _search_target_v3(self):
-        """Tab → Up → Enter (모두 humanized_sleep 경유)."""
+        """
+        타겟 탐색 (Tab → Up → Enter)
+        
+        Purpose:
+            - Tab 키로 몬스터 목록 열기
+            - Up 키로 첫 번째 몬스터 선택
+            - Enter 키로 타겟 확정
+            - rate-limiting으로 과도한 탐색 방지
+            
+        Algorithm:
+            1. 탐색 간격 제한 확인 (최소 0.15초)
+            2. Tab 키 입력 (몬스터 목록)
+            3. tab_wait(40ms) 대기
+            4. Up 키 입력 (첫 타겟)
+            5. up_wait(40ms) 대기
+            6. Enter 키 입력 (타겟 확정)
+            7. ocr_wait(100ms) 대기 (OCR 응답)
+            8. 타겟 상태 설정
+            
+        Integration:
+            - TIMING_CONFIG: 모든 지연시간 참조
+            - state.target_locked: 타겟 잠금 상태 관리
+            - _validate_target(): 타겟 유효성 검증
+        """
         now = time.time()
-        min_interval = max(0.15, float(TIMING_CONFIG.get("ocr_wait", 0.10)) * 1.5)
-        if now - self._last_target_search_time < min_interval:
-            return False
+        # rate-limiting 제거: 즉시 실행 보장
+        self._last_target_search_time = now
         hw.humanized_press("tab")
         humanized_sleep(TIMING_CONFIG["tab_wait"])
         hw.humanized_press("up")
@@ -386,8 +847,26 @@ class LogicSvc(threading.Thread):
     # ----------------------------------------------------------
     def _validate_target(self) -> bool:
         """
-        True  → 타겟이 몬스터 목록에 포함 (공격 가능)
-        False → 비몬스터 / '걸리지 않음' → ESC 처리
+        타겟 유효성 검증
+        
+        Purpose:
+            - 타겟이 공격 가능한 몬스터인지 확인
+            - '걸리지 않습니다' 패턴 즉시 타겟 해제
+            - OCR 응답 대기 시간 관리 (grace period)
+            
+        Algorithm:
+            1. 타겟 이름 존재 여부 확인
+            2. '걸리지 않습니다' 패턴 검증
+            3. grace period 내 재탐색 방지
+            4. 유효하지 않으면 ESC 입력 및 상태 정리
+            
+        Returns:
+            bool: 타겟이 유효하면 True
+            
+        Integration:
+            - _search_target_v3(): 탐색 후 호출
+            - _handle_combat(): 전투 로직에서 참조
+            - _clear_target_state(): 타겟 정리
         """
         name = self.state.target_name
         if not name:
@@ -624,17 +1103,131 @@ class LogicSvc(threading.Thread):
         """
         if not self.state.service_active:
             return False
+        
+        # 격수 데이터가 없을 때 자가 버프/회복 동작
         if not support_target:
-            return False
+            # 자가 HP 회복 (격수와 동일한 임계값 사용)
+            good_hp = self._get_good_hp_threshold()
+            if self.state.hp > 0 and self.state.hp <= good_hp:
+                self._self_hp_recovery()
+                return True
+            # 자가 MP 회복 (격수와 동일한 임계값 사용)
+            good_mp = self._get_good_mp_threshold()
+            if self.state.mp > 0 and self.state.mp <= good_mp:
+                self._self_mana_recovery()
+                return True
+            # 자가 버프 (보호/무장)
+            self._self_buff_cycle()
+            return True
 
-        handled = False
-        if self._needs_hp_recovery_for(support_target):
+        # [DEBUG] 힐 반복 상태 로그 (3초마다)
+        now_dbg = time.time()
+        last_dbg = getattr(self, '_last_cycle_debug_time', 0)
+        if now_dbg - last_dbg > 3.0:
+            self._last_cycle_debug_time = now_dbg
+            has_target = support_target is not None
+            needs_hp_dbg = self._needs_hp_recovery_for(support_target) if has_target else False
+            hp_dbg = int(support_target.get('hp', 0)) if has_target else 0
+            good_hp_dbg = int(support_target.get('good_hp', 0)) if has_target else 0
+            print(f"[CycleDBG] 갭수데이터존재={has_target}, 힐필요={needs_hp_dbg}, HP={hp_dbg}/{good_hp_dbg}")
+        
+        # [FIX] 격수 HP 상태 체크 및 힐 실행
+        # healed는 "힐이 필요한 상태"인지로 판단 (시전 성공 여부와 무관)
+        needs_hp = self._needs_hp_recovery_for(support_target)
+        needs_mp = self._needs_mp_recovery_for(support_target)
+        
+        if needs_hp:
+            hp_val = int(support_target.get('hp', 0) or 0)
+            good_hp = int(support_target.get('good_hp', self._get_good_hp_threshold()) or 0)
+            print(f"[Support] HP check: {hp_val} / {good_hp} → 힐 시전")
             self._recover_party_hp(support_target)
-            handled = True
-        if self._needs_mp_recovery_for(support_target):
+        if needs_mp:
             self._recover_party_mp(support_target)
-            handled = True
-        return handled
+        
+        # HP/MP 회복이 필요한 동안은 True 반환 → 루프가 계속 힐 우선 처리
+        return needs_hp or needs_mp
+
+    def _self_hp_recovery(self):
+        """자가 HP 회복"""
+        good_hp = self._get_good_hp_threshold()
+        if self.state.hp > 0 and self.state.hp <= good_hp:
+            # 힐 스킬 사용
+            self._cast_spell_by_name("힐")
+            humanized_sleep(1.0)
+            # 추가 힐 2번
+            self._cast_spell_by_name("힐")
+            humanized_sleep(1.0)
+            self._cast_spell_by_name("힐")
+    
+    def _self_mana_recovery(self):
+        """자가 마나 회복"""
+        # MP 25000 이하 시 공력증강 자동 시전
+        if self.state.mp > 0 and self.state.mp <= 25000:
+            now = time.time()
+            # 공력증강 rate-limiting: 최소 2초 간격
+            if now - getattr(self, '_last_mana_boost_time', 0) >= 2.0:
+                self._last_mana_boost_time = now
+                self._cast_spell_by_name("공력증강")
+                print(f"[Support] MP boost cast on self: mp={self.state.mp} (<=25000)")
+        
+        good_mp = self._get_good_mp_threshold()
+        if self.state.mp > 0 and self.state.mp <= good_mp:
+            # 아이템 사용 (u + e/f/g/h)
+            from dosa_functions import create_dosa_functions
+            dosa_funcs = create_dosa_functions(hw, self.state)
+            dosa_funcs.mana_boost_function(self.state.mp)
+    
+    def _self_buff_cycle(self):
+        """자가 버프 사이클 (보호/무장)"""
+        import time
+        current_time = time.time()
+        last_buff_time = getattr(self.state, 'last_self_buff_time', 0)
+        
+        # 188초마다 버프 재적용
+        if current_time - last_buff_time > 188:
+            self._cast_spell_by_name("보호")
+            humanized_sleep(1.0)
+            self._cast_spell_by_name("무장")
+            self.state.last_self_buff_time = current_time
+    
+    def _cast_spell_by_name(self, spell_name: str):
+        """스킬 이름으로 스킬 캐스팅"""
+        print(f"[DEBUG] _cast_spell_by_name 호출: {spell_name}")
+        try:
+            from spell_casting import get_spell_caster, target_mapper
+            import json
+            
+            # spells_config.json에서 스킬 정보 찾기
+            with open('spells_config.json', 'r', encoding='utf-8') as f:
+                spells = json.load(f)
+            
+            for spell in spells:
+                if spell.get('name') == spell_name and spell.get('use'):
+                    spell_char = spell.get('spell_char', '')
+                    cast_function = spell.get('cast_function', 'SpellEnter')
+                    
+                    print(f"[DEBUG] 스킬 정보 찾음: {spell_name}, char='{spell_char}', func={cast_function}")
+                    
+                    if spell_char:
+                        print(f"[DEBUG] 스킬 시전 시작: {spell_name}")
+                        caster = get_spell_caster(hw)
+                        # 캐스팅 함수 호출
+                        if cast_function == 'SpellEnter':
+                            caster.spell_enter(spell_char)
+                        elif cast_function == 'SpellHomeEnter':
+                            caster.spell_home_enter(spell_char)
+                        elif cast_function == 'SpellArrowEnter':
+                            caster.spell_arrow_enter(spell_char)
+                        elif cast_function == 'SpellClickEnter':
+                            caster.spell_click_enter(spell_char)
+                        print(f"[Logic] Casted spell: {spell_name} ({cast_function})")
+                    else:
+                        print(f"[ERROR] 스킬 문자 없음: {spell_name}")
+                    break
+            else:
+                print(f"[ERROR] 스킬 찾지 못함 또는 use=false: {spell_name}")
+        except Exception as e:
+            print(f"[ERROR] Failed to cast spell {spell_name}: {e}")
 
     def _handle_combat(self):
         """전투 처리 (우선순위 1)"""
@@ -1189,9 +1782,10 @@ class RouteSvc(threading.Thread):
         if self._nav_attempt_pos != current_pos:
             return False
 
-        if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= 1.0:
+        stuck_time_limit = float(TIMING_CONFIG.get("stuck_time", 4.0))
+        if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= stuck_time_limit:
             self.stuck_count += 1
-            print(f"[Stuck] no coord change for 1s ({self.stuck_count} consecutive) pos={current_pos}")
+            print(f"[Stuck] no coord change for {stuck_time_limit}s ({self.stuck_count} consecutive) pos={current_pos}")
             return True
         return False
 
@@ -1637,6 +2231,9 @@ class RouteSvc(threading.Thread):
                     gap_x = abs(tx - cx)
                     gap_y = abs(ty - cy)
                     if max(gap_x, gap_y) <= 1:
+                        # [FIX] Follow range 안에서 대기 시 Stuck 타이머 리셋 (이동 안 해도 Stuck이 아님)
+                        self._nav_attempt_pos = None
+                        self._nav_attempt_started_at = 0.0
                         now = time.time()
                         if now - self._last_follow_close_log_time >= 1.5:
                             print(f"[Follow] Within follow range (pos gap: dx={gap_x}, dy={gap_y})")

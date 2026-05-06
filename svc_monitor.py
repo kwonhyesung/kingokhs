@@ -2899,25 +2899,15 @@ class MonitorSvc(threading.Thread):
                 continue
 
             self.state.hwnd = hwnd
-
-            # ?? ?커??감시 ?비상 ?? ????????????????????
-            # ?비게이??F1) ?? ?비?? ?성?된 경우?체크
-            is_active = getattr(self.state, "f1_route_active", False) or getattr(self.state, "service_active", False)
-            if is_active:
-                if win32gui.GetForegroundWindow() != hwnd:
-                    # 비상 ?? ?행
-                    if hasattr(self.state, "f1_route_active"): self.state.f1_route_active = False
-                    if hasattr(self.state, "service_active"): self.state.service_active = False
-                    
-                    from svc_kernel import hw
-                    hw.panic_release() # 하드웨어 신호 즉시 해제
-                    _monitor_log("[Warn] 게임?비활?화 감? - 이전???해 모든 ?작??중단?니??")
-
-            # [CaptureSvc 연동] CaptureSvc가 갱신한 최신 프레임 사용
-            img_np = getattr(self.state, "last_frame", None)
-            if img_np is None:
-                time.sleep(0.01)
-                continue
+            
+            # 게임창 비활성화 감지 시 Panic Release 방지
+            if win32gui.GetForegroundWindow() != hwnd:
+                # 비상 정지 실행 (Panic Release 제외)
+                if hasattr(self.state, "f1_route_active"): self.state.f1_route_active = False
+                if hasattr(self.state, "service_active"): self.state.service_active = False
+                
+                # Panic Release 호출 제거 - 게임창 비활성화 시에도 하드웨어 신호 유지
+                _monitor_log("[Warn] 게임창 비활성화 감지 - 서비스만 중단하고 하드웨어 신호는 유지합니다.")
             
             frame_time = getattr(self.state, "last_frame_time", 0)
             if frame_time <= self.last_frame_time:
@@ -2929,7 +2919,11 @@ class MonitorSvc(threading.Thread):
             # ?? 기???고정 ??????
             ox, oy, scx, scy = self.obs_params
 
-            # img_np = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) # CaptureSvc에서 이미 변환됨
+            # CaptureSvc에서 프레임 가져오기
+            img_np = getattr(self.state, 'shared_frame', None)
+            if img_np is None:
+                time.sleep(0.01)
+                continue
 
             # [MonitorSvc] 숫자 필드 처리는 이제 NumericFieldScanner 스레드에서 전담합니다.
             # 중복 실행 방지를 위해 이 섹션을 비워둡니다.

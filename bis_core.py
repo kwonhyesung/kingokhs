@@ -45,10 +45,10 @@ DEFAULT_TIMING_CONFIG: dict = {
     "debuff_key_wait": 0.035,    # 35ms
     "debuff_up_wait" : 0.100,
     "debuff_ocr_wait": 0.150,
-    "move_hold"      : 0.150,    # 150ms (48px 이동 시간)
-    "nav_loop"       : 0.010,
+    "move_hold"      : 0.100,    # [최적화] 130ms -> 100ms (이동속도 상향, 타일 씹힘 마지노선)
+    "nav_loop"       : 0.003,   # [수정] 이동 루프 주기 추가 단축
     "idle_sleep"     : 0.100,
-    "stuck_time"     : 2.0,
+    "stuck_time"     : 4.0,     # [수정] 이동 중 4초 이상 좌표가 안 바뀌면 stuck 판정 (오탐지 방지)
     "stuck_back_hold": 0.100,    # 100ms
     "stuck_side_hold": 0.100,    # 100ms
     "combat_timeout" : 12.0,
@@ -498,8 +498,19 @@ class GameState:
 
     def _refresh_support_request_flags_unlocked(self) -> tuple[bool, bool]:
         # Refresh local support-request flags from current hp/mp state.
+        old_heal_request = self.heal_request
+        old_mp_request = self.mp_request
+        
         self.heal_request = bool(self.good_hp > 0 and self.hp > 0 and self.hp <= self.good_hp)
         self.mp_request = bool(self.good_mp > 0 and self.mp > 0 and self.mp <= self.good_mp)
+        
+        # 힐요청 상태 변경 시 로그
+        if old_heal_request != self.heal_request or old_mp_request != self.mp_request:
+            print(f"[DEBUG] 힐요청 상태 변경: HP={self.hp}, good_hp={self.good_hp}, 힐요청={self.heal_request}")
+            print(f"[DEBUG] MP요청 상태 변경: MP={self.mp}, good_mp={self.good_mp}, MP요청={self.mp_request}")
+            print(f"[DEBUG] 힐요청 조건: good_hp>0={self.good_hp>0}, hp>0={self.hp>0}, hp<=good_hp={self.hp<=self.good_hp}")
+            print(f"[DEBUG] MP요청 조건: good_mp>0={self.good_mp>0}, mp>0={self.mp>0}, mp<=good_mp={self.mp<=self.good_mp}")
+        
         return self.heal_request, self.mp_request
 
     def get_all(self) -> dict:
@@ -746,6 +757,15 @@ class BisHardware:
                 except Exception:
                     pass
                 self.ser = None
+
+    def stop_all_inputs(self, disconnect: bool = False, repeat: int = 1, delay: float = 0.05):
+        """모든 키보드/마우스 하드웨어 입력 강제 해제"""
+        for _ in range(repeat):
+            self.send_force("RELEASE_ALL")
+            if delay > 0:
+                time.sleep(delay)
+        if disconnect:
+            self.disconnect()
 
     def send(self, cmd: str):
         """

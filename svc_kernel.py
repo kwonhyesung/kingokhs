@@ -1,12 +1,12 @@
 import time
 import threading
-import serial
 import random
 import os
 import json
 import csv
 import re
 import queue
+import serial
 
 VERBOSE_STATE_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
 
@@ -51,9 +51,30 @@ TIMING_CONFIG: dict = {
 }
 
 def humanized_sleep(base_time: float, variance: float = 0.15) -> None:
-    sigma  = base_time * variance * 0.5
-    delay  = random.gauss(base_time, sigma)
-    delay  = max(base_time * 0.50, min(base_time * 2.0, delay))
+    """
+    인간처럼 자연스러운 지연시간 생성 함수 (+20% 추가 랜덤화)
+    
+    Args:
+        base_time (float): 기본 지연시간 (초 단위)
+        variance (float): 변동성 계수 (기본값 0.15 = 15% 변동)
+    
+    Algorithm:
+        1. 기존 15% + 추가 20% = 최대 35% 랜덤 변동성 적용
+        2. 가우시안 분포로 랜덤 지연시간 생성 (평균=base_time, 표준편차=base_time*final_variance*0.5)
+        3. 최소/최대 범위 제한 (50%~200% 사이)
+        4. 계산된 지연시간으로 sleep
+        
+    Purpose:
+        - Anti-cheat 탐지 회피 (기계적 패턴 방지)
+        - 자연스러운 키 입력 간격 구현
+        - 사용자 행동 패턴 시뮬레이션
+        - TIMING_CONFIG 값 기반 추가 랜덤화 (35% 변동성)
+    """
+    # 기존 15% + 추가 20% = 최대 35% 랜덤 변동성
+    final_variance = variance + 0.2
+    sigma  = base_time * final_variance * 0.5  # 표준편차 계산
+    delay  = random.gauss(base_time, sigma)  # 가우시안 분포로 랜덤 지연
+    delay  = max(base_time * 0.50, min(base_time * 2.0, delay))  # 50%~200% 범위 제한
     time.sleep(delay)
 
 def tc(key: str, variance: float = 0.15) -> float:
@@ -66,33 +87,78 @@ def tc(key: str, variance: float = 0.15) -> float:
 # ② 시스템 상태 및 환경 명칭 변경 (Anti-Cheat 대응)
 # ============================================================
 class TargetType(Enum):
-    INSTANT       = "TYPE_I"
-    TARGET_SELECT = "TYPE_S"
-    TARGET_INPUT  = "TYPE_A"
+    """
+    스킬 타겟팅 방식 정의
+    
+    Purpose:
+        - 스킬별 적절한 캐스팅 함수 매핑
+        - target_type 기반 자동 스킬 시전 로직
+        - UI에서 스킬 설정 시 선택 옵션 제공
+    """
+    INSTANT       = "TYPE_I"     # 즉발형: 바로 시전되는 스킬 (버프, 디버프 등)
+    TARGET_SELECT = "TYPE_S"     # 대상선택형: 방향키로 타겟 선택 필요 (공격 스킬 등)
+    TARGET_INPUT  = "TYPE_A"     # 대상입력형: 텍스트로 타겟 입력 필요 (특수 스킬)
 
 class AppStatus(Enum):
-    SETUP          = "ST_0"
-    IDLE           = "ST_1"
-    EMERGENCY_HEAL = "ST_2"
-    MANA_REGEN     = "ST_3"
-    BUFFING        = "ST_4"
-    DEBUFFING      = "ST_5"
-    COMBAT         = "ST_6"
-    SCANNING       = "ST_7"
-    STUCK_ESCAPE   = "ST_8"
+    """
+    애플리케이션 상태 정의 (FSM - Finite State Machine)
+    
+    Purpose:
+        - 현재 시스템 상태 추적 및 관리
+        - 상태별 우선순위 처리 로직
+        - 디버깅 및 로깅을 위한 상태 식별
+        - 상태 전환 규칙 정의
+    
+    State Flow:
+        SETUP -> IDLE -> (COMBAT/SCANNING/EMERGENCY_HEAL) -> BUFFING/MANA_REGEN -> IDLE
+    """
+    SETUP          = "ST_0"        # 초기 설정 상태: 시스템 준비 중
+    IDLE           = "ST_1"        # 대기 상태: 특별한 동작 없음, 기본 루프 실행
+    EMERGENCY_HEAL = "ST_2"        # 비상 치유 상태: HP/MP 긴급 회복 필요
+    MANA_REGEN     = "ST_3"        # 마나 재생 상태: MP 회복 스킬 사용 중
+    BUFFING        = "ST_4"        # 버프 상태: 보호/무장 버프 적용 중
+    DEBUFFING      = "ST_5"        # 디버프 상태: 적에게 디버프 스킬 사용 중
+    COMBAT         = "ST_6"        # 전투 상태: 몬스터와 전투 중
+    SCANNING       = "ST_7"        # 스캔 상태: 타겟 탐색 및 주변 스캔 중
+    STUCK_ESCAPE   = "ST_8"        # 탈출 상태: 막힘 감지 후 이동 탈출 중
 
 @dataclass
 class Skill:
-    name:           str
-    target_type:    str
-    hotkey:         Optional[str] = None
-    spell_char:     Optional[str] = None
-    enable_red_tab: bool          = False
-    category:       str           = "GENERIC"
-    cooldown:       float         = 0.0
-    last_cast_time: float         = 0.0
+    """
+    스킬 데이터 구조 정의
+    
+    Purpose:
+        - spells_config.json 스킬 정보 매핑
+        - 스킬 쿨다운 및 사용 가능 여부 관리
+        - 스킬별 속성 및 설정 저장
+        - UI에서 스킬 설정 및 관리
+    
+    Integration:
+        - spell_casting.py: 스킬 캐스팅 함수 연동
+        - bis_logic.py: 스킬 사용 로직에서 참조
+        - svc_worker.py: GUI 스킬 설정 관리
+    """
+    name:           str              # 스킬 이름 (UI 표시 및 로깅용)
+    target_type:    str              # 타겟 타입 (TargetType Enum 참조)
+    hotkey:         Optional[str] = None  # 기존 핫키 (하위 호환성용)
+    spell_char:     Optional[str] = None  # 스킬 문자 (Shift+Z+문자 조합용)
+    enable_red_tab: bool          = False  # RedTab 활성화 여부 (UI 타겟팅)
+    category:       str           = "GENERIC"  # 스킬 카테고리 (공격/회복/버프/디버프)
+    cooldown:       float         = 0.0      # 스킬 쿨다운 시간 (초 단위)
+    last_cast_time: float         = 0.0      # 마지막 스킬 사용 시간
 
     def is_ready(self) -> bool:
+        """
+        스킬 사용 가능 여부 확인
+        
+        Returns:
+            bool: 쿨다운이 지났으면 True, 아니면 False
+            
+        Purpose:
+            - 스킬 중복 사용 방지
+            - 정확한 쿨다운 계산
+            - 스킬 사용 제어 로직
+        """
         return (time.time() - self.last_cast_time) >= self.cooldown
 
 @dataclass
@@ -403,18 +469,76 @@ class BisHardware:
         self.ser   = None  # 시리얼 포트
         self._lock = threading.Lock()  # 스레드 안전성
         self.state: Optional[GameState] = None  # 게임 상태
+        self._auto_reconnect_enabled = True  # 자동 재연결 활성화
+        self._last_connect_attempt = 0  # 마지막 연결 시도 시간
+        self._preferred_port = "COM12"  # 기본 포트 설정
 
     def set_state(self, state: GameState):
         """게임 상태 설정"""
         self.state = state
+        
+        # 상태 설정 후 즉시 COM12 연결 시도
+        if self._preferred_port and not (self.ser and self.ser.is_open):
+            print(f"[Hardware] 즉시 연결 시도: {self._preferred_port}")
+            self.connect(self._preferred_port)
 
     def connect(self, port: str) -> bool:
         """시리얼 포트 연결 (115200 baud)"""
         try:
             self.ser = serial.Serial(port, 115200, timeout=1)
+            print(f"[Hardware] 연결 성공: {port}")
+            
+            # 연결 성공 후 service_active 자동 활성화
+            if self.state:
+                self.state.service_active = True
+                print("[Hardware] service_active 자동 활성화")
+            
             return True
-        except Exception:
+        except Exception as e:
+            print(f"[Hardware] 연결 실패: {port} - {e}")
             return False
+
+    def auto_reconnect(self) -> bool:
+        """자동 재연결 기능"""
+        if not self._auto_reconnect_enabled:
+            return False
+            
+        current_time = time.time()
+        # 1초 간격으로 재연결 시도 (더 빠른 재연결)
+        if current_time - self._last_connect_attempt < 1:
+            return False
+            
+        self._last_connect_attempt = current_time
+        print("[Hardware] 자동 재연결 시도 시작...")
+        
+        # 사용 가능한 모든 COM 포트 자동 검색
+        import serial.tools.list_ports
+        available_ports = [port.device for port in serial.tools.list_ports.comports()]
+        
+        if not available_ports:
+            print("[Hardware] 사용 가능한 COM 포트 없음")
+            return False
+            
+        print(f"[Hardware] 발견된 포트: {available_ports}")
+        
+        # COM12를 우선적으로 시도
+        if self._preferred_port in available_ports:
+            print(f"[Hardware] 우선 포트 시도: {self._preferred_port}")
+            if self.connect(self._preferred_port):
+                print(f"[Hardware] 우선 포트 연결 성공: {self._preferred_port}")
+                return True
+        
+        # 나머지 포트 시도
+        for port in available_ports:
+            if port == self._preferred_port:
+                continue  # 이미 시도함
+            print(f"[Hardware] 포트 시도: {port}")
+            if self.connect(port):
+                print(f"[Hardware] 자동 재연결 성공: {port}")
+                return True
+                
+        print("[Hardware] 자동 재연결 실패: 모든 포트 시도 완료")
+        return False
 
     def disconnect(self):
         """시리얼 포트 연결 해제"""
@@ -441,7 +565,7 @@ class BisHardware:
                 if current_hwnd == self.state.hwnd:
                     is_focused = True
                 # 2. 전체화면 대응: 창 제목 키워드 포함 여부 확인
-                elif any(x in window_text for x in ["바람", "AION", "ory"]):
+                elif any(x in window_text for x in ["바람","ory"]):
                     is_focused = True
             
             # ── 듀얼 모니터 지능형 차단 ────────────────────
@@ -458,10 +582,42 @@ class BisHardware:
                     payload = f"{cmd}{padding}\n".encode('ascii')
                     self.ser.write(payload)
                     print(f"[Hardware] 전송: {cmd} ({len(payload)}바이트)")
+                    
+                    # 전송 성공 후 짧은 지연으로 안정성 확보
+                    time.sleep(0.01)
+                    
                 except Exception as e:
                     print(f"[Hardware] 전송 실패: {cmd} - {e}")
+                    # 연결 끊김 감지 시 자동 재연결 시도 (Panic Release 방지)
+                    if self._auto_reconnect_enabled:
+                        print("[Hardware] 연결 끊김 감지, 자동 재연결 시도...")
+                        if self.auto_reconnect():
+                            # 재연결 성공 시 명령어 재전송
+                            try:
+                                padding = ' ' * random.randint(1, 16)
+                                payload = f"{cmd}{padding}\n".encode('ascii')
+                                self.ser.write(payload)
+                                print(f"[Hardware] 재전송 성공: {cmd}")
+                                time.sleep(0.01)
+                            except Exception as retry_e:
+                                print(f"[Hardware] 재전송 실패: {cmd} - {retry_e}")
+                        else:
+                            # 재연결 실패 시 Panic Release 방지
+                            print("[Hardware] 재연결 실패, Panic Release 방지")
             else:
                 print(f"[Hardware] 미전송: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
+                # 연결 없을 때 자동 재연결 시도
+                if self._auto_reconnect_enabled and cmd.startswith("U:"):
+                    # 키 업 명령은 재연결 후 전송 시도
+                    if self.auto_reconnect():
+                        try:
+                            padding = ' ' * random.randint(1, 16)
+                            payload = f"{cmd}{padding}\n".encode('ascii')
+                            self.ser.write(payload)
+                            print(f"[Hardware] 재연결 후 전송 성공: {cmd}")
+                            time.sleep(0.01)
+                        except Exception as e:
+                            print(f"[Hardware] 재연결 후 전송 실패: {cmd} - {e}")
             # 소프트웨어 폴백(pydirectinput)은 보안상 완전히 제거됨
 
     def send_force(self, cmd: str):
@@ -475,27 +631,125 @@ class BisHardware:
                     print(f"[Hardware] 강제전송: {cmd} ({len(payload)}바이트)")
                 except Exception as e:
                     print(f"[Hardware] 강제전송 실패: {cmd} - {e}")
+                    # 연결 끊김 시 자동 재연결 시도
+                    if self._auto_reconnect_enabled:
+                        print("[Hardware] 강제전송 실패로 자동 재연결 시도...")
+                        if self.auto_reconnect():
+                            # 재연결 성공 시 명령어 재전송
+                            try:
+                                padding = ' ' * random.randint(1, 16)
+                                payload = f"{cmd}{padding}\n".encode('ascii')
+                                self.ser.write(payload)
+                                print(f"[Hardware] 강제전송 재전송 성공: {cmd}")
+                            except Exception as retry_e:
+                                print(f"[Hardware] 강제전송 재전송 실패: {cmd} - {retry_e}")
             else:
                 print(f"[Hardware] 강제전송 불가: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
+                # 하드웨어 연결 없을 때 이동 명령어는 자동 재연결 시도
+                if self._auto_reconnect_enabled and (cmd.startswith('L') or cmd.startswith('R') or cmd.startswith('SU') or cmd.startswith('SD')):
+                    if self.auto_reconnect():
+                        try:
+                            padding = ' ' * random.randint(1, 16)
+                            payload = f"{cmd}{padding}\n".encode('ascii')
+                            self.ser.write(payload)
+                            print(f"[Hardware] 이동 명령어 재전송 성공: {cmd}")
+                        except Exception as e:
+                            print(f"[Hardware] 이동 명령어 재전송 실패: {cmd} - {e}")
+
+    def press_key(self, key: str):
+        """단일 키 다운 신호 전송"""
+        self.send(f"D:{key}")
+    
+    def release_key(self, key: str):
+        """단일 키 업 신호 전송"""
+        self.send(f"U:{key}")
 
     def panic_release(self):
         """강제 정지 시 통신 버퍼를 비우고 모든 키를 해제합니다. (락 무시)"""
+        # Panic Release 방지를 위한 조건 확인
+        if hasattr(self, '_last_panic_release_time'):
+            current_time = time.time()
+            if current_time - self._last_panic_release_time < 2.0:  # 2초 내 중복 방지
+                return  # 중복 Panic Release 방지
+        
+        self._last_panic_release_time = time.time()
         print("[Hardware] 모든 신호 강제 해제 (Panic Release)")
+        
+        # Panic Release 후 자동 재연결 시도
+        if self._auto_reconnect_enabled:
+            print("[Hardware] Panic Release 후 자동 재연결 시도...")
+            self.auto_reconnect()
         if self.ser and self.ser.is_open:
             try:
                 self.ser.reset_output_buffer()
                 self.ser.reset_input_buffer()
-                # 아두이노에 씹히지 않도록 연달아 발송
-                for _ in range(2):
-                    self.ser.write(b"RELEASE_ALL\n")
-                self.ser.flush()
-            except Exception:
-                pass
-        
-        # 명시적인 개별 키 해제 신호 송신
-        keys = ["left", "right", "up", "down", "shift", "ctrl", "alt", "esc", "space", "enter"]
-        for k in keys:
-            self.send_force(f"U:{k}")
+                # 모든 키 업 신호 전송
+                self.send("U:a")
+                self.send("U:b")
+                self.send("U:c")
+                self.send("U:d")
+                self.send("U:e")
+                self.send("U:f")
+                self.send("U:g")
+                self.send("U:h")
+                self.send("U:i")
+                self.send("U:j")
+                self.send("U:k")
+                self.send("U:l")
+                self.send("U:m")
+                self.send("U:n")
+                self.send("U:o")
+                self.send("U:p")
+                self.send("U:q")
+                self.send("U:r")
+                self.send("U:s")
+                self.send("U:t")
+                self.send("U:u")
+                self.send("U:v")
+                self.send("U:w")
+                self.send("U:x")
+                self.send("U:y")
+                self.send("U:z")
+                self.send("U:0")
+                self.send("U:1")
+                self.send("U:2")
+                self.send("U:3")
+                self.send("U:4")
+                self.send("U:5")
+                self.send("U:6")
+                self.send("U:7")
+                self.send("U:8")
+                self.send("U:9")
+                self.send("U:shift")
+                self.send("U:ctrl")
+                self.send("U:alt")
+                self.send("U:space")
+                self.send("U:enter")
+                self.send("U:esc")
+                self.send("U:tab")
+                self.send("U:up")
+                self.send("U:down")
+                self.send("U:left")
+                self.send("U:right")
+                self.send("U:home")
+                self.send("U:end")
+                self.send("U:pgup")
+                self.send("U:pgdn")
+                self.send("U:f1")
+                self.send("U:f2")
+                self.send("U:f3")
+                self.send("U:f4")
+                self.send("U:f5")
+                self.send("U:f6")
+                self.send("U:f7")
+                self.send("U:f8")
+                self.send("U:f9")
+                self.send("U:f10")
+                self.send("U:f11")
+                self.send("U:f12")
+                print("[Hardware] 모든 키 업 신호 전송 완료")
+            except Exception as e:
+                print(f"[Hardware] Panic Release 중 오류: {e}")
 
     def humanized_press(self, key: str, variance: float = 0.15):
         # HumanBehaviorSimulator로 동작 간 휴식 시간 시뮬레이션

@@ -984,8 +984,13 @@ class AppView:
         # Tab蹂??뚮뜑留??ㅼ쐞移?(由ъ냼??愿由?
         self.tab_enabled = {
             "dash": True,   # ?レ옄 ?쇰꺼 ?낅뜲?댄듃
-            "nav": True     # ?ㅻ퉬寃뚯씠???곹깭
+            "nav": True,    # ?ㅻ퉬寃뚯씠???곹깭
+            "spells": True # 스킬 설정
         }
+        
+        # 스킬 설정 관련 변수
+        self.spell_entries = []
+        self.spell_vars = {}
         self.update_fast_labels()
         self.update_slow_ui()
         
@@ -1031,6 +1036,10 @@ class AppView:
         self.t_nav = self.tabview.add("NAV")
         self.c_nav = ctk.CTkScrollableFrame(self.t_nav, fg_color="transparent", label_text="")
         self.c_nav.pack(expand=True, fill="both", padx=1, pady=1)
+        
+        self.t_spells = self.tabview.add("SPELLS")
+        self.c_spells = ctk.CTkScrollableFrame(self.t_spells, fg_color="transparent", label_text="")
+        self.c_spells.pack(expand=True, fill="both", padx=1, pady=1)
 
         # Dashboard Tab - Ultra-Compact
         top_actions = ctk.CTkFrame(self.c_dash, fg_color="transparent")
@@ -1174,11 +1183,194 @@ class AppView:
 
         # Navigation & Control Tab
         self.build_navigation_control()
+        
+        # Spells Configuration Tab
+        self.build_spells_configuration()
 
         # Footer / Toast Area
         self.toast_lbl = ctk.CTkLabel(self.root, text="", font=("Inter", 10, "bold"), text_color="#10B981")
         self.toast_lbl.pack(side="bottom", pady=5)
 
+    def build_spells_configuration(self):
+        """스킬 설정 탭 UI 구현"""
+        # 스킬 설정 헤더
+        header_frame = ctk.CTkFrame(self.c_spells, fg_color="#1A1C23", corner_radius=6)
+        header_frame.pack(fill="x", padx=2, pady=2)
+        
+        ctk.CTkLabel(header_frame, text="스킬 설정 관리", font=("Inter", 12, "bold"), text_color="#00D4FF").pack(side="left", padx=10, pady=5)
+        
+        # 저장 버튼
+        self.btn_save_spells = ctk.CTkButton(header_frame, text="저장", height=25, width=60, font=("Inter", 9, "bold"), fg_color="#10B981", command=self.save_spells_config)
+        self.btn_save_spells.pack(side="right", padx=10, pady=5)
+        
+        # 새로운 스킬 추가 버튼
+        self.btn_add_spell = ctk.CTkButton(header_frame, text="+ 스킬 추가", height=25, width=80, font=("Inter", 9), fg_color="#3B82F6", command=self.add_new_spell)
+        self.btn_add_spell.pack(side="right", padx=5, pady=5)
+        
+        # 스킬 설정 목록
+        self.spells_list_frame = ctk.CTkFrame(self.c_spells, fg_color="#14161B", corner_radius=6)
+        self.spells_list_frame.pack(fill="both", expand=True, padx=2, pady=2)
+        
+        # 스킬 목록 헤더
+        list_header = ctk.CTkFrame(self.spells_list_frame, fg_color="#1E2129", height=25)
+        list_header.pack(fill="x", padx=2, pady=2)
+        list_header.pack_propagate(False)
+        
+        ctk.CTkLabel(list_header, text="스킬명", font=("Inter", 9, "bold"), width=80).pack(side="left", padx=5)
+        ctk.CTkLabel(list_header, text="타겟", font=("Inter", 9, "bold"), width=60).pack(side="left", padx=5)
+        ctk.CTkLabel(list_header, text="키", font=("Inter", 9, "bold"), width=30).pack(side="left", padx=5)
+        ctk.CTkLabel(list_header, text="함수", font=("Inter", 9, "bold"), width=80).pack(side="left", padx=5)
+        ctk.CTkLabel(list_header, text="카테고리", font=("Inter", 9, "bold"), width=50).pack(side="left", padx=5)
+        ctk.CTkLabel(list_header, text="사용", font=("Inter", 9, "bold"), width=30).pack(side="left", padx=5)
+        ctk.CTkLabel(list_header, text="RedTab", font=("Inter", 9, "bold"), width=40).pack(side="left", padx=5)
+        ctk.CTkLabel(list_header, text="작업", font=("Inter", 9, "bold"), width=60).pack(side="right", padx=5)
+        
+        # 스킬 목록 스크롤 영역
+        self.spells_scroll_frame = ctk.CTkScrollableFrame(self.spells_list_frame, fg_color="transparent", height=400)
+        self.spells_scroll_frame.pack(fill="both", expand=True, padx=2, pady=2)
+        
+        # 기존 스킬 로드
+        self.load_spells_to_ui()
+    
+    def load_spells_to_ui(self):
+        """spells_config.json에서 스킬 정보를 UI에 로드"""
+        try:
+            with open(self.spell_db_path, 'r', encoding='utf-8') as f:
+                spells_data = json.load(f)
+            
+            # 기존 엔트리 삭제
+            for widget in self.spells_scroll_frame.winfo_children():
+                widget.destroy()
+            
+            self.spell_entries = []
+            self.spell_vars = {}
+            
+            # 각 스킬에 대한 UI 엔트리 생성
+            for i, spell in enumerate(spells_data):
+                self.create_spell_entry(i, spell)
+                
+        except Exception as e:
+            print(f"[ERROR] 스킬 로드 실패: {e}")
+    
+    def create_spell_entry(self, index, spell_data):
+        """개별 스킬 설정 UI 엔트리 생성"""
+        entry_frame = ctk.CTkFrame(self.spells_scroll_frame, fg_color="#1E2129", corner_radius=4)
+        entry_frame.pack(fill="x", padx=2, pady=1)
+        
+        # 스킬 데이터 변수들
+        vars_dict = {
+            'name': ctk.StringVar(value=spell_data.get('name', '')),
+            'target_type': ctk.StringVar(value=spell_data.get('target_type', '대상선택형')),
+            'spell_char': ctk.StringVar(value=spell_data.get('spell_char', '')),
+            'cast_function': ctk.StringVar(value=spell_data.get('cast_function', 'SpellArrowEnter')),
+            'category': ctk.StringVar(value=spell_data.get('category', '공격')),
+            'use': ctk.BooleanVar(value=spell_data.get('use', True)),
+            'enable_red_tab': ctk.BooleanVar(value=spell_data.get('enable_red_tab', False))
+        }
+        
+        # 스킬명
+        name_entry = ctk.CTkEntry(entry_frame, textvariable=vars_dict['name'], width=80, height=20, font=("Inter", 8))
+        name_entry.pack(side="left", padx=2, pady=2)
+        
+        # 타겟 타입
+        target_combo = ctk.CTkComboBox(entry_frame, variable=vars_dict['target_type'], values=["대상선택형", "즉발형", "대상입력형"], width=60, height=20, font=("Inter", 8))
+        target_combo.pack(side="left", padx=2, pady=2)
+        
+        # 스킬 문자
+        char_entry = ctk.CTkEntry(entry_frame, textvariable=vars_dict['spell_char'], width=30, height=20, font=("Inter", 8))
+        char_entry.pack(side="left", padx=2, pady=2)
+        
+        # 캐스팅 함수
+        func_combo = ctk.CTkComboBox(entry_frame, variable=vars_dict['cast_function'], values=["SpellArrowEnter", "SpellHomeEnter", "SpellEnter", "SpellClickEnter"], width=80, height=20, font=("Inter", 8))
+        func_combo.pack(side="left", padx=2, pady=2)
+        
+        # 카테고리
+        cat_combo = ctk.CTkComboBox(entry_frame, variable=vars_dict['category'], values=["공격", "회복", "디버프", "버프"], width=50, height=20, font=("Inter", 8))
+        cat_combo.pack(side="left", padx=2, pady=2)
+        
+        # 사용 체크박스
+        use_check = ctk.CTkCheckBox(entry_frame, variable=vars_dict['use'], width=30, height=20)
+        use_check.pack(side="left", padx=2, pady=2)
+        
+        # RedTab 체크박스
+        red_check = ctk.CTkCheckBox(entry_frame, variable=vars_dict['enable_red_tab'], width=40, height=20)
+        red_check.pack(side="left", padx=2, pady=2)
+        
+        # 작업 버튼들
+        btn_frame = ctk.CTkFrame(entry_frame, fg_color="transparent")
+        btn_frame.pack(side="right", padx=2, pady=2)
+        
+        # 삭제 버튼
+        del_btn = ctk.CTkButton(btn_frame, text="삭제", height=20, width=30, font=("Inter", 7), fg_color="#EF4444", command=lambda: self.delete_spell_entry(index))
+        del_btn.pack(side="right", padx=1)
+        
+        # 저장 정보 저장
+        self.spell_entries.append(entry_frame)
+        self.spell_vars[index] = vars_dict
+    
+    def add_new_spell(self):
+        """새로운 스킬 추가"""
+        new_spell = {
+            "name": f"새 스킬 {len(self.spell_entries) + 1}",
+            "target_type": "대상선택형",
+            "use": True,
+            "enable_red_tab": False,
+            "spell_char": "",
+            "cast_function": "SpellArrowEnter",
+            "category": "공격"
+        }
+        self.create_spell_entry(len(self.spell_entries), new_spell)
+    
+    def delete_spell_entry(self, index):
+        """스킬 엔트리 삭제"""
+        if index < len(self.spell_entries):
+            self.spell_entries[index].destroy()
+            del self.spell_entries[index]
+            del self.spell_vars[index]
+            # 인덱스 재정렬
+            self.reindex_spell_entries()
+    
+    def reindex_spell_entries(self):
+        """스킬 엔트리 인덱스 재정렬"""
+        new_vars = {}
+        for i, entry in enumerate(self.spell_entries):
+            if i in self.spell_vars:
+                new_vars[i] = self.spell_vars[i]
+        self.spell_vars = new_vars
+    
+    def save_spells_config(self):
+        """스킬 설정을 JSON 파일로 저장"""
+        try:
+            spells_data = []
+            
+            for i in range(len(self.spell_entries)):
+                if i in self.spell_vars:
+                    vars_dict = self.spell_vars[i]
+                    spell_data = {
+                        "name": vars_dict['name'].get(),
+                        "target_type": vars_dict['target_type'].get(),
+                        "use": vars_dict['use'].get(),
+                        "enable_red_tab": vars_dict['enable_red_tab'].get(),
+                        "spell_char": vars_dict['spell_char'].get(),
+                        "cast_function": vars_dict['cast_function'].get(),
+                        "category": vars_dict['category'].get()
+                    }
+                    spells_data.append(spell_data)
+            
+            # JSON 파일로 저장
+            with open(self.spell_db_path, 'w', encoding='utf-8') as f:
+                json.dump(spells_data, f, ensure_ascii=False, indent=4)
+            
+            # 성공 메시지
+            self.show_toast("스킬 설정이 저장되었습니다.", "#10B981")
+            
+            # 시스템에 스킬 데이터 리로드
+            self.load_spells_db()
+            
+        except Exception as e:
+            print(f"[ERROR] 스킬 저장 실패: {e}")
+            self.show_toast("스킬 저장 실패", "#EF4444")
+    
     def open_calibration_popup(self):
         print("[DEBUG]")
         pop = getattr(self, "calibration_popup", None)
@@ -3154,6 +3346,8 @@ class AppView:
 
     def toggle_service(self):
         self._toggle_control_mode("FOLLOW_SERVICE", "Follow+Service")
+        # [FIX] 중복 힐 코드 제거 - bis_logic.py의 _run_dosa_service_cycle이 이미 힐을 처리함
+        # 별도 LogicSvc 생성 시 타이머 충돌 발생 → 삭제
 
     def set_game_scale(self, scale: float):
         """Worker for the F1 route thread."""
@@ -3986,14 +4180,7 @@ class AppView:
     def run(self):
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         
-        # ?꾩뿭 ?ロ궎 ?ㅼ젙
-        try:
-            keyboard.add_hotkey("f1", self.toggle_follow)
-            keyboard.add_hotkey("f2", self.toggle_service)
-            keyboard.add_hotkey("f3", self.toggle_pause_resume)
-            keyboard.add_hotkey("f4", self.emergency_exit)
-        except Exception as e:
-            print(f"[Warn] Hotkey Registration Failed: {e}")
+        # 핫키 등록은 main() 함수에서 이미 처리됨
         
         # ??대㉧??__init__?먯꽌 ?대? ?쒖옉??(update_fast_labels, update_slow_ui)
         self.root.update()
@@ -4136,8 +4323,44 @@ def main(
     action_thread = LogicSvc(state)  # FSM 濡쒖쭅
     nav_thread = RouteSvc(state)  # ?ㅻ퉬寃뚯씠??
     
-    # GUI ?앹꽦 (hwnd ?꾨떖)
-    gui = AppView(state, hwnd=hwnd)
+    # 핫키 등록 (GUI 초기화 전에 먼저 등록)
+    print("[DEBUG] 핫키 등록 시작...")
+    try:
+        keyboard.add_hotkey("f1", lambda: None)  # 임시 함수
+        keyboard.add_hotkey("f2", lambda: None)  # 임시 함수
+        keyboard.add_hotkey("f3", lambda: None)  # 임시 함수
+        keyboard.add_hotkey("f4", lambda: None)  # 임시 함수
+        print("[DEBUG] 핫키 등록 성공")
+        
+        # 임시 핫키 제거 및 실제 함수 등록
+        keyboard.remove_hotkey("f1")
+        keyboard.remove_hotkey("f2")
+        keyboard.remove_hotkey("f3")
+        keyboard.remove_hotkey("f4")
+        
+        def register_hotkeys(gui_instance):
+            try:
+                keyboard.add_hotkey("f1", gui_instance.toggle_follow)
+                print("[DEBUG] F1 핫키 등록 성공")
+                keyboard.add_hotkey("f2", gui_instance.toggle_service)
+                print("[DEBUG] F2 핫키 등록 성공")
+                keyboard.add_hotkey("f3", gui_instance.toggle_pause_resume)
+                print("[DEBUG] F3 핫키 등록 성공")
+                keyboard.add_hotkey("f4", gui_instance.emergency_exit)
+                print("[DEBUG] F4 핫키 등록 성공")
+            except Exception as e:
+                print(f"[Warn] Hotkey Registration Failed: {e}")
+        
+        # GUI ?앹꽦 (hwnd ?꾨떖)
+        gui = AppView(state, hwnd=hwnd)
+        
+        # GUI 생성 후 핫키 등록
+        register_hotkeys(gui)
+        
+    except Exception as e:
+        print(f"[ERROR] 핫키 등록 실패: {e}")
+        # GUI ?앹꽦 (hwnd ?꾨떖)
+        gui = AppView(state, hwnd=hwnd)
     
     # 연결 상태 변경 콜백 함수 (UI 업데이트는 AppView에서 주기적으로 수행함)
     def on_connection_change(is_connected):

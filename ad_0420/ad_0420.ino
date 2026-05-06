@@ -5,11 +5,18 @@
 USBHIDKeyboard Keyboard;
 USBHIDMouse Mouse;
 
+// 버퍼 사이즈 최대로 확장
+#define SERIAL_BUFFER_SIZE 1024
+#define COMMAND_BUFFER_SIZE 512
+
 void setup() {
   Keyboard.begin();
   Mouse.begin();
   USB.begin();
   Serial.begin(115200);
+  
+  // 시리얼 버퍼 사이즈 최대로 설정
+  Serial.setRxBufferSize(SERIAL_BUFFER_SIZE);
 }
 
 // 문자열에서 특정 인덱스의 인자를 추출하는 함수
@@ -88,9 +95,15 @@ uint8_t getSpecialKey(String keyName) {
 
 void loop() {
   if (Serial.available() > 0) {
+    // 확장된 버퍼로 명령어 수신
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
     if (cmd.length() == 0) return;
+    
+    // 명령어 길이 제한으로 버퍼 오버플로우 방지
+    if (cmd.length() > COMMAND_BUFFER_SIZE) {
+      cmd = cmd.substring(0, COMMAND_BUFFER_SIZE);
+    }
 
     // --- 1. 단축 명령어 (사용자 최신 hardware_input.py 호환) ---
     if (cmd == "L") { Mouse.click(MOUSE_LEFT); }

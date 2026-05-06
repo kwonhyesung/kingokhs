@@ -607,10 +607,10 @@ class MonitorSvc(threading.Thread):
             if self.state.service_active:
                 if win32gui.GetForegroundWindow() != hwnd:
                     self.state.service_active = False
-                    dev_link.panic_release() # 하드웨어 신호 즉시 소거
-                    print("[Warn] 게임창 비활성화 감지 - 비상 정지 실행")
+                    # Panic Release 호출 제거 - 게임창 비활성화 시에도 하드웨어 신호 유지
+                    print("[Warn] 게임창 비활성화 감지 - 서비스만 중단하고 하드웨어 신호는 유지합니다.")
                     if hasattr(self.state, "gui"):
-                        self.state.gui.log("🚨 [비상정지] 게임창 포커스 해제됨")
+                        self.state.gui.log("🚨 [서비스 중단] 게임창 포커스 해제됨")
 
             ret, frame = cap.read()
             if not ret: time.sleep(0.1); continue

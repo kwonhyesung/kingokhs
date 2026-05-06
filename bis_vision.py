@@ -2302,13 +2302,12 @@ class MonitorSvc(threading.Thread):
             is_active = getattr(self.state, "f1_route_active", False) or getattr(self.state, "service_active", False)
             if is_active:
                 if win32gui.GetForegroundWindow() != hwnd:
-                    # 비상 ?? ?행
+                    # 비상 정지 실행 (Panic Release 제외)
                     if hasattr(self.state, "f1_route_active"): self.state.f1_route_active = False
                     if hasattr(self.state, "service_active"): self.state.service_active = False
                     
-                    from bis_core import hw
-                    hw.panic_release() # 하드웨어 신호 즉시 해제
-                    print("[Warn] 게임?비활?화 감? - 이전???해 모든 ?작??중단?니??")
+                    # Panic Release 호출 제거 - 게임창 비활성화 시에도 하드웨어 신호 유지
+                    print("[Warn] 게임창 비활성화 감지 - 서비스만 중단하고 하드웨어 신호는 유지합니다.")
 
             # ?? 카메?에???레???기 (최신 ?레??강제 ?기?? ????????
             # 버퍼???인 과거 ?레?을 무시?고 가??최신 ?레?을 가?오??해 grab() 반복
