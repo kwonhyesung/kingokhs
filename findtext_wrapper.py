@@ -122,97 +122,108 @@ class FindText:
                              err1: float = 0.1, err0: float = 0.1, 
                              find_all: bool = True) -> List[Dict[str, Any]]:
         """
-        ft.ahk Native 방식의 템플릿 매칭 (Python 포팅 - mode=2 Gray Threshold)
-        
-        Args:
-            roi_bgr: ROI 영역 (BGR)
-            p: 패턴 딕셔너리 {'bitmap': np.ndarray, 'width': int, 'height': int, 'color': int}
-            err1: 글자 픽셀 오차 허용율 (0.1 = 10%)
-            err0: 배경 픽셀 오차 허용율 (0.1 = 10%)
-            find_all: 모든 매칭 반환 여부
-        
-        Returns:
-            매칭 결과 리스트 [{'x': int, 'y': int, 'w': int, 'h': int, 'id': str}, ...]
+        ft.ahk Native 방식의 템플릿 매칭 Python 완전 구현.
+        - mode=1 (Color Mode): fg/bg 색상 직접 비교 (FF5757-323232 형식)
+        - mode=2 (Gray Threshold): ft.ahk 가중치 그레이스케일 이진화 방식
         """
-        # 1. ft.ahk 방식 이진화 (mode=2: Gray Threshold Mode)
-        thr = p.get('color', 127)
-        c = (thr + 1) << 7  # ft.ahk: c=(c+1)<<7
-        # ft.ahk: Bmp[2+o]*38+Bmp[1+o]*75+Bmp[o]*15 < c
-        # BGR 순서: B=0, G=1, R=2
-        gray = roi_bgr[:,:,2].astype(np.uint32)*38 + roi_bgr[:,:,1].astype(np.uint32)*75 + roi_bgr[:,:,0].astype(np.uint32)*15
-        screen_bin = (gray < c).astype(np.uint8)
-        
-        # PatternMatcher의 decode_ahk_pattern이 이미 0/1 비트맵을 반환하므로 추가 이진화 제거
-        pattern_bin = p['bitmap'].astype(np.uint8)
-
-        # 2. 매칭 좌표 추출 (ft.ahk 원래 방식: '1'이 글자 픽셀)
-        y1_idx, x1_idx = np.where(pattern_bin == 1)  # 글자 픽셀 (1)
-        y0_idx, x0_idx = np.where(pattern_bin == 0)  # 배경 픽셀 (0)
-
-        len1, len0 = len(y1_idx), len(y0_idx)
-        
-        # ft.ahk: err1=(len1*err1)>>10, err0=(len0*err0)>>10
-        e1_max = (len1 * int(err1 * 1024)) >> 10
-        e0_max = (len0 * int(err0 * 1024)) >> 10
-        
-        # ft.ahk: if (err1>=len1) len1=0; if (err0>=len0) len0=0
-        if e1_max >= len1:
-            len1 = 0
-        if e0_max >= len0:
-            len0 = 0
-
-        # 디버그: 비활성화 (CPU 부하 감소)
-        # if not hasattr(self, '_debug_match_logged'):
-        #     print(f"[FindText] _template_match_native: screen shape={screen_bin.shape}, pattern shape={pattern_bin.shape}, len1={len1}, len0={len0}, e1_max={e1_max}, e0_max={e0_max}")
-        #     print(f"[FindText] screen_bin sum={np.sum(screen_bin)}, pattern_bin sum={np.sum(pattern_bin)}")
-        #     print(f"[FindText] screen_bin sample: {screen_bin[0:5, 0:5]}")
-        #     print(f"[FindText] pattern_bin sample: {pattern_bin[0:5, 0:5]}")
-        #     self._debug_match_logged = True
-
-        # 실시간 이진화 디버그 저장 (비활성화)
-        # try:
-        #     os.makedirs("ocr_debug", exist_ok=True)
-        #     cv2.imwrite("ocr_debug/current_screen_bin.png", screen_bin * 255)
-        #     print(f"[FindText] Saved screen_bin to ocr_debug/current_screen_bin.png")
-        # except Exception as e:
-        #     print(f"[FindText] Failed to save screen_bin: {e}")
-
-        sh, sw = screen_bin.shape
+        mode = p.get('mode', 2)
+        pattern_bin = p['bitmap'].astype(np.uint8)  # 0 또는 1
         ph, pw = pattern_bin.shape
-        
+        sh, sw = roi_bgr.shape[:2]
+
         if ph > sh or pw > sw:
             return []
 
+        # ── 글자(1) / 배경(0) 픽셀 인덱스 ──
+        y1_idx, x1_idx = np.where(pattern_bin == 1)
+        y0_idx, x0_idx = np.where(pattern_bin == 0)
+        len1, len0 = len(y1_idx), len(y0_idx)
+
+        # ft.ahk 오차 한도 계산: (len * err) >> 10
+        e1_max = max(0, (len1 * int(err1 * 1024)) >> 10)
+        e0_max = max(0, (len0 * int(err0 * 1024)) >> 10)
+        # len이 0이면 해당 체크 비활성화
+        if e1_max >= len1: len1 = 0
+        if e0_max >= len0: len0 = 0
+
         results = []
-        min_mismatch1 = len1
-        min_mismatch0 = len0
+
+        if mode == 1:
+            # ── Color Mode: 전경색(fg)·배경색(bg) 직접 비교 ──
+            # ft.ahk mode=1: 비트맵 1 픽셀 → fg_color ± 허용오차, 0 픽셀 → bg_color ± 허용오차
+            fg_color = p.get('fg_color')  # (R, G, B) or None
+            bg_color = p.get('bg_color')  # (R, G, B) or None
+
+            # fg/bg 색상이 없으면 gray threshold로 폴백
+            if fg_color is None:
+                mode = 2
+            else:
+                # ft.ahk 기본 허용 오차: err1/err0 로부터 각 채널 최대 편차 계산
+                # 색상 오차 = max(R편차, G편차, B편차) 대신 각 채널 독립 비교
+                # err1 허용 픽셀 수(전경), err0 허용 픽셀 수(배경)
+                fg_r, fg_g, fg_b = fg_color
+                screen_r = roi_bgr[:, :, 2].astype(np.int32)  # BGR -> R
+                screen_g = roi_bgr[:, :, 1].astype(np.int32)
+                screen_b = roi_bgr[:, :, 0].astype(np.int32)  # BGR -> B
+
+                # 색상 편차 허용 범위 (각 채널 ±variation)
+                color_var = 30  # 기본 ±30 허용 (ft.ahk 기본 오차 수준)
+
+                # 각 픽셀이 전경색에 해당하는지 여부 맵
+                fg_match_map = (
+                    (np.abs(screen_r - fg_r) <= color_var) &
+                    (np.abs(screen_g - fg_g) <= color_var) &
+                    (np.abs(screen_b - fg_b) <= color_var)
+                ).astype(np.uint8)
+
+                if bg_color is not None:
+                    bg_r, bg_g, bg_b = bg_color
+                    bg_match_map = (
+                        (np.abs(screen_r - bg_r) <= color_var) &
+                        (np.abs(screen_g - bg_g) <= color_var) &
+                        (np.abs(screen_b - bg_b) <= color_var)
+                    ).astype(np.uint8)
+                else:
+                    bg_match_map = None
+
+                for y in range(sh - ph + 1):
+                    for x in range(sw - pw + 1):
+                        # 비트맵 1 픽셀 → 전경색 일치 확인
+                        if len1 > 0:
+                            fg_crop = fg_match_map[y:y+ph, x:x+pw]
+                            mismatch1 = int(np.sum(fg_crop[y1_idx, x1_idx] == 0))
+                            if mismatch1 > e1_max:
+                                continue
+                        # 비트맵 0 픽셀 → 배경색 일치 확인
+                        if len0 > 0 and bg_match_map is not None:
+                            bg_crop = bg_match_map[y:y+ph, x:x+pw]
+                            mismatch0 = int(np.sum(bg_crop[y0_idx, x0_idx] == 0))
+                            if mismatch0 > e0_max:
+                                continue
+                        results.append({'x': x, 'y': y, 'w': pw, 'h': ph, 'id': p.get('comment', '')})
+                        if not find_all:
+                            return results
+                return results
+
+        # ── mode=2 Gray Threshold Mode (ft.ahk 기본) ──
+        # ft.ahk: gray = R*38 + G*75 + B*15, screen_bin = (gray < (thr+1)<<7)
+        thr = p.get('color', 127)
+        c = (thr + 1) << 7
+        gray = (roi_bgr[:,:,2].astype(np.uint32)*38
+              + roi_bgr[:,:,1].astype(np.uint32)*75
+              + roi_bgr[:,:,0].astype(np.uint32)*15)
+        screen_bin = (gray < c).astype(np.uint8)
 
         for y in range(sh - ph + 1):
             for x in range(sw - pw + 1):
                 crop = screen_bin[y:y+ph, x:x+pw]
-                
-                mismatch1 = 0
-                if len1 > 0:
-                    mismatch1 = np.sum(crop[y1_idx, x1_idx] == 0)
-                    min_mismatch1 = min(min_mismatch1, mismatch1)
-                    if mismatch1 > e1_max:
-                        continue
-                
-                mismatch0 = 0
-                if len0 > 0:
-                    mismatch0 = np.sum(crop[y0_idx, x0_idx] == 1)
-                    min_mismatch0 = min(min_mismatch0, mismatch0)
-                    if mismatch0 > e0_max:
-                        continue
-                
+                if len1 > 0 and np.sum(crop[y1_idx, x1_idx] == 0) > e1_max:
+                    continue
+                if len0 > 0 and np.sum(crop[y0_idx, x0_idx] == 1) > e0_max:
+                    continue
                 results.append({'x': x, 'y': y, 'w': pw, 'h': ph, 'id': p.get('comment', '')})
                 if not find_all:
                     return results
-
-        # 디버그: 최소 mismatch 로그
-        if not hasattr(self, '_debug_min_mismatch_logged'):
-            print(f"[FindText] Min mismatch: mismatch1={min_mismatch1}/{len1}, mismatch0={min_mismatch0}/{len0}, e1_max={e1_max}, e0_max={e0_max}, results={len(results)}")
-            self._debug_min_mismatch_logged = True
 
         return results
     
@@ -251,10 +262,6 @@ class FindText:
             comment = comment_match.group(1)
             text = text[comment_match.end():]
         
-        # 형식: *[color]$width.base64data
-        # 예: *117$18.zzzzzzzVzzVzy0Dy0Dy0DkS3kS3kS3kS3kS3kS3kS3kS3kS3kS3kS3y0Dy0DzVzzVzzzzzzzzzzU
-        # 여기서 *117은 color 부분, $ 뒤에 width.base64data
-        
         # $로 분리
         if '$' not in text:
             return None
@@ -263,9 +270,7 @@ class FindText:
         color_part = parts[0]
         data_part = parts[1]
         
-        # color_part에서 모드 결정 (ft.ahk PicInfo 함수 참조)
-        # mode:=InStr(color,"##") ? 5 : InStr(color,"#") ? 4
-        #   : InStr(color,"**") ? 3 : InStr(color,"*") ? 2 : 1
+        # color_part에서 모드 결정
         if '##' in color_part:
             mode = 5
         elif '#' in color_part:
@@ -277,16 +282,46 @@ class FindText:
         else:
             mode = 1
         
-        # color 값 추출 (숫자 부분)
-        # 예: *117 -> 117
-        color_str = color_part.replace('*', '').replace('#', '').replace('@', '-')
-        try:
-            color_value = int(color_str) if color_str else 0
-        except:
-            color_value = 0
+        # color 값 추출
+        color_str = color_part.replace('*', '').replace('#', '').replace('@', '-').strip()
+        
+        # mode=1 (Color Mode): 'RRGGBB' 또는 'RRGGBB-RRGGBB' 형식
+        fg_color = None
+        bg_color = None
+        color_value = 0
+        
+        if mode == 1:
+            clean = color_str.replace('0x', '').replace('0X', '').strip()
+            if '-' in clean:
+                parts2 = clean.split('-', 1)
+                fg_hex = parts2[0].strip()
+                bg_hex = parts2[1].strip()
+            else:
+                fg_hex = clean.strip()
+                bg_hex = None
+            try:
+                if len(fg_hex) == 6:
+                    r = int(fg_hex[0:2], 16)
+                    g = int(fg_hex[2:4], 16)
+                    b = int(fg_hex[4:6], 16)
+                    fg_color = (r, g, b)
+            except Exception:
+                fg_color = None
+            try:
+                if bg_hex and len(bg_hex) == 6:
+                    r = int(bg_hex[0:2], 16)
+                    g = int(bg_hex[2:4], 16)
+                    b = int(bg_hex[4:6], 16)
+                    bg_color = (r, g, b)
+            except Exception:
+                bg_color = None
+        else:
+            try:
+                color_value = int(color_str) if color_str else 0
+            except Exception:
+                color_value = 0
         
         # data_part에서 width와 base64 추출
-        # 형식: width.base64data
         dot_match = re.match(r'(\d+)\.([\w+/]+)', data_part)
         if not dot_match:
             return None
@@ -299,10 +334,10 @@ class FindText:
         
         # 높이 계산
         height = len(bit_string) // width
-        if len(bit_string) != width * height:
-            print(f"Warning: bit string length {len(bit_string)} doesn't match width {width}")
+        if height == 0:
+            return None
         
-        # 비트맵 생성
+        # 비트맵 생성 (0 또는 1)
         bitmap = np.zeros((height, width), dtype=np.uint8)
         for i, bit in enumerate(bit_string):
             if i < width * height:

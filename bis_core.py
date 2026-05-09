@@ -108,17 +108,19 @@ def display_game_hotkey(key: str | None) -> str:
         return ""
     return GAME_HOTKEY_DISPLAY_ALIAS.get(normalized, normalized)
 
-def humanized_sleep(base_time: float, variance: float = 0.15) -> None:
+def humanized_sleep(base_time: float, variance: float = 0.40) -> None:
+    # variance를 0.40 (40%)로 높여 랜덤 범위를 대폭 늘립니다.
     sigma  = base_time * variance * 0.5
     delay  = random.gauss(base_time, sigma)
-    delay  = max(base_time * 0.50, min(base_time * 2.0, delay))
+    # 최소 20%에서 최대 300%까지의 랜덤한 지연 시간을 허용합니다. (안티치트 회피용)
+    delay  = max(base_time * 0.20, min(base_time * 3.0, delay))
     time.sleep(delay)
 
-def tc(key: str, variance: float = 0.15) -> float:
+def tc(key: str, variance: float = 0.40) -> float:
     base = TIMING_CONFIG.get(key, 0.05)
     sigma = base * variance * 0.5
     v = random.gauss(base, sigma)
-    return max(base * 0.50, min(base * 2.0, v))
+    return max(base * 0.20, min(base * 3.0, v))
 
 # ============================================================
 # ② 시스템 상태 및 환경 명칭 변경 (Anti-Cheat 대응)
@@ -748,6 +750,16 @@ class BisHardware:
         except Exception:
             return False
 
+    def press_key(self, key: str):
+        """단일 키 다운 신호 전송"""
+        actual_key = display_game_hotkey(key)
+        self.send(f"D:{actual_key}")
+    
+    def release_key(self, key: str):
+        """단일 키 업 신호 전송"""
+        actual_key = display_game_hotkey(key)
+        self.send(f"U:{actual_key}")
+
     def disconnect(self):
         """시리얼 포트 연결 해제"""
         with self._lock:
@@ -838,24 +850,27 @@ class BisHardware:
         pause = HumanBehaviorSimulator.simulate_pause('click')
         time.sleep(pause)
         
-        self.send(f"D:{key}")
+        actual_key = display_game_hotkey(key)
+        self.send(f"D:{actual_key}")
         humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
-        self.send(f"U:{key}")
+        self.send(f"U:{actual_key}")
 
     def fast_press(self, key: str, variance: float = 0.15):
         """
         Ultra-fast key press (ft.ahk-style): no HumanBehaviorSimulator pause.
         Use this for trigger reactions where speed matters.
         """
-        self.send(f"D:{key}")
+        actual_key = display_game_hotkey(key)
+        self.send(f"D:{actual_key}")
         humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
-        self.send(f"U:{key}")
+        self.send(f"U:{actual_key}")
 
     def force_press(self, key: str, variance: float = 0.15):
         """포커스 체크 없이 1회 키 입력. 이동 중 테스트 마법처럼 강제 전송이 필요할 때 사용."""
         # 단발 입력은 아두이노의 K,<key> 경로가 가장 안정적이다.
         # D/U 분리보다 전송 횟수가 적고, 키업 타이밍이 짧아지는 문제를 피한다.
-        self.send_force(f"K,{key}")
+        actual_key = display_game_hotkey(key)
+        self.send_force(f"K,{actual_key}")
 
     def press_with_gap(self, key: str, variance: float = 0.15):
         self.humanized_press(key, variance)

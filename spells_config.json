@@ -1,1 +1,29 @@
-[]
+[
+    {
+        "name": "희원",
+        "target_type": "대상선택형",
+        "use": true,
+        "enable_red_tab": true,
+        "spell_char": "1",
+        "cast_function": "SpellArrowEnter",
+        "category": "공격"
+    },
+    {
+        "name": "공증",
+        "target_type": "즉발형",
+        "use": true,
+        "enable_red_tab": true,
+        "spell_char": "2",
+        "cast_function": "SpellEnter",
+        "category": "회복"
+    },
+    {
+        "name": "힐",
+        "target_type": "즉발형",
+        "use": true,
+        "enable_red_tab": true,
+        "spell_char": "3",
+        "cast_function": "SpellEnter",
+        "category": "공격"
+    }
+]

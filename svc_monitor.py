@@ -2603,6 +2603,134 @@ class MonitorSvc(threading.Thread):
         union = float(max(1, aw * ah + bw * bh - int(inter)))
         return inter / union
 
+    def check_red_tab_with_findtext(self, frame):
+        """
+        ft.ahk Color Mode (유사도 방식)를 Python으로 직접 구현하여
+        play_area에서 red_tab 이미지를 검색합니다.
+
+        FindText 문자열: |<redtab>FF5757-0.90$49.zzzzzzzzzzzzzzzzs
+          - FF5757  = 전경색 RGB (빨간색)
+          - -0.90   = ft.ahk 유사도: max_dist² = floor(9*255²*(1-0.90)²) = 5852
+          - $49.    = 너비 49픽셀
+          - 배경색 없음 → 전경픽셀(1)만 체크
+        """
+        if frame is None:
+            print("[RedTab] 프레임 데이터가 없어 검색을 수행할 수 없습니다.")
+            return False
+
+        # ── 1. play_area 영역 크롭 ──
+        pa_reg = self.regions.get("play_area")
+        if pa_reg:
+            ox, oy, scx, scy = self.obs_params
+            fh, fw = frame.shape[:2]
+            sx = max(0, int(pa_reg.sx * scx + ox))
+            sy = max(0, int(pa_reg.sy * scy + oy))
+            dx = min(fw, int(pa_reg.dx * scx + ox))
+            dy = min(fh, int(pa_reg.dy * scy + oy))
+            search_frame = frame[sy:dy, sx:dx]
+            if search_frame.size == 0:
+                search_frame = frame
+        else:
+            search_frame = frame
+
+        # ── 2. ft.ahk AHK base64 디코더 ──
+        ahk_chars = "0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        char_to_val = {c: i for i, c in enumerate(ahk_chars)}
+
+        encoded = "zzzzzzzzzzzzzzzzs"
+        width = 49
+
+        bits_str = ""
+        for ch in encoded:
+            val = char_to_val.get(ch, 0)
+            bits_str += f"{val:06b}"
+        import re as _re
+        bits_str = _re.sub(r'10*$', '', bits_str)
+
+        height = len(bits_str) // width
+        if height == 0:
+            print("[RedTab] 비트맵 파싱 실패")
+            return False
+
+        total = width * height
+        bitmap = np.zeros((height, width), dtype=np.uint8)
+        for idx in range(min(total, len(bits_str))):
+            bitmap[idx // width, idx % width] = 1 if bits_str[idx] == '1' else 0
+
+        # ── 3. ft.ahk 유사도 방식 Color Mode 매칭 ──
+        # frame은 RGB 형식 (CaptureSvc에서 BGR→RGB 변환됨)
+        # similarity=0.90 → max_dist_sq = floor(9 * 255² * (1-0.90)²)
+        FG_R, FG_G, FG_B = 0xFF, 0x57, 0x57  # FF5757 (빨간)
+        similarity = 0.90
+        max_dist_sq = int(9 * 255 * 255 * (1 - similarity) ** 2)  # = 5852
+        ERR1 = 0.15  # 전경 픽셀 오차 허용율 (15%)
+
+        sr = search_frame[:, :, 0].astype(np.int32)  # R (RGB 프레임)
+        sg = search_frame[:, :, 1].astype(np.int32)  # G
+        sb = search_frame[:, :, 2].astype(np.int32)  # B
+        sh, sw = search_frame.shape[:2]
+
+        # 전경 픽셀 인덱스
+        y1, x1 = np.where(bitmap == 1)
+        len1 = len(y1)
+
+        if len1 < 5:
+            print(f"[RedTab] 전경 픽셀 수 부족: {len1}개 (최소 5 필요)")
+            return False
+
+        e1_max = max(1, int(len1 * ERR1))
+
+        # 유사도 방식: 유클리드 거리² 맵 생성
+        # dist² = (R-FG_R)² + (G-FG_G)² + (B-FG_B)²
+        dist_sq_map = (
+            (sr - FG_R) ** 2 +
+            (sg - FG_G) ** 2 +
+            (sb - FG_B) ** 2
+        )
+        # 전경색 픽셀 맵: dist² <= max_dist_sq인 경우 1 (매칭)
+        fg_map = (dist_sq_map <= max_dist_sq).astype(np.uint8)
+
+        ph, pw = height, width
+        if ph > sh or pw > sw:
+            print(f"[RedTab] 패턴({pw}x{ph})이 검색 영역({sw}x{sh})보다 큼")
+            return False
+
+        found = False
+        found_x, found_y = -1, -1
+        best_mismatch = len1  # 진단용
+
+        for fy in range(sh - ph + 1):
+            for fx in range(sw - pw + 1):
+                fg_crop = fg_map[fy:fy+ph, fx:fx+pw]
+                mismatch1 = int(np.sum(fg_crop[y1, x1] == 0))
+                if mismatch1 < best_mismatch:
+                    best_mismatch = mismatch1
+                if mismatch1 <= e1_max:
+                    found = True
+                    found_x, found_y = fx, fy
+                    break
+            if found:
+                break
+
+        # ── 4. 결과 출력 및 처리 ──
+        if not found:
+            print(f"[RedTab] 결과: 빨간색 탭 없음 "
+                  f"(fg_px={len1}, best_miss={best_mismatch}, e1_max={e1_max}, "
+                  f"max_dist_sq={max_dist_sq}) -> Tab x2 입력")
+            try:
+                from bis_core import hw, humanized_sleep
+                hw.humanized_press("tab")
+                humanized_sleep(0.05, variance=0.1)
+                hw.humanized_press("tab")
+            except Exception as e:
+                print(f"[RedTab] 하드웨어 입력 오류: {e}")
+            return False
+
+        print(f"[RedTab] 결과: 빨간색 탭 발견! "
+              f"(좌표: {found_x}, {found_y}, mismatch={best_mismatch}/{e1_max})")
+        return True
+
+
     def _find_red_tab_candidates(
         self,
         play_area_rgb: np.ndarray,
@@ -2919,8 +3047,8 @@ class MonitorSvc(threading.Thread):
             # ?? 기???고정 ??????
             ox, oy, scx, scy = self.obs_params
 
-            # CaptureSvc에서 프레임 가져오기
-            img_np = getattr(self.state, 'shared_frame', None)
+            # CaptureSvc에서 프레임 가져오기 (last_frame 사용)
+            img_np = getattr(self.state, 'last_frame', None)
             if img_np is None:
                 time.sleep(0.01)
                 continue

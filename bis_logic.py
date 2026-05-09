@@ -38,6 +38,8 @@ from bis_core import (
     TIMING_CONFIG, humanized_sleep, tc, GridManager
 )
 from bis_route import RouteManager
+from bis_spell import RecoveryManager
+
 
 
 # ============================================================
@@ -93,121 +95,30 @@ class LogicSvc(threading.Thread):
         self._last_mp_recover_time = 0.0  # MP 회복 마지막 시간
         self._last_target_search_time = 0.0  # 타겟 탐색 마지막 시간
         self._last_monster_seen_time = 0.0  # 몬스터 감지 마지막 시간
+        
+        self.recovery_manager = RecoveryManager(self.state)
 
     # ----------------------------------------------------------
+
     # ── 내부: 힐 시퀀스 ─────────────────────────────────
     # ----------------------------------------------------------
     def _execute_v3_heal(self, skill):
         """
-        초고속 자가 회복: 스킬키 → Home → Enter (모두 humanized)
-        
-        Purpose:
-            - 자가 HP/MP 회복 스킬 최적화 시전
-            - Shift+Z+문자 조합 없이 기존 핫키 방식 지원
-            - humanized_sleep로 자연스러운 입력 간격 구현
-            
-        Algorithm:
-            1. 스킬 핫키 입력 (skill.hotkey)
-            2. spell_cast_gap(30ms) 대기
-            3. Home 키 입력 (자기 자신 타겟)
-            4. spell_cast_gap(30ms) 대기
-            5. Enter 키 입력 (스킬 확정)
-            6. 스킬 쿨다운 시간 갱신
-            
-        Args:
-            skill (Skill): 시전할 스킬 객체 (name, hotkey, cooldown 등)
-            
-        Integration:
-            - TIMING_CONFIG에서 지연시간 참조
-            - hw.humanized_press로 하드웨어 입력
-            - skill.last_cast_time으로 쿨다운 관리
+        초고속 자가 회복: RecoveryManager로 위임하여 실행
         """
-        if skill.hotkey:
-            hw.humanized_press(skill.hotkey)  # 스킬 핫키 입력
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])  # 30ms 대기
-        hw.humanized_press("home")  # 자기 자신 타겟
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])  # 30ms 대기
-        hw.humanized_press("enter")  # 스킬 확정
-        skill.last_cast_time = time.time()  # 쿨다운 시간 갱신
+        self.recovery_manager.execute_v3_heal(skill)
 
     def _press_fast(self, key: str, variance: float = 0.15):
         """
-        초고속 키 입력: 긴급 반응 필요시 사용 (ft.ahk 스타일)
-        
-        Purpose:
-            - 긴급 상황에서 즉각적인 키 입력 필요
-            - 기존 AutoHotkey 스크립트 호환성 유지
-            - 하드웨어 최적화 입력 방식 지원
-            
-        Algorithm:
-            1. hw.fast_press 시도 (하드웨어 최적화)
-            2. 실패 시 hw.humanized_press로 폴백
-            3. variance 파라미터로 자연스러움 유지
-            
-        Args:
-            key (str): 입력할 키
-            variance (float): 변동성 계수 (기본 0.15)
-            
-        Use Cases:
-            - 긴급 회복 상황
-            - 전투 중 빠른 스킬 시전
-            - 막힘 탈출 시 빠른 이동
-            
-        Fallback:
-            하드웨어 fast_press 미지원 시 humanized_press 사용
+        초고속 키 입력: SpellCaster로 위임하여 실행
         """
-        try:
-            hw.fast_press(key, variance=variance)  # 하드웨어 최적화 입력
-        except Exception:
-            hw.humanized_press(key, variance=variance)  # 폴백: 일반 humanized 입력
+        self.recovery_manager.caster._press_fast(key, variance)
 
     def _resolve_recovery_key(self, selected: str, default_key: str):
         """
-        GUI 선택 스킬을 핫키로 해석 (유연한 스킬 설정 지원)
-        
-        Purpose:
-            - GUI에서 설정한 recovery_hp_spell/recovery_mp_spell을 실제 핫키로 변환
-            - spells_config.json과의 호환성 유지
-            - 다양한 스킬 설정 방식 지원
-            
-        Algorithm:
-            1. selected가 스킬 DB에 있는지 확인
-            2. 있으면 해당 스킬의 hotkey 반환
-            3. selected가 단일 문자(숫자키 등)이면 그대로 사용
-            4. 그 외 경우 default_key로 폴백
-            
-        Args:
-            selected (str): GUI에서 선택한 스킬 이름
-            default_key (str): 폴백용 기본 키
-            
-        Returns:
-            str: 해석된 핫키 또는 키
-            
-        Use Cases:
-            - GUI에서 "힐" 선택 → 스킬 DB에서 hotkey "1" 찾아 반환
-            - GUI에서 "2" 선택 → 그대로 "2" 반환
-            - 스킬 미찾기 시 default_key "3" 반환
-            
-        Integration:
-            - svc_worker.py: GUI 스킬 설정
-            - spells_config.json: 스킬 데이터베이스
+        GUI 선택 스킬을 핫키로 해석: RecoveryManager로 위임하여 실행
         """
-        skill = None
-        key = None
-        try:
-            if selected:
-                skill = next((s for s in self.state.spells if getattr(s, "name", "") == selected), None)
-                if skill is not None and getattr(skill, "hotkey", None):
-                    key = skill.hotkey
-                elif isinstance(selected, str) and len(selected) == 1:
-                    key = selected
-        except Exception:
-            skill = None
-            key = None
-
-        if not key:
-            key = default_key
-        return key, skill
+        return self.recovery_manager.resolve_recovery_key(selected, default_key)
 
     def _get_visible_monsters(self) -> list[dict]:
         """
@@ -506,192 +417,26 @@ class LogicSvc(threading.Thread):
         return bool(monsters)
 
     def _recover_hp(self):
-        """
-        자가 HP 회복 스킬 시전
-        
-        Purpose:
-            - HP 임계값 도달 또는 트리거 활성화 시 즉시 회복
-            - rate-limiting으로 과도한 회복 방지
-            - 스킬 쿨다운 관리
-            
-        Algorithm:
-            1. HP 회복 필요성 확인
-            2. rate-limiting 확인 (최소 0.05초 간격)
-            3. 스킬 준비 상태 확인
-            4. 스킬 시전 시퀀스: ESC -> 키 -> Home -> Enter
-            5. 스킬 쿨다운 시간 갱신
-            
-        Integration:
-            - _needs_hp_recovery(): 회복 필요성 판단
-            - _resolve_recovery_key(): 스킬 핫키 해석
-            - TIMING_CONFIG: 지연시간 참조
-        """
         if not self._needs_hp_recovery():
             return
-
-        # HP 임계값 또는 검정 트리거가 켜졌을 때 즉시 회복 (esc -> key -> home -> enter)
-        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="3")
-
-        now = time.time()
-        # rate-limiting 제거: 즉시 실행 보장
-        self._last_hp_recover_time = now
-
-        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
-            return
-        self._press_fast("esc")
-        humanized_sleep(TIMING_CONFIG["key_gap"])
-        self._press_fast(key)
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-        self._press_fast("home")
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-        self._press_fast("enter")
-
-        if skill is not None:
-            try:
-                skill.last_cast_time = now
-            except Exception:
-                pass
-        humanized_sleep(TIMING_CONFIG["heal_gap"])
+        self.recovery_manager.execute_self_hp_recovery()
 
     def _recover_mp(self):
-        """
-        자가 MP 회복 스킬 시전
-        
-        Purpose:
-            - MP 임계값 도달 또는 트리거 활성화 시 회복
-            - rate-limiting으로 과도한 회복 방지 (최소 2초 간격)
-            - 스킬 쿨다운 관리
-            
-        Algorithm:
-            1. MP 회복 필요성 확인
-            2. rate-limiting 확인 (최소 2초 간격)
-            3. 스킬 준비 상태 확인
-            4. 스킬 시전 (단순 키 입력)
-            5. 스킬 쿨다운 시간 갱신
-            
-        Integration:
-            - _needs_mp_recovery(): 회복 필요성 판단
-            - _resolve_recovery_key(): 스킬 핫키 해석
-            - TIMING_CONFIG: 지연시간 참조
-        """
         if not self._needs_mp_recovery():
             return
-
-        # MP 임계값 또는 검정 트리거가 켜졌을 때 즉시 회복
-        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
-
-        now = time.time()
-        # rate-limiting 제거: 즉시 실행 보장
-        self._last_mp_recover_time = now
-
-        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
-            return
-        self._press_fast(key)
-        if skill is not None:
-            try:
-                skill.last_cast_time = now
-            except Exception:
-                pass
-        humanized_sleep(min(0.05, float(TIMING_CONFIG.get("key_gap", 0.05))))
+        self.recovery_manager.execute_self_mp_recovery()
 
     def _recover_party_hp(self, snapshot: dict | None):
-        """
-        [FIX] 파티원(격수) HP 회복 스킬 시전
-        
-        핵심 수정:
-            - 기존: 스킬키만 눌렀음 → 격수 미타겟팅으로 힐 불발
-            - 수정: 스킬키 → Tab(격수 타겟) → Enter 순서로 올바르게 시전
-        
-        Args:
-            snapshot (dict): 격수의 현재 상태 데이터
-        """
         if not snapshot or not self._needs_hp_recovery_for(snapshot):
             return
-
-        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="c")
-        now = time.time()
-        
-        # [FIX] 최소 0.3초 간격 유지 (이전 힐 시퀀스 완료 후 쿨 보장)
-        # ESC → key → tab → enter 시퀀스가 약 0.15~0.2초 소요
-        last_time = getattr(self, '_last_party_hp_recover_time', 0)
-        elapsed = now - last_time
-        if elapsed < 0.3:
-            # 아직 간격 중 - 조용히 skip
-            return
-        self._last_party_hp_recover_time = now
-        
-        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
-            print(f"[Support] HP heal skill on cooldown: {getattr(skill, 'name', key)}")
-            print(f"[Support] HP heal skill not ready: {skill.name}")
-            return
-        
-        hp_val = int(snapshot.get('hp', 0) or 0)
-        print(f"[Support] HP heal casting on warrior: key={key}, hp={hp_val}")
-        
-        # [FIX] 올바른 파티원 힐 시퀀스:
-        # 1) 스킬키 입력 (힐 스킬 선택)
-        # 2) Tab 키 (파티원/격수 타겟팅)
-        # 3) Enter 키 (시전 확정)
-        self._press_fast("esc")                              # 현재 타겟 해제
-        humanized_sleep(TIMING_CONFIG["key_gap"])
-        self._press_fast(key)                                # 힐 스킬키 입력
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-        self._press_fast("tab")                              # Tab: 파티원(격수) 타겟팅
-        humanized_sleep(TIMING_CONFIG["tab_wait"])
-        self._press_fast("enter")                            # Enter: 힐 시전 확정
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-        
-        if skill is not None:
-            try:
-                skill.last_cast_time = now
-            except Exception:
-                pass
-        
-        print(f"[Support] HP heal complete. (esc→key→tab→enter)")
+        self.recovery_manager.execute_party_hp_recovery(snapshot)
 
     def _recover_party_mp(self, snapshot: dict | None):
-        """
-        파티원(격수) MP 회복 스킬 시전
-        
-        Purpose:
-            - 네트워크로 수신한 격수 MP 데이터 기반 회복
-            - RedTab 활성화 상태 확인
-            - rate-limiting으로 과도한 회복 방지
-            
-        Args:
-            snapshot (dict): 격수의 현재 상태 데이터
-            
-        Algorithm:
-            1. 스냅샷 데이터 유효성 확인
-            2. MP 회복 필요성 확인
-            3. RedTab 활성화 상태 확인
-            4. rate-limiting 확인
-            5. 스킬 시전 및 로깅
-            
-        Integration:
-            - _get_support_target_data(): 격수 데이터 수신
-            - _needs_mp_recovery_for(): 회복 필요성 판단
-            - _resolve_recovery_key(): 스킬 핫키 해석
-        """
         if not snapshot or not self._needs_mp_recovery_for(snapshot):
             return
         if not snapshot.get("red_tab_enabled", False):
             return
-
-        key, skill = self._resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
-        now = time.time()
-        # rate-limiting 제거: 즉시 실행 보장
-        self._last_mp_recover_time = now
-        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
-            return
-        self._press_fast(key)
-        if skill is not None:
-            try:
-                skill.last_cast_time = now
-            except Exception:
-                pass
-        print(f"[Support] MP heal cast on warrior: key={key}, mp={int(snapshot.get('mp', 0) or 0)}")
-        humanized_sleep(min(0.05, float(TIMING_CONFIG.get("key_gap", 0.05))))
+        self.recovery_manager.execute_party_mp_recovery(snapshot)
 
     # ----------------------------------------------------------
     # ── 보무(Buff) 자동 관리 ─────────────────────────────────
@@ -1106,15 +851,15 @@ class LogicSvc(threading.Thread):
         
         # 격수 데이터가 없을 때 자가 버프/회복 동작
         if not support_target:
-            # 자가 HP 회복 (격수와 동일한 임계값 사용)
+            # 자가 HP 회복
             good_hp = self._get_good_hp_threshold()
             if self.state.hp > 0 and self.state.hp <= good_hp:
-                self._self_hp_recovery()
+                self.recovery_manager.execute_self_hp_recovery()
                 return True
-            # 자가 MP 회복 (격수와 동일한 임계값 사용)
+            # 자가 MP 회복
             good_mp = self._get_good_mp_threshold()
             if self.state.mp > 0 and self.state.mp <= good_mp:
-                self._self_mana_recovery()
+                self.recovery_manager.execute_self_mp_recovery()
                 return True
             # 자가 버프 (보호/무장)
             self._self_buff_cycle()
@@ -1147,36 +892,6 @@ class LogicSvc(threading.Thread):
         # HP/MP 회복이 필요한 동안은 True 반환 → 루프가 계속 힐 우선 처리
         return needs_hp or needs_mp
 
-    def _self_hp_recovery(self):
-        """자가 HP 회복"""
-        good_hp = self._get_good_hp_threshold()
-        if self.state.hp > 0 and self.state.hp <= good_hp:
-            # 힐 스킬 사용
-            self._cast_spell_by_name("힐")
-            humanized_sleep(1.0)
-            # 추가 힐 2번
-            self._cast_spell_by_name("힐")
-            humanized_sleep(1.0)
-            self._cast_spell_by_name("힐")
-    
-    def _self_mana_recovery(self):
-        """자가 마나 회복"""
-        # MP 25000 이하 시 공력증강 자동 시전
-        if self.state.mp > 0 and self.state.mp <= 25000:
-            now = time.time()
-            # 공력증강 rate-limiting: 최소 2초 간격
-            if now - getattr(self, '_last_mana_boost_time', 0) >= 2.0:
-                self._last_mana_boost_time = now
-                self._cast_spell_by_name("공력증강")
-                print(f"[Support] MP boost cast on self: mp={self.state.mp} (<=25000)")
-        
-        good_mp = self._get_good_mp_threshold()
-        if self.state.mp > 0 and self.state.mp <= good_mp:
-            # 아이템 사용 (u + e/f/g/h)
-            from dosa_functions import create_dosa_functions
-            dosa_funcs = create_dosa_functions(hw, self.state)
-            dosa_funcs.mana_boost_function(self.state.mp)
-    
     def _self_buff_cycle(self):
         """자가 버프 사이클 (보호/무장)"""
         import time
@@ -1194,7 +909,7 @@ class LogicSvc(threading.Thread):
         """스킬 이름으로 스킬 캐스팅"""
         print(f"[DEBUG] _cast_spell_by_name 호출: {spell_name}")
         try:
-            from spell_casting import get_spell_caster, target_mapper
+            from bis_spell import spell_caster, target_mapper
             import json
             
             # spells_config.json에서 스킬 정보 찾기
@@ -1210,7 +925,7 @@ class LogicSvc(threading.Thread):
                     
                     if spell_char:
                         print(f"[DEBUG] 스킬 시전 시작: {spell_name}")
-                        caster = get_spell_caster(hw)
+                        caster = spell_caster
                         # 캐스팅 함수 호출
                         if cast_function == 'SpellEnter':
                             caster.spell_enter(spell_char)
