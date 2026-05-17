@@ -10,13 +10,15 @@ import json
 import csv
 import io
 import ipaddress
+import traceback
 
-# ?곕????몄퐫??媛뺤젣 ?ㅼ젙 (CP949 ?섍꼍 ???)))
+# 표준 출력 인코딩을 현재 윈도우 로캘에 맞춘다.
 try:
-    if sys.stdout.encoding != 'utf-8':
-        sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', line_buffering=True)
-    if sys.stderr.encoding != 'utf-8':
-        sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8', line_buffering=True)
+    preferred_encoding = 'cp949'
+    if sys.stdout.encoding != preferred_encoding:
+        sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding=preferred_encoding, line_buffering=True)
+    if sys.stderr.encoding != preferred_encoding:
+        sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding=preferred_encoding, line_buffering=True)
 except Exception:
     pass
 
@@ -50,7 +52,7 @@ from tkinter import ttk, messagebox, simpledialog
 from PIL import Image, ImageTk
 from svc_monitor import NumericFieldScanner
 
-# Pillow 10+ ?명솚 由ъ깦?뚮쭅 (援щ쾭?꾩? ?뺤닔 0 = NEAREST)
+# Pillow 10+ ?紐낆넎 ?귐딄묘???춦 (?닌됱쒔?袁? ?類ㅻ땾 0 = NEAREST)
 try:
     from PIL.Image import Resampling
     _PIL_NEAREST = Resampling.NEAREST
@@ -60,13 +62,13 @@ from dataclasses import dataclass, asdict
 from typing import Tuple, Optional, Dict
 from enum import Enum, auto
 
-# 而ㅻ꼸 ?대옒???꾪룷??
+# ?뚣끇瑗???????袁る７??
 from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
 
-# 怨좏빐?곷룄(65?몄튂 ?? 紐⑤땲???명솚?깆쓣 ?꾪븳 DPI ?몄떇 ?쒖꽦??
+# ?⑥쥚鍮?怨룸즲(65?紐꾪뒄 ?? 筌뤴뫀????紐낆넎?源놁뱽 ?袁る립 DPI ?紐꾨뻼 ??뽮쉐??
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
@@ -89,11 +91,90 @@ from gui_overlay import *
 from background_threads import *
 from gui_app import *
 
-# ?꾩뿭 ?ㅻ젅??李몄“ 諛??붿쭊 蹂??
+# ?袁⑸열 ??살쟿??筌〓챷??獄??遺우춭 癰궰??
 action_thread = None
 reader_thread = None
 nav_thread = None
-# hw??svc_kernel?먯꽌 ?꾪룷?몃맖
+HOTKEY_HANDLES = {}
+HOTKEY_LAST_TRIGGER = {}
+HOTKEY_DEBOUNCE_SEC = 0.35
+# hw??svc_kernel?癒?퐣 ?袁る７?紐껊쭡
+
+
+def _clear_registered_hotkeys():
+    global HOTKEY_HANDLES
+    for hotkey_name, handle in list(HOTKEY_HANDLES.items()):
+        try:
+            keyboard.remove_hotkey(handle)
+        except Exception:
+            try:
+                keyboard.unhook(handle)
+            except Exception as exc:
+                print(f"[Warn] Hotkey remove failed ({hotkey_name}): {exc}")
+    HOTKEY_HANDLES.clear()
+
+
+def _dispatch_gui_hotkey(gui_instance, hotkey_name: str, callback):
+    now = time.time()
+    last_trigger = HOTKEY_LAST_TRIGGER.get(hotkey_name, 0.0)
+    if now - last_trigger < HOTKEY_DEBOUNCE_SEC:
+        return
+    HOTKEY_LAST_TRIGGER[hotkey_name] = now
+    print(f"[Hotkey] {hotkey_name} pressed")
+
+    def _run_on_ui():
+        try:
+            callback()
+        except Exception as exc:
+            print(f"[Hotkey] {hotkey_name} callback error: {exc}")
+            traceback.print_exc()
+
+    try:
+        gui_instance.root.after(0, _run_on_ui)
+    except Exception as exc:
+        print(f"[Hotkey] {hotkey_name} schedule failed: {exc}")
+        traceback.print_exc()
+
+
+def _is_game_window_active(state) -> bool:
+    try:
+        current_hwnd = win32gui.GetForegroundWindow()
+    except Exception:
+        return False
+
+    candidate_hwnds = [current_hwnd]
+    try:
+        root_hwnd = win32gui.GetAncestor(current_hwnd, win32con.GA_ROOT)
+        if root_hwnd and root_hwnd not in candidate_hwnds:
+            candidate_hwnds.append(root_hwnd)
+    except Exception:
+        pass
+
+    state_hwnd = getattr(state, "hwnd", None)
+    if state_hwnd and state_hwnd in candidate_hwnds:
+        return True
+
+    for hwnd_candidate in candidate_hwnds:
+        try:
+            title = win32gui.GetWindowText(hwnd_candidate) or ""
+        except Exception:
+            title = ""
+        if any(token.lower() in title.lower() for token in ["ory", "바람", "aion"]):
+            state.hwnd = hwnd_candidate
+            return True
+
+    refreshed_hwnd = find_game_window(WIN_KEY)
+    if refreshed_hwnd:
+        state.hwnd = refreshed_hwnd
+        if refreshed_hwnd in candidate_hwnds:
+            return True
+        try:
+            refreshed_title = win32gui.GetWindowText(refreshed_hwnd) or ""
+            if any(token.lower() in refreshed_title.lower() for token in ["ory", "바람", "aion"]):
+                return True
+        except Exception:
+            pass
+    return False
 
 def main(
     preset_role: Optional[str] = None,
@@ -118,7 +199,7 @@ def main(
         dx = play_area.get("dx", 0)
         dy = play_area.get("dy", 0)
         
-        # play_area 醫뚰몴 ?좏슚??寃??
+        # play_area ?ル슦紐??醫륁뒞??野꺜??
         if sx == 0 or sy == 0 or dx == 0 or dy == 0:
             messagebox.showerror(
                 "Error",
@@ -148,19 +229,19 @@ def main(
     # stealth_results = StealthChecker.run_all_checks()
     
     # if stealth_results['debugger_detected']:
-    #     print("[Stealth] [!] ?붾쾭嫄??먯???- ?ㅽ뻾 以묐떒")
+    #     print("[Stealth] [!] ?遺얠쒔椰??癒???- ??쎈뻬 餓λ쵎??)
     #     return
     
     # if stealth_results['vm_detected']:
-    #     print("[Stealth] [!] 媛?곷㉧???섍꼍 ?먯???- ?ㅽ뻾 以묐떒")
+    #     print("[Stealth] [!] 揶쎛?怨룔돢????띻펾 ?癒???- ??쎈뻬 餓λ쵎??)
     #     return
     
     # if not stealth_results['process_integrity']:
-    #     print("[Stealth] [!] ?꾨줈?몄뒪 臾닿껐???꾨컲 - ?ㅽ뻾 以묐떒")
+    #     print("[Stealth] [!] ?袁⑥쨮?紐꾨뮞 ?얜떯猿???袁⑥뺘 - ??쎈뻬 餓λ쵎??)
     #     return
     
     # if not stealth_results['external_modules']:
-    #     print("[Stealth] [!] ?섏떖?ㅻ윭???몃? 紐⑤뱢 ?먯? - ?ㅽ뻾 以묐떒")
+    #     print("[Stealth] [!] ??뤿뼎??살쑎???紐? 筌뤴뫀諭??癒? - ??쎈뻬 餓λ쵎??)
     #     return
     
     print("[Stealth] [OK] Environment safety check complete")
@@ -184,8 +265,8 @@ def main(
     if preset_auto_hunt is not None:
         state.auto_hunt = bool(preset_auto_hunt)
         state.service_active = bool(preset_auto_hunt)
-    state.hwnd = hwnd  # GameState???몃뱾 ???
-    hw.set_state(state)  # DevInterface??GameState ?곌껐 (?ъ빱??泥댄겕??
+    state.hwnd = hwnd  # GameState???紐껊굶 ????
+    hw.set_state(state)  # DevInterface??GameState ?怨뚭퍙 (??鍮??筌ｋ똾寃??
 
     def _cleanup_hardware_on_exit():
         try:
@@ -195,7 +276,7 @@ def main(
 
     atexit.register(_cleanup_hardware_on_exit)
     
-    # 媛??뚯빱 ?ㅻ젅??珥덇린??(bootstrap.py 湲곕뒫 ?듯빀)
+    # 揶????묽 ??살쟿???λ뜃由??(bootstrap.py 疫꿸퀡??????)
     config_file = os.path.join(SCRIPT_DIR, "config.json")
     network_cfg = load_network_config()
     if preset_network_role:
@@ -208,12 +289,12 @@ def main(
 
     spell_db_file = os.path.join(SCRIPT_DIR, "spells_config.json")
 
-    # 1. 怨좎냽 罹≪쿂 ?ㅻ젅??媛??(紐⑤뱺 鍮꾩쟾 ?ㅻ젅?쒖쓽 ?뚯뒪)
+    # 1. ?⑥쥙??筌╈돦荑???살쟿??揶쎛??(筌뤴뫀諭???쑴????살쟿??뽰벥 ???뮞)
     capture_svc = CaptureSvc(state)
     capture_svc.start()
 
     try:
-        reader_thread = MonitorSvc(state, config_file)  # PatternMatcher 湲곕컲 OCR
+        reader_thread = MonitorSvc(state, config_file)  # PatternMatcher 疫꿸퀡而?OCR
         print(f"[Worker] MonitorSvc initialized: {reader_thread is not None}")
     except Exception as e:
         print(f"[Worker] MonitorSvc initialization failed: {e}")
@@ -221,70 +302,214 @@ def main(
         traceback.print_exc()
         return
     
-    numeric_scanner = NumericFieldScanner(state, reader_thread.matcher, config_file, reader_thread)  # 怨좎냽 ?꾩슜 ?ㅻ젅??
-    sentinel_thread = SentinelThread(state, reader_thread.matcher) # 紐ъ뒪???꾩씠???먯? ?꾩슜
-    action_thread = LogicSvc(state)  # FSM 濡쒖쭅
-    nav_thread = RouteSvc(state)  # ?ㅻ퉬寃뚯씠??
+    numeric_scanner = NumericFieldScanner(state, reader_thread.matcher, config_file, reader_thread)  # ?⑥쥙???袁⑹뒠 ??살쟿??
+    sentinel_thread = SentinelThread(state, reader_thread.matcher) # 筌뤣딅뮞???袁⑹뵠???癒? ?袁⑹뒠
+    action_thread = LogicSvc(state)  # FSM 嚥≪뮇彛?
+    nav_thread = RouteSvc(state)  # ??삵돩野껊슣???
     
-    # 핫키 등록 (GUI 초기화 전에 먼저 등록)
+    # ?ロ궎 ?깅줉 (GUI 珥덇린???꾩뿉 癒쇱? ?깅줉)
     print("[DEBUG] 핫키 등록 시작...")
     try:
-        keyboard.add_hotkey("f1", lambda: None)  # 임시 함수
-        keyboard.add_hotkey("f2", lambda: None)  # 임시 함수
-        keyboard.add_hotkey("f3", lambda: None)  # 임시 함수
-        keyboard.add_hotkey("f4", lambda: None)  # 임시 함수
-        print("[DEBUG] 핫키 등록 성공")
-        
-        # 임시 핫키 제거 및 실제 함수 등록
-        keyboard.remove_hotkey("f1")
-        keyboard.remove_hotkey("f2")
-        keyboard.remove_hotkey("f3")
-        keyboard.remove_hotkey("f4")
-        
         def register_hotkeys(gui_instance):
+            global HOTKEY_HANDLES
             try:
-                keyboard.add_hotkey("f1", gui_instance.toggle_follow)
-                print("[DEBUG] F1 핫키 등록 성공")
-                keyboard.add_hotkey("f2", gui_instance.toggle_service)
-                print("[DEBUG] F2 핫키 등록 성공")
-                keyboard.add_hotkey("f3", gui_instance.toggle_pause_resume)
-                print("[DEBUG] F3 핫키 등록 성공")
-                keyboard.add_hotkey("f4", gui_instance.emergency_exit)
-                print("[DEBUG] F4 핫키 등록 성공")
-                
-                # [TEST] ` 키로 빨간색 탭 찾기 로직 수동 실행
-                keyboard.add_hotkey("`", lambda: reader_thread.check_red_tab_with_findtext(reader_thread.last_frame))
-                print("[DEBUG] ` 핫키 등록 성공 (RedTab 체크 테스트용)")
+                _clear_registered_hotkeys()
+
+                HOTKEY_HANDLES["f1"] = keyboard.on_press_key(
+                    "f1",
+                    lambda _event: _dispatch_gui_hotkey(gui_instance, "F1", gui_instance.toggle_follow),
+                )
+                print("[DEBUG] F1 핫키 등록 완료")
+                HOTKEY_HANDLES["f2"] = keyboard.on_press_key(
+                    "f2",
+                    lambda _event: _dispatch_gui_hotkey(gui_instance, "F2", gui_instance.toggle_service),
+                )
+                print("[DEBUG] F2 핫키 등록 완료")
+                HOTKEY_HANDLES["f3"] = keyboard.on_press_key(
+                    "f3",
+                    lambda _event: _dispatch_gui_hotkey(gui_instance, "F3", gui_instance.toggle_pause_resume),
+                )
+                print("[DEBUG] F3 핫키 등록 완료")
+                HOTKEY_HANDLES["f4"] = keyboard.on_press_key(
+                    "f4",
+                    lambda _event: _dispatch_gui_hotkey(gui_instance, "F4", gui_instance.emergency_exit),
+                )
+                print("[DEBUG] F4 핫키 등록 완료")
+
+                # [TEST] ` 키로 JSON 등록 패턴과 user_info 상태를 함께 점검
+                def test_patterns():
+                    frame = reader_thread.last_frame
+                    if frame is None:
+                        print("[FindText] 테스트 실패: 현재 프레임 데이터가 없습니다.")
+                        return
+
+                    # 1. hb 패턴 테스트 (일반 play_area, 멀티서치)
+                    hb_matches = reader_thread.find_pattern_all(
+                        frame,
+                        "hb",
+                        "play_area",
+                        max_results=6,
+                        overlap_px=44,
+                        err_ratio=0.15,
+                    )
+                    if hb_matches:
+                        print(f"[HBTest] hb raw matches: {len(hb_matches)}개")
+                        for idx, match in enumerate(hb_matches[:10], start=1):
+                            print(
+                                f"[HBTest] #{idx} | 위치: ({match['x']}, {match['y']}) "
+                                f"| 크기: {match['w']}x{match['h']} | 일치율: {float(match.get('score', 0.0) or 0.0):.1%}"
+                            )
+                    else:
+                        print("[HBTest] 'hb' 패턴을 play_area에서 찾을 수 없습니다.")
+
+                    # 2. red_tab 패턴 테스트 (target_info 우선, 실패 시 play_area)
+                    res_rt = reader_thread.find_pattern(frame, "red_tab", "target_info")
+                    red_tab_source = "target_info"
+                    if not res_rt:
+                        res_rt = reader_thread.find_pattern(frame, "red_tab", "play_area")
+                        red_tab_source = "play_area"
+                    
+                    if res_rt:
+                        print(f"[FindText] 발견! red_tab ({red_tab_source}) | 위치: ({res_rt['x']}, {res_rt['y']}), 일치율: {res_rt['score']:.1%}")
+                    else:
+                        print("[FindText] 'red_tab' 패턴을 target_info / play_area에서 찾을 수 없습니다.")
+
+                    # 3. user_info 상태 확인 (현재 상태 + FindText/bitwise 결과)
+                    try:
+                        print(
+                            f"[UserInfoTest] state.user_info_text='{getattr(state, 'user_info_text', '')}' "
+                            f"user_name='{getattr(state, 'user_name', '')}' "
+                            f"detected={getattr(state, 'is_user_detected', False)}"
+                        )
+
+                        inspect = reader_thread.inspect_user_info_frame(frame)
+                        print(f"[UserInfoTest] inspect_status={inspect.get('status', 'unknown')}")
+                        if not inspect.get("crop_available"):
+                            print("[UserInfoTest] user_info ROI를 추출하지 못했습니다.")
+                        else:
+                            for hit in inspect.get("hits", []):
+                                print(
+                                    f"[UserInfoTest] candidate: {hit['name']} "
+                                    f"| score={float(hit.get('score', 0.0) or 0.0):.1%}"
+                                )
+
+                            accepted_hit = inspect.get("accepted_hit")
+                            best_hit = inspect.get("best_hit")
+                            second_hit = inspect.get("second_hit")
+                            margin = float(inspect.get("margin", 0.0) or 0.0)
+
+                            if accepted_hit:
+                                print(
+                                    f"[UserInfoTest] accepted: {accepted_hit['name']} "
+                                    f"| score={float(accepted_hit.get('score', 0.0) or 0.0):.1%} "
+                                    f"| margin={margin:.1%}"
+                                )
+                            elif inspect.get("ambiguous") and best_hit:
+                                second_name = second_hit["name"] if second_hit else "-"
+                                second_score = float(second_hit.get("score", 0.0) or 0.0) if second_hit else 0.0
+                                print(
+                                    f"[UserInfoTest] ambiguous: best={best_hit['name']} "
+                                    f"({float(best_hit.get('score', 0.0) or 0.0):.1%}) "
+                                    f"second={second_name} ({second_score:.1%}) "
+                                    f"margin={margin:.1%}"
+                                )
+                            elif inspect.get("bitwise_name"):
+                                print(
+                                    f"[UserInfoTest] bitwise hit: {inspect['bitwise_name']} "
+                                    f"| score={float(inspect.get('bitwise_score', 0.0) or 0.0):.1%}"
+                                )
+                            else:
+                                if not getattr(state, "user_info_text", "") and not getattr(state, "user_name", ""):
+                                    print("[UserInfoTest] user_info가 비어 있거나 현재 선택된 대상이 없습니다.")
+                                else:
+                                    print("[UserInfoTest] user_info에서 화이트리스트 패턴을 찾지 못했습니다.")
+                    except Exception as e:
+                        print(f"[UserInfoTest] error: {e}")
+
+                    # 4. cooltime_area 상태 확인 (S 상태창 열림 전제)
+                    try:
+                        res_bm = reader_thread.find_pattern(frame, "bm", "cooltime_area")
+                        res_gg = reader_thread.find_pattern(frame, "gg", "cooltime_area")
+                        if res_bm:
+                            print(
+                                f"[CooltimeTest] 발견! bm | 위치: ({res_bm['x']}, {res_bm['y']}) "
+                                f"| 일치율: {res_bm['score']:.1%}"
+                            )
+                        else:
+                            print("[CooltimeTest] 'bm' 패턴을 cooltime_area에서 찾을 수 없습니다.")
+
+                        if res_gg:
+                            print(
+                                f"[CooltimeTest] 발견! gg | 위치: ({res_gg['x']}, {res_gg['y']}) "
+                                f"| 일치율: {res_gg['score']:.1%}"
+                            )
+                        else:
+                            print("[CooltimeTest] 'gg' 패턴을 cooltime_area에서 찾을 수 없습니다.")
+                    except Exception as e:
+                        print(f"[CooltimeTest] error: {e}")
+
+                    # 5. 실제 N_tab -> red_tab 테스트
+                    try:
+                        if not _is_game_window_active(state):
+                            print("[NTabTest] 게임창이 활성화되어 있지 않아 테스트를 건너뜁니다.")
+                            return
+
+                        if action_thread is None or not hasattr(action_thread, "_ensure_warrior_red_tab_via_ntab"):
+                            print("[NTabTest] LogicSvc가 준비되지 않아 테스트를 실행할 수 없습니다.")
+                            return
+
+                        support_snapshot = state.get_remote_data_by_role("격수")
+                        if not support_snapshot:
+                            print("[NTabTest] 격수 원격 데이터가 없어 테스트를 건너뜁니다.")
+                            return
+
+                        warrior_x = int(support_snapshot.get("x", support_snapshot.get("pos_x", 0)) or 0)
+                        warrior_y = int(support_snapshot.get("y", support_snapshot.get("pos_y", 0)) or 0)
+                        print(f"[NTabTest] start: warrior=({warrior_x}, {warrior_y}) self=({getattr(state, 'x', 0)}, {getattr(state, 'y', 0)})")
+
+                        success = bool(action_thread._ensure_warrior_red_tab_via_ntab(support_snapshot))
+                        print(
+                            f"[NTabTest] result: success={success} "
+                            f"red_tab={getattr(state, 'red_tab_enabled', False)} "
+                            f"user='{getattr(state, 'user_info_text', '')}' "
+                            f"target_kind='{getattr(state, 'target_kind', '')}' "
+                            f"target='{getattr(state, 'target_info_text', '')}'"
+                        )
+                    except Exception as e:
+                        print(f"[NTabTest] error: {e}")
+
+                HOTKEY_HANDLES["`"] = keyboard.on_press_key("`", lambda _event: test_patterns())
+                print("[DEBUG] ` 핫키 등록 완료 ('hb/red_tab/user_info' + 'N_tab/red_tab' 테스트용)")
             except Exception as e:
                 print(f"[Warn] Hotkey Registration Failed: {e}")
         
-        # GUI ?앹꽦 (hwnd ?꾨떖)
+        # GUI ??밴쉐 (hwnd ?袁⑤뼎)
         gui = AppView(state, hwnd=hwnd)
         
-        # GUI 생성 후 핫키 등록
+        # GUI ?앹꽦 ???ロ궎 ?깅줉
         register_hotkeys(gui)
         
     except Exception as e:
         print(f"[ERROR] 핫키 등록 실패: {e}")
-        # GUI ?앹꽦 (hwnd ?꾨떖)
+        # GUI ??밴쉐 (hwnd ?袁⑤뼎)
         gui = AppView(state, hwnd=hwnd)
     
-    # 연결 상태 변경 콜백 함수 (UI 업데이트는 AppView에서 주기적으로 수행함)
+    # ?곌껐 ?곹깭 蹂寃?肄쒕갚 ?⑥닔 (UI ?낅뜲?댄듃??AppView?먯꽌 二쇨린?곸쑝濡??섑뻾??
     def on_connection_change(is_connected):
         pass
     
     network = NetworkThread(state, network_cfg, on_connection_change)
     logger = LoggerThread(state)
 
-    # GUI ?앹꽦 ??grid_indicator ?꾨떖
+    # GUI ??밴쉐 ??grid_indicator ?袁⑤뼎
     if hasattr(gui, 'grid_indicator'):
         sentinel_thread.grid_indicator = gui.grid_indicator
 
-    # 紐⑤뱺 ?ㅻ젅???쒖옉
+    # 筌뤴뫀諭???살쟿????뽰삂
     print(f"[Worker] About to start reader_thread...")
     reader_thread.start()
     print(f"[Worker] reader_thread started")
-    numeric_scanner.start()  # 怨좎냽 ?レ옄 ?ㅼ틪 ?쒖옉
+    numeric_scanner.start()  # ?⑥쥙????ъ쁽 ??쇳떔 ??뽰삂
     sentinel_thread.start()
     action_thread.start()
     nav_thread.start()
@@ -293,7 +518,7 @@ def main(
 
     print("[OK] System started. (Production Mode)")
     
-    # GUI ?ㅽ뻾
+    # GUI ??쎈뻬
     gui.action_thread = action_thread
     gui.reader_thread = reader_thread
     gui.run()
@@ -308,4 +533,5 @@ if __name__ == "__main__":
         print(f"\n[FATAL ERROR] {e}")
         traceback.print_exc()
         input("Press Enter to exit...")
+
 

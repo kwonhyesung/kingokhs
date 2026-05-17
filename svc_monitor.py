@@ -2437,6 +2437,85 @@ class MonitorSvc(threading.Thread):
         self._red_tab_last_bbox = None
         self._red_tab_last_candidate = None
         self._red_tab_last_log_time = 0.0
+        self._last_user_info_logged = None
+        self._last_user_info_source = None
+        self._party_user_candidate = ""
+        self._party_user_candidate_hits = 0
+        self._party_user_stable_name = ""
+        self._party_user_stable_score = 0.0
+        self._party_user_stable_source = None
+        self._party_user_stable_until = 0.0
+        self._party_user_required_hits = 2
+        self._party_user_stable_ttl = 0.45
+        self._last_user_info_mode = "idle"
+        self._parsed_pattern_cache = {}
+        self._roi_last_processed_at = {}
+        self._roi_min_interval_sec = {
+            "hp_trig": 0.020,
+            "mp_trig": 0.020,
+            "play_area": 0.020,
+            "target_info": 0.025,
+            "user_info": 0.070,
+            "cooltime_area": 0.090,
+            "stat_info": 0.140,
+            "items_scan": 0.120,
+            "map_info": 0.350,
+        }
+
+        # patterns.json 로드
+        self.patterns = self._load_patterns()
+
+    def _roi_interval_for(self, region_name: str) -> float:
+        base = float(self._roi_min_interval_sec.get(region_name, 0.060))
+        if region_name == "user_info":
+            if bool(getattr(self.state, "self_status_scan_active", False)):
+                return min(base, 0.040)
+            if bool(getattr(self.state, "ntab_active", False)):
+                return min(base, 0.045)
+            if bool(getattr(self.state, "service_active", False)):
+                return min(base, 0.055)
+        if region_name == "cooltime_area" and bool(getattr(self.state, "service_active", False)):
+            return min(base, 0.070)
+        return base
+
+    def _should_process_roi(self, region_name: str, now_ts: float) -> bool:
+        if region_name in self.NUMERIC_FIELDS:
+            return False
+        last_ts = float(self._roi_last_processed_at.get(region_name, 0.0) or 0.0)
+        min_interval = self._roi_interval_for(region_name)
+        if (now_ts - last_ts) < min_interval:
+            return False
+        self._roi_last_processed_at[region_name] = now_ts
+        return True
+
+    @staticmethod
+    def _fast_crop_signature(crop: np.ndarray) -> tuple:
+        h, w = crop.shape[:2]
+        c0 = crop[0, 0]
+        cm = crop[h // 2, w // 2]
+        c1 = crop[h - 1, w - 1]
+        mean_val = float(crop.mean()) if crop.size else 0.0
+        return (
+            h,
+            w,
+            int(c0[0]), int(c0[1]), int(c0[2]),
+            int(cm[0]), int(cm[1]), int(cm[2]),
+            int(c1[0]), int(c1[1]), int(c1[2]),
+            round(mean_val, 2),
+        )
+
+    def _resolve_user_info_mode(self, now_ts: float) -> str:
+        if bool(getattr(self.state, "ntab_active", False)):
+            return "ntab"
+
+        scan_until = float(getattr(self.state, "self_status_scan_until", 0.0) or 0.0)
+        scan_active = bool(getattr(self.state, "self_status_scan_active", False))
+        if scan_active and now_ts <= scan_until:
+            return "self_status"
+        if scan_active and now_ts > scan_until:
+            self.state.self_status_scan_active = False
+            self.state.self_status_scan_until = 0.0
+        return "idle"
 
     def _recognize_with_findtext(self, crop):
         """findtext_wrapper의 _template_match_native를 사용하여 숫자 인식"""
@@ -2603,6 +2682,710 @@ class MonitorSvc(threading.Thread):
         union = float(max(1, aw * ah + bw * bh - int(inter)))
         return inter / union
 
+    def _load_patterns(self):
+        """patterns.json 파일에서 FindText 문자열들을 로드합니다."""
+        import json
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patterns.json")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    patterns = json.load(f)
+                    self._parsed_pattern_cache = {}
+                    return patterns
+            except Exception as e:
+                print(f"[FindText] patterns.json 로드 실패: {e}")
+        return {}
+
+    def _get_cached_ft_pattern(self, pattern_name: str) -> dict | None:
+        ft_string = self.patterns.get(pattern_name)
+        if not ft_string:
+            return None
+
+        cached = self._parsed_pattern_cache.get(pattern_name)
+        if cached and cached.get("ft_string") == ft_string:
+            return cached.get("parsed")
+
+        parsed = self._parse_ft_string(ft_string)
+        self._parsed_pattern_cache[pattern_name] = {
+            "ft_string": ft_string,
+            "parsed": parsed,
+        }
+        return parsed
+
+    def _match_ft_pattern_in_crop(self, crop: np.ndarray, pattern_name: str, err_ratio: float = 0.08) -> dict | None:
+        parsed = self._get_cached_ft_pattern(pattern_name)
+        if parsed is None or crop is None or crop.size == 0:
+            return None
+
+        bitmap = parsed["bitmap"]
+        len1 = parsed["len1"]
+        p_w = parsed["width"]
+        p_h = parsed["height"]
+        if len1 <= 0 or crop.shape[0] < p_h or crop.shape[1] < p_w:
+            return None
+
+        binary_map = self._build_binary_map(crop, parsed["config"])
+        result = cv2.matchTemplate(binary_map, bitmap, cv2.TM_CCORR)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+        e1_max = max(1, int(len1 * err_ratio))
+        threshold_val = len1 - e1_max
+        if max_val < threshold_val:
+            return None
+
+        score = float(max_val) / max(1.0, float(len1))
+        return {
+            "name": parsed["name"],
+            "score": score,
+            "x": int(max_loc[0]),
+            "y": int(max_loc[1]),
+            "w": p_w,
+            "h": p_h,
+        }
+
+    def _evaluate_party_user_info(
+        self,
+        crop: np.ndarray,
+        err_ratio: float = 0.08,
+        allowed_patterns: list[str] | None = None,
+    ) -> dict:
+        hits = []
+        if allowed_patterns is None:
+            party_patterns = list(getattr(self.state, "party_userinfo_patterns", []) or [])
+        else:
+            party_patterns = list(allowed_patterns or [])
+        for key in party_patterns:
+            hit = self._match_ft_pattern_in_crop(crop, key, err_ratio=err_ratio)
+            if hit:
+                hits.append(hit)
+
+        hits.sort(key=lambda item: float(item.get("score", 0.0) or 0.0), reverse=True)
+        best_hit = hits[0] if hits else None
+        second_hit = hits[1] if len(hits) > 1 else None
+        best_score = float(best_hit.get("score", 0.0) or 0.0) if best_hit else 0.0
+        second_score = float(second_hit.get("score", 0.0) or 0.0) if second_hit else 0.0
+        margin = best_score - second_score
+        accepted_hit = None
+        ambiguous = False
+
+        if best_hit:
+            if best_score >= 0.90 and (margin >= 0.03 or second_score < 0.88):
+                accepted_hit = best_hit
+            else:
+                ambiguous = True
+
+        return {
+            "hits": hits,
+            "best_hit": best_hit,
+            "second_hit": second_hit,
+            "best_score": best_score,
+            "second_score": second_score,
+            "margin": margin,
+            "accepted_hit": accepted_hit,
+            "ambiguous": ambiguous,
+        }
+
+    def _select_party_user_hit(self, hits: list[dict]) -> dict:
+        sorted_hits = sorted(
+            hits,
+            key=lambda item: float(item.get("score", 0.0) or 0.0),
+            reverse=True,
+        )
+        best_hit = sorted_hits[0] if sorted_hits else None
+        second_hit = sorted_hits[1] if len(sorted_hits) > 1 else None
+        best_score = float(best_hit.get("score", 0.0) or 0.0) if best_hit else 0.0
+        second_score = float(second_hit.get("score", 0.0) or 0.0) if second_hit else 0.0
+        margin = best_score - second_score
+        accepted_hit = None
+        ambiguous = False
+
+        if best_hit:
+            if best_score >= 0.90 and (margin >= 0.03 or second_score < 0.88):
+                accepted_hit = best_hit
+            else:
+                ambiguous = True
+
+        return {
+            "hits": sorted_hits,
+            "best_hit": best_hit,
+            "second_hit": second_hit,
+            "best_score": best_score,
+            "second_score": second_score,
+            "margin": margin,
+            "accepted_hit": accepted_hit,
+            "ambiguous": ambiguous,
+        }
+
+    def _evaluate_party_user_info_from_frame(
+        self,
+        frame,
+        allowed_patterns: list[str] | None = None,
+        err_ratio: float = 0.08,
+    ) -> dict:
+        crop = self._extract_region_crop(frame, "user_info")
+        if crop is None:
+            return self._select_party_user_hit([])
+        return self._evaluate_party_user_info(
+            crop,
+            err_ratio=err_ratio,
+            allowed_patterns=allowed_patterns,
+        )
+
+    def _extract_region_crop(self, frame, region_name: str, pad: int = 5):
+        reg = self.regions.get(region_name)
+        if reg is None or frame is None:
+            return None
+
+        ox, oy, scx, scy = self.obs_params
+        fh, fw = frame.shape[:2]
+        sx = max(0, int(reg.sx * scx + ox - pad))
+        sy = max(0, int(reg.sy * scy + oy - pad))
+        dx = min(fw, int(reg.dx * scx + ox + pad))
+        dy = min(fh, int(reg.dy * scy + oy + pad))
+        crop = frame[sy:dy, sx:dx]
+        if crop.size == 0:
+            return None
+
+        target_w = reg.dx - reg.sx
+        target_h = reg.dy - reg.sy
+        if target_w > 0 and target_h > 0 and (crop.shape[1] != target_w or crop.shape[0] != target_h):
+            crop = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+        return crop
+
+    def inspect_user_info_frame(self, frame) -> dict:
+        info = {
+            "crop_available": False,
+            "status": "crop_unavailable",
+            "hits": [],
+            "best_hit": None,
+            "second_hit": None,
+            "best_score": 0.0,
+            "second_score": 0.0,
+            "margin": 0.0,
+            "accepted_hit": None,
+            "ambiguous": False,
+            "bitwise_name": "",
+            "bitwise_score": 0.0,
+        }
+        crop = self._extract_region_crop(frame, "user_info")
+        if crop is None:
+            return info
+
+        info["crop_available"] = True
+        info["status"] = "no_match"
+        info.update(self._evaluate_party_user_info_from_frame(frame))
+        if info["accepted_hit"]:
+            info["status"] = "accepted"
+        elif info["ambiguous"]:
+            info["status"] = "ambiguous"
+        else:
+            bitwise_name, bitwise_score = self.matcher.recognize_entity_bitwise(crop, "users")
+            info["bitwise_name"] = bitwise_name or ""
+            info["bitwise_score"] = float(bitwise_score or 0.0)
+            if info["bitwise_name"]:
+                info["status"] = "bitwise"
+        return info
+
+    def find_pattern(self, frame, pattern_name, region_name="play_area"):
+        """
+        JSON에 등록된 패턴 이름을 사용하여 검색을 수행합니다. (고속 cv2.matchTemplate 방식)
+        """
+        if frame is None: return None
+        
+        ft_string = self.patterns.get(pattern_name)
+        if not ft_string:
+            # 실시간 추가 반영을 위해 재로드 시도
+            self.patterns = self._load_patterns()
+            ft_string = self.patterns.get(pattern_name)
+            if not ft_string:
+                return None
+
+        # 1. ROI 크롭
+        reg = self.regions.get(region_name)
+        if reg:
+            ox, oy, scx, scy = self.obs_params
+            fh, fw = frame.shape[:2]
+            sx = max(0, int(reg.sx * scx + ox))
+            sy = max(0, int(reg.sy * scy + oy))
+            dx = min(fw, int(reg.dx * scx + ox))
+            dy = min(fh, int(reg.dy * scy + oy))
+            search_frame = frame[sy:dy, sx:dx]
+        else:
+            sx = sy = 0
+            search_frame = frame
+
+        if search_frame.size == 0: return None
+
+        # 2. FindText 문자열 파싱 (Color Mode / Gray Threshold 자동 판별)
+        try:
+            # 형식: |<이름>설정$너비.데이터
+            import re as _re
+            match = _re.search(r"<(.*?)>(.*?)\$(\d+)\.(.*)", ft_string)
+            if not match: return None
+            
+            p_name, p_config, p_width, p_data = match.groups()
+            p_width = int(p_width)
+            
+            # 비트맵 복원
+            ahk_chars = "0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            c2v = {c: i for i, c in enumerate(ahk_chars)}
+            bits = "".join(f"{c2v.get(ch, 0):06b}" for ch in p_data)
+            bits = _re.sub(r"10*$", "", bits)
+            p_height = len(bits) // p_width
+            if p_height == 0: return None
+            
+            bitmap = np.array([1 if bits[i] == '1' else 0 for i in range(p_width * p_height)], dtype=np.float32).reshape(p_height, p_width)
+            len1 = np.sum(bitmap)
+            
+            # 이진 지도(Binary Map) 생성
+            if "*" in p_config:
+                # (1) Gray Threshold 모드
+                thr = int(p_config.replace("*", ""))
+                gray = (search_frame[:,:,0].astype(np.uint32)*38 + 
+                        search_frame[:,:,1].astype(np.uint32)*75 + 
+                        search_frame[:,:,2].astype(np.uint32)*15)
+                binary_map = (gray < (thr + 1) << 7).astype(np.float32)
+            else:
+                # (2) Color Similarity 모드
+                parts = p_config.split("-")
+                color_hex = parts[0]
+                sim = float(parts[1]) if len(parts) > 1 else 0.90
+                
+                r_target = int(color_hex[0:2], 16)
+                g_target = int(color_hex[2:4], 16)
+                b_target = int(color_hex[4:6], 16)
+                max_dist_sq = int(9 * 255 * 255 * (1 - sim) ** 2)
+                
+                dist_sq = ((search_frame[:,:,0].astype(np.int32) - r_target)**2 + 
+                           (search_frame[:,:,1].astype(np.int32) - g_target)**2 + 
+                           (search_frame[:,:,2].astype(np.int32) - b_target)**2)
+                binary_map = (dist_sq <= max_dist_sq).astype(np.float32)
+
+            # 3. OpenCV 고속 매칭 (TM_SQDIFF: 제곱 차이 방식 - 전경/배경 모두 체크하여 오탐 방지)
+            # TM_SQDIFF는 일치할수록 값이 0에 가깝습니다.
+            result = cv2.matchTemplate(binary_map, bitmap, cv2.TM_SQDIFF)
+            min_val, _, min_loc, _ = cv2.minMaxLoc(result)
+
+            # 허용 오차: 전체 비트맵 크기의 10~15% 미만으로 틀려야 함
+            total_pixels = p_width * p_height
+            error_threshold = total_pixels * 0.15  # 15% 허용
+            
+            score = 1.0 - (min_val / total_pixels)
+            
+            if min_val <= error_threshold:
+                res = {
+                    "name": p_name,
+                    "x": min_loc[0] + sx,
+                    "y": min_loc[1] + sy,
+                    "w": p_width,
+                    "h": p_height,
+                    "score": score
+                }
+                
+                # 시각화 마커 추가 (0.5초 유지)
+                if hasattr(self.state, "visual_markers"):
+                    with self.state._lock:
+                        self.state.visual_markers.append({
+                            "x": res["x"] + p_width // 2,
+                            "y": res["y"] + p_height // 2,
+                            "color": "cyan",  # 오탐 방지용 새로운 색상
+                            "size": 20,
+                            "expiry": time.time() + 0.5
+                        })
+                
+                return res
+            else:
+                # [DEBUG] 실패 시 최고 점수 및 색상 정보 출력
+                if VERBOSE_MONITOR_LOGS or pattern_name in ("hb", "red_tab"):
+                    avg_c = np.mean(search_frame, axis=(0, 1))
+                    print(f"[FindText] '{pattern_name}' 실패: Score={score:.2f} (Err:{int(min_val)}/{int(error_threshold)}) | Avg Color(RGB): {avg_c}")
+        except Exception as e:
+            print(f"[FindText] 검색 중 오류: {e}")
+        return None
+
+    # ----------------------------------------------------------
+    # ── FIND PATTERN 확장 API ────────────────────────────────
+    # ----------------------------------------------------------
+
+    def _parse_ft_string(self, ft_string: str) -> dict | None:
+        """
+        FindText 문자열을 파싱하여 비트맵 dict 반환.
+        반환값: {name, bitmap(float32 2D), width, height, len1, config}
+        실패 시 None 반환.
+
+        지원 형식:
+            |<이름>*임계값$너비.데이터      (Gray Threshold 모드)
+            |<이름>RRGGBB-유사도$너비.데이터 (Color Similarity 모드)
+        """
+        import re as _re
+        match = _re.search(r"<(.*?)>(.*?)\$(\d+)\.(.*)", ft_string)
+        if not match:
+            return None
+        p_name, p_config, p_width_str, p_data = match.groups()
+        p_width = int(p_width_str)
+
+        ahk_chars = "0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+        c2v = {c: i for i, c in enumerate(ahk_chars)}
+        bits = "".join(f"{c2v.get(ch, 0):06b}" for ch in p_data)
+        bits = _re.sub(r"10*$", "", bits)
+        p_height = len(bits) // p_width if p_width > 0 else 0
+        if p_height == 0:
+            return None
+
+        bitmap = np.array(
+            [1 if bits[i] == '1' else 0 for i in range(p_width * p_height)],
+            dtype=np.float32
+        ).reshape(p_height, p_width)
+
+        return {
+            "name":    p_name,
+            "config":  p_config,
+            "bitmap":  bitmap,
+            "width":   p_width,
+            "height":  p_height,
+            "len1":    float(np.sum(bitmap)),
+        }
+
+    def _build_binary_map(self, search_frame: np.ndarray, p_config: str) -> np.ndarray:
+        """
+        search_frame + p_config 조합으로 이진 맵 생성.
+        * 접두사  → Gray Threshold 모드
+        그 외      → Color Similarity 모드
+        """
+        if "*" in p_config:
+            thr = int(p_config.replace("*", ""))
+            gray = (search_frame[:, :, 0].astype(np.uint32) * 38 +
+                    search_frame[:, :, 1].astype(np.uint32) * 75 +
+                    search_frame[:, :, 2].astype(np.uint32) * 15)
+            return (gray < (thr + 1) << 7).astype(np.float32)
+        else:
+            parts = p_config.split("-")
+            color_hex = parts[0]
+            sim = float(parts[1]) if len(parts) > 1 else 0.90
+            r_t = int(color_hex[0:2], 16)
+            g_t = int(color_hex[2:4], 16)
+            b_t = int(color_hex[4:6], 16)
+            max_dist_sq = int(9 * 255 * 255 * (1 - sim) ** 2)
+            dist_sq = (
+                (search_frame[:, :, 0].astype(np.int32) - r_t) ** 2 +
+                (search_frame[:, :, 1].astype(np.int32) - g_t) ** 2 +
+                (search_frame[:, :, 2].astype(np.int32) - b_t) ** 2
+            )
+            return (dist_sq <= max_dist_sq).astype(np.float32)
+
+    def _crop_roi(self, frame: np.ndarray, region_name: str) -> tuple:
+        """
+        region_name에 해당하는 영역을 크롭하고 (cropped, ox, oy) 반환.
+        region 없으면 (frame, 0, 0) 반환.
+        """
+        reg = self.regions.get(region_name)
+        if reg:
+            obs_ox, obs_oy, scx, scy = self.obs_params
+            fh, fw = frame.shape[:2]
+            sx = max(0, int(reg.sx * scx + obs_ox))
+            sy = max(0, int(reg.sy * scy + obs_oy))
+            dx = min(fw, int(reg.dx * scx + obs_ox))
+            dy = min(fh, int(reg.dy * scy + obs_oy))
+            cropped = frame[sy:dy, sx:dx]
+            return (cropped, sx, sy)
+        return (frame, 0, 0)
+
+    def find_pattern_all(
+        self,
+        frame: np.ndarray,
+        pattern_name: str,
+        region_name: str = "play_area",
+        max_results: int = 20,
+        overlap_px: int = 5,
+        err_ratio: float = 0.15,
+    ) -> list[dict]:
+        """
+        patterns.json 패턴을 사용하여 화면에서 **모든** 일치 위치를 탐색한다.
+
+        Args:
+            frame:         캡처 프레임 (RGB ndarray)
+            pattern_name:  patterns.json 키 이름
+            region_name:   검색 ROI (기본 'play_area')
+            max_results:   최대 반환 개수 (기본 20)
+            overlap_px:    동일 위치로 간주하는 픽셀 거리 (NMS 역할)
+            err_ratio:     허용 오차율 (기본 0.15 = 15%)
+
+        Returns:
+            list of dict: [{"name", "x", "y", "w", "h", "score"}, ...]
+                          x, y 는 전체 프레임 절대 좌표
+        """
+        if frame is None:
+            return []
+
+        ft_string = self.patterns.get(pattern_name)
+        if not ft_string:
+            self.patterns = self._load_patterns()
+            ft_string = self.patterns.get(pattern_name)
+        if not ft_string:
+            return []
+
+        parsed = self._parse_ft_string(ft_string)
+        if parsed is None:
+            return []
+
+        search_frame, ox, oy = self._crop_roi(frame, region_name)
+        if search_frame.size == 0:
+            return []
+
+        binary_map = self._build_binary_map(search_frame, parsed["config"])
+        bitmap     = parsed["bitmap"]
+        len1       = parsed["len1"]
+        p_w, p_h   = parsed["width"], parsed["height"]
+
+        if len1 == 0:
+            return []
+
+        # OpenCV 상관 매칭
+        result = cv2.matchTemplate(binary_map, bitmap, cv2.TM_CCORR)
+        e1_max = max(1, int(len1 * err_ratio))
+        threshold_val = len1 - e1_max
+
+        # 임계값 이상인 모든 위치 추출
+        ys, xs = np.where(result >= threshold_val)
+
+        matches = []
+        for x_local, y_local in zip(xs, ys):
+            score = float(result[y_local, x_local]) / len1
+            matches.append({
+                "name":  parsed["name"],
+                "x":     int(x_local) + ox,
+                "y":     int(y_local) + oy,
+                "w":     p_w,
+                "h":     p_h,
+                "score": round(score, 4),
+            })
+
+        if not matches:
+            return []
+
+        # 단순 NMS: score 내림차순 정렬 후 overlap_px 이내 제거
+        matches.sort(key=lambda m: m["score"], reverse=True)
+        kept: list[dict] = []
+        close_x = overlap_px
+        close_y = overlap_px
+        if pattern_name == "hb":
+            close_x = max(overlap_px, int(p_w * 2.2))
+            close_y = max(overlap_px, int(p_h * 2.8))
+        for m in matches:
+            too_close = any(
+                abs(m["x"] - k["x"]) < close_x and abs(m["y"] - k["y"]) < close_y
+                for k in kept
+            )
+            if not too_close:
+                kept.append(m)
+            if len(kept) >= max_results:
+                break
+
+        return kept
+
+    def cluster_pattern_objects(
+        self,
+        matches: list[dict],
+        distance_px: int = 14,
+        max_results: int = 20,
+    ) -> list[dict]:
+        """
+        동일 객체 주변에서 나온 다중 후보를 하나의 객체로 묶는다.
+        가까운 중심점을 가진 후보들을 하나의 군집으로 보고 최고 점수 후보를 대표로 남긴다.
+        """
+        if not matches:
+            return []
+
+        clusters: list[dict] = []
+        sorted_matches = sorted(matches, key=lambda m: float(m.get("score", 0.0) or 0.0), reverse=True)
+        for match in sorted_matches:
+            cx = float(match["x"]) + float(match.get("w", 0)) / 2.0
+            cy = float(match["y"]) + float(match.get("h", 0)) / 2.0
+            assigned = False
+            for cluster in clusters:
+                if abs(cx - cluster["cx"]) <= distance_px and abs(cy - cluster["cy"]) <= distance_px:
+                    cluster["members"].append(match)
+                    if float(match.get("score", 0.0) or 0.0) > float(cluster["best"].get("score", 0.0) or 0.0):
+                        cluster["best"] = match
+                    member_count = len(cluster["members"])
+                    cluster["cx"] = ((cluster["cx"] * (member_count - 1)) + cx) / member_count
+                    cluster["cy"] = ((cluster["cy"] * (member_count - 1)) + cy) / member_count
+                    assigned = True
+                    break
+            if not assigned:
+                clusters.append({
+                    "cx": cx,
+                    "cy": cy,
+                    "best": match,
+                    "members": [match],
+                })
+
+        objects: list[dict] = []
+        for cluster in clusters[:max_results]:
+            best = dict(cluster["best"])
+            best["count"] = len(cluster["members"])
+            best["cx"] = round(cluster["cx"], 1)
+            best["cy"] = round(cluster["cy"], 1)
+            objects.append(best)
+        return objects
+
+    def find_pattern_wait(
+        self,
+        pattern_name: str,
+        region_name: str = "play_area",
+        timeout: float = 5.0,
+        appear: bool = True,
+        poll_interval: float = 0.05,
+        err_ratio: float = 0.15,
+    ) -> dict | None:
+        """
+        패턴이 **나타날 때까지** (또는 사라질 때까지) 대기한다.
+
+        Args:
+            pattern_name:  patterns.json 키
+            region_name:   검색 ROI
+            timeout:       최대 대기 시간 (초, 기본 5.0)
+            appear:        True → 나타날 때까지 / False → 사라질 때까지
+            poll_interval: 검사 주기 (초, 기본 0.05)
+            err_ratio:     허용 오차율
+
+        Returns:
+            패턴이 조건을 충족하면 find_pattern 결과 dict, 타임아웃이면 None.
+
+        사용 예:
+            # 체력바 빨간 탭이 나타날 때까지 최대 3초 대기
+            res = monitor.find_pattern_wait("hb", timeout=3.0, appear=True)
+            if res:
+                print(f"발견: {res['x']}, {res['y']}")
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            frame = getattr(self.state, "last_frame", None)
+            if frame is not None:
+                res = self.find_pattern(frame, pattern_name, region_name)
+                found = res is not None
+                if appear and found:
+                    return res
+                if not appear and not found:
+                    return {"name": pattern_name, "x": -1, "y": -1, "w": 0, "h": 0, "score": 0.0}
+            time.sleep(poll_interval)
+
+        # 타임아웃
+        print(f"[FindPattern] '{pattern_name}' 대기 타임아웃 ({timeout}s)")
+        return None
+
+    def find_pattern_region(
+        self,
+        frame: np.ndarray,
+        pattern_name: str,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        err_ratio: float = 0.15,
+        find_all: bool = False,
+        max_results: int = 20,
+        overlap_px: int = 5,
+    ) -> dict | list | None:
+        """
+        **임의 픽셀 좌표** 직접 지정 버전.
+        regions dict 없이 x1,y1,x2,y2로 ROI를 직접 지정한다.
+
+        Args:
+            frame:        캡처 프레임 (RGB ndarray)
+            pattern_name: patterns.json 키
+            x1, y1:       검색 영역 좌상단 (절대 픽셀)
+            x2, y2:       검색 영역 우하단 (절대 픽셀)
+            err_ratio:    허용 오차율
+            find_all:     True → 모든 결과 리스트 / False → 첫 번째 결과 dict
+            max_results:  find_all=True 일 때 최대 반환 수
+            overlap_px:   NMS 픽셀 거리
+
+        Returns:
+            find_all=False: dict or None
+            find_all=True:  list[dict]
+
+        사용 예:
+            # 화면 좌상단 400×200 영역에서 "boss_hp" 패턴 탐색
+            res = monitor.find_pattern_region(frame, "boss_hp", 0, 0, 400, 200)
+        """
+        if frame is None:
+            return [] if find_all else None
+
+        ft_string = self.patterns.get(pattern_name)
+        if not ft_string:
+            self.patterns = self._load_patterns()
+            ft_string = self.patterns.get(pattern_name)
+        if not ft_string:
+            return [] if find_all else None
+
+        parsed = self._parse_ft_string(ft_string)
+        if parsed is None:
+            return [] if find_all else None
+
+        # ROI 크롭 (직접 지정)
+        fh, fw = frame.shape[:2]
+        sx = max(0, x1);  sy = max(0, y1)
+        dx = min(fw, x2); dy = min(fh, y2)
+        search_frame = frame[sy:dy, sx:dx]
+        if search_frame.size == 0:
+            return [] if find_all else None
+
+        binary_map = self._build_binary_map(search_frame, parsed["config"])
+        bitmap     = parsed["bitmap"]
+        len1       = parsed["len1"]
+        p_w, p_h   = parsed["width"], parsed["height"]
+
+        if len1 == 0:
+            return [] if find_all else None
+
+        result = cv2.matchTemplate(binary_map, bitmap, cv2.TM_CCORR)
+        e1_max = max(1, int(len1 * err_ratio))
+        threshold_val = len1 - e1_max
+
+        if not find_all:
+            # 단일 결과: 가장 높은 위치만 반환
+            _, max_val, _, max_loc = cv2.minMaxLoc(result)
+            if max_val >= threshold_val:
+                return {
+                    "name":  parsed["name"],
+                    "x":     max_loc[0] + sx,
+                    "y":     max_loc[1] + sy,
+                    "w":     p_w,
+                    "h":     p_h,
+                    "score": round(float(max_val) / len1, 4),
+                }
+            return None
+
+        # 다중 결과
+        ys, xs = np.where(result >= threshold_val)
+        matches = []
+        for x_local, y_local in zip(xs, ys):
+            score = float(result[y_local, x_local]) / len1
+            matches.append({
+                "name":  parsed["name"],
+                "x":     int(x_local) + sx,
+                "y":     int(y_local) + sy,
+                "w":     p_w,
+                "h":     p_h,
+                "score": round(score, 4),
+            })
+
+        matches.sort(key=lambda m: m["score"], reverse=True)
+        kept: list[dict] = []
+        for m in matches:
+            too_close = any(
+                abs(m["x"] - k["x"]) < overlap_px and abs(m["y"] - k["y"]) < overlap_px
+                for k in kept
+            )
+            if not too_close:
+                kept.append(m)
+            if len(kept) >= max_results:
+                break
+
+        return kept
+
     def check_red_tab_with_findtext(self, frame):
         """
         ft.ahk Color Mode (유사도 방식)를 Python으로 직접 구현하여
@@ -2695,22 +3478,21 @@ class MonitorSvc(threading.Thread):
             print(f"[RedTab] 패턴({pw}x{ph})이 검색 영역({sw}x{sh})보다 큼")
             return False
 
-        found = False
-        found_x, found_y = -1, -1
-        best_mismatch = len1  # 진단용
+        # ── cv2.matchTemplate으로 고속 검색 ──
+        # 원리: CCORR = 각 위치에서 fg_map과 pattern_bin의 내적합
+        #   score[y,x] = sum(fg_map[y:y+ph, x:x+pw] * pattern_bin)
+        #   score 최대값 = len1 (전경픽셀 모두 일치)
+        #   mismatch1 = len1 - score → score >= (len1 - e1_max) 이면 매칭
+        pattern_bin = bitmap.astype(np.float32)
+        fg_map_f = fg_map.astype(np.float32)
+        result = cv2.matchTemplate(fg_map_f, pattern_bin, cv2.TM_CCORR)
 
-        for fy in range(sh - ph + 1):
-            for fx in range(sw - pw + 1):
-                fg_crop = fg_map[fy:fy+ph, fx:fx+pw]
-                mismatch1 = int(np.sum(fg_crop[y1, x1] == 0))
-                if mismatch1 < best_mismatch:
-                    best_mismatch = mismatch1
-                if mismatch1 <= e1_max:
-                    found = True
-                    found_x, found_y = fx, fy
-                    break
-            if found:
-                break
+        threshold_score = float(len1 - e1_max)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+        found = max_val >= threshold_score
+        found_x, found_y = max_loc if found else (-1, -1)
+        best_mismatch = int(len1 - max_val)
 
         # ── 4. 결과 출력 및 처리 ──
         if not found:
@@ -2720,7 +3502,7 @@ class MonitorSvc(threading.Thread):
             try:
                 from bis_core import hw, humanized_sleep
                 hw.humanized_press("tab")
-                humanized_sleep(0.05, variance=0.1)
+                humanized_sleep(0.3, variance=0.1)
                 hw.humanized_press("tab")
             except Exception as e:
                 print(f"[RedTab] 하드웨어 입력 오류: {e}")
@@ -2735,6 +3517,7 @@ class MonitorSvc(threading.Thread):
         self,
         play_area_rgb: np.ndarray,
         region: Optional[tuple[int, int, int, int]] = None,
+        promotion_mode: bool = False,
     ) -> list[dict]:
         """Return red-tab box candidates within play_area or a clipped sub-region."""
         if play_area_rgb is None or play_area_rgb.size == 0:
@@ -2762,8 +3545,12 @@ class MonitorSvc(threading.Thread):
         except Exception:
             return []
 
-        red1 = cv2.inRange(hsv, np.array([0, 70, 70]), np.array([14, 255, 255]))
-        red2 = cv2.inRange(hsv, np.array([166, 70, 70]), np.array([180, 255, 255]))
+        if promotion_mode:
+            red1 = cv2.inRange(hsv, np.array([0, 40, 40]), np.array([28, 255, 255]))
+            red2 = cv2.inRange(hsv, np.array([160, 40, 40]), np.array([180, 255, 255]))
+        else:
+            red1 = cv2.inRange(hsv, np.array([0, 70, 70]), np.array([18, 255, 255]))
+            red2 = cv2.inRange(hsv, np.array([166, 70, 70]), np.array([180, 255, 255]))
         mask = cv2.bitwise_or(red1, red2)
 
         kernel = np.ones((3, 3), np.uint8)
@@ -2776,11 +3563,11 @@ class MonitorSvc(threading.Thread):
         candidates: list[dict] = []
         for c in contours:
             area = float(cv2.contourArea(c))
-            if area < 20.0:
+            if area < (12.0 if promotion_mode else 20.0):
                 continue
 
             x, y, w, h = cv2.boundingRect(c)
-            if w < 12 or h < 12:
+            if w < (8 if promotion_mode else 12) or h < (8 if promotion_mode else 12):
                 continue
             if w > 420 or h > 420:
                 continue
@@ -2792,11 +3579,11 @@ class MonitorSvc(threading.Thread):
             bbox_area = float(max(1, w * h))
             roi = mask[y:y + h, x:x + w]
             red_pixels = float(cv2.countNonZero(roi))
-            if red_pixels < 18.0:
+            if red_pixels < (10.0 if promotion_mode else 18.0):
                 continue
 
             fill_ratio = red_pixels / bbox_area
-            if fill_ratio < 0.008:
+            if fill_ratio < (0.005 if promotion_mode else 0.008):
                 continue
 
             perimeter = float(max(1, 2 * (w + h)))
@@ -2826,12 +3613,68 @@ class MonitorSvc(threading.Thread):
         candidates.sort(key=lambda c: c["score"], reverse=True)
         return candidates
 
-    def _detect_red_tab(self, play_area_rgb: np.ndarray) -> bool:
+    def _is_red_tab_promotion_mode(self) -> bool:
+        if bool(getattr(self.state, "red_tab_promotion_active", False)):
+            return True
+        promotion_until = float(getattr(self.state, "red_tab_promotion_until", 0.0) or 0.0)
+        return time.time() < promotion_until
+
+    def _detect_red_tab_in_target_info(self, target_info_rgb: np.ndarray) -> bool:
+        if target_info_rgb is None or target_info_rgb.size == 0:
+            return False
+        try:
+            hsv = cv2.cvtColor(target_info_rgb, cv2.COLOR_RGB2HSV)
+        except Exception:
+            return False
+
+        promotion_mode = self._is_red_tab_promotion_mode()
+        if promotion_mode:
+            warm1 = cv2.inRange(hsv, np.array([0, 35, 35]), np.array([28, 255, 255]))
+            warm2 = cv2.inRange(hsv, np.array([160, 35, 35]), np.array([180, 255, 255]))
+        else:
+            warm1 = cv2.inRange(hsv, np.array([0, 50, 50]), np.array([22, 255, 255]))
+            warm2 = cv2.inRange(hsv, np.array([166, 50, 50]), np.array([180, 255, 255]))
+        mask = cv2.bitwise_or(warm1, warm2)
+        mask = cv2.GaussianBlur(mask, (3, 3), 0)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+
+        h, w = mask.shape[:2]
+        if h <= 0 or w <= 0:
+            return False
+
+        bw = max(2, int(w * 0.16))
+        bh = max(2, int(h * 0.22))
+        border_mask = np.zeros_like(mask)
+        border_mask[:bh, :] = 255
+        border_mask[-bh:, :] = 255
+        border_mask[:, :bw] = 255
+        border_mask[:, -bw:] = 255
+        inner_mask = np.zeros_like(mask)
+        if h > (bh * 2) and w > (bw * 2):
+            inner_mask[bh:h - bh, bw:w - bw] = 255
+
+        border_red = float(cv2.countNonZero(cv2.bitwise_and(mask, border_mask)))
+        border_area = float(max(1, cv2.countNonZero(border_mask)))
+        border_ratio = border_red / border_area
+        inner_red = float(cv2.countNonZero(cv2.bitwise_and(mask, inner_mask)))
+        inner_area = float(max(1, cv2.countNonZero(inner_mask)))
+        inner_ratio = inner_red / inner_area if inner_area > 0 else 0.0
+
+        min_border_red = 14.0 if promotion_mode else 18.0
+        min_border_ratio = 0.020 if promotion_mode else 0.028
+        if border_red < min_border_red or border_ratio < min_border_ratio:
+            return False
+        if inner_ratio > (border_ratio * 1.10):
+            return False
+        return True
+
+    def _detect_red_tab(self, play_area_rgb: np.ndarray, target_info_hint: bool = False) -> bool:
         """Detect the red-tab target box directly from play_area."""
         if play_area_rgb is None or play_area_rgb.size == 0:
             return self._red_tab_state
 
         full_h, full_w = play_area_rgb.shape[:2]
+        promotion_mode = self._is_red_tab_promotion_mode()
         search_regions: list[tuple[int, int, int, int]] = []
 
         if self._red_tab_last_bbox:
@@ -2844,13 +3687,20 @@ class MonitorSvc(threading.Thread):
 
         best = None
         for region in search_regions:
-            candidates = self._find_red_tab_candidates(play_area_rgb, region)
+            candidates = self._find_red_tab_candidates(play_area_rgb, region, promotion_mode=promotion_mode)
             if not candidates:
                 continue
             best = candidates[0]
             break
 
         now = time.time()
+        if target_info_hint and promotion_mode:
+            self._red_tab_hit_streak = max(1, self._red_tab_hit_streak + 1)
+            self._red_tab_miss_streak = 0
+            self._red_tab_state = True
+            self._red_tab_last_log_time = now
+            return True
+
         if best:
             bbox = (best["x"], best["y"], best["w"], best["h"])
             if self._red_tab_last_bbox:
@@ -2871,7 +3721,7 @@ class MonitorSvc(threading.Thread):
             self._red_tab_last_bbox = bbox
             self._red_tab_last_candidate = best
 
-            if self._red_tab_hit_streak >= 2:
+            if self._red_tab_hit_streak >= 1:
                 if not self._red_tab_state and now - self._red_tab_last_log_time >= 0.5:
                     _monitor_log(
                         f"[RedTab] ON bbox={bbox} score={best['score']:.1f} "
@@ -2883,7 +3733,8 @@ class MonitorSvc(threading.Thread):
 
         self._red_tab_hit_streak = 0
         self._red_tab_miss_streak += 1
-        if self._red_tab_miss_streak >= 2:
+        miss_limit = 3 if promotion_mode else 2
+        if self._red_tab_miss_streak >= miss_limit:
             if self._red_tab_state and now - self._red_tab_last_log_time >= 0.5:
                 _monitor_log("[RedTab] OFF")
                 self._red_tab_last_log_time = now
@@ -3149,11 +4000,16 @@ class MonitorSvc(threading.Thread):
             # res_updates = {}
             h_trig_active = False
             m_trig_active = False
+            target_info_red_tab_hint = False
 
             # 다른 필드 처리
             for name, reg in self.regions.items():
                 # 숫자 필드는 이미 처리했으므로 스킵
                 if name in self.NUMERIC_FIELDS:
+                    continue
+
+                now_roi = time.time()
+                if not self._should_process_roi(name, now_roi):
                     continue
 
                 # 좌표 계산 및 crop 추출
@@ -3197,8 +4053,8 @@ class MonitorSvc(threading.Thread):
                 else:
                     continue
 
-                cur_hash = hash(crop.tobytes())
-                if self.last_hashes.get(name) == cur_hash and name in self.last_values:
+                cur_hash = self._fast_crop_signature(crop)
+                if self.last_hashes.get(name) == cur_hash and name in self.last_values and name not in ("play_area", "target_info"):
                     continue
                 self.last_hashes[name] = cur_hash
 
@@ -3206,6 +4062,7 @@ class MonitorSvc(threading.Thread):
                 if name == "target_info":
                     monster_name, monster_score = self.matcher.recognize_entity_bitwise(crop, "monsters")
                     user_name, user_score = self.matcher.recognize_entity_bitwise(crop, "users")
+                    target_info_red_tab_hint = self._detect_red_tab_in_target_info(crop)
 
                     if monster_name:
                         res_updates["target_kind"] = "MONSTER"
@@ -3223,30 +4080,149 @@ class MonitorSvc(threading.Thread):
                         res_updates["target_info_text"] = ""
                         res_updates["target_score"] = 0.0
 
-                    res_updates["red_tab_enabled"] = red_tab_enabled
+                    res_updates["red_tab_enabled"] = bool(red_tab_enabled or target_info_red_tab_hint)
                     continue
 
                 if name == "user_info":
-                    user_name, user_score = self.matcher.recognize_entity_bitwise(crop, "users")
+                    now_user = time.time()
+                    user_mode = self._resolve_user_info_mode(now_user)
+                    if user_mode == "idle":
+                        continue
+
+                    if user_mode != self._last_user_info_mode:
+                        self._party_user_candidate = ""
+                        self._party_user_candidate_hits = 0
+                        self._party_user_stable_name = ""
+                        self._party_user_stable_score = 0.0
+                        self._party_user_stable_source = None
+                        self._party_user_stable_until = 0.0
+                        self._last_user_info_mode = user_mode
+
+                    allowed_patterns = ["jump"] if user_mode == "ntab" else ["jump2"]
+                    required_hits = 1 if user_mode == "self_status" else self._party_user_required_hits
+                    user_err_ratio = 0.13 if user_mode == "ntab" else 0.10
+                    user_name = ""
+                    user_score = 0.0
+                    matched_source = None
+                    party_ambiguous = False
+                    party_result = {}
+                    accepted_hit = None
+                    try:
+                        party_result = self._evaluate_party_user_info_from_frame(
+                            img_np,
+                            allowed_patterns=allowed_patterns,
+                            err_ratio=user_err_ratio,
+                        )
+                        accepted_hit = party_result.get("accepted_hit")
+                        party_ambiguous = bool(party_result.get("ambiguous", False))
+                        if not accepted_hit:
+                            best_hit = party_result.get("best_hit")
+                            best_score = float((best_hit or {}).get("score", 0.0) or 0.0)
+                            fallback_score = 0.86 if user_mode == "ntab" else 0.84
+                            if best_hit and best_score >= fallback_score:
+                                accepted_hit = best_hit
+                                party_ambiguous = False
+                    except Exception:
+                        party_result = {}
+                        accepted_hit = None
+                        party_ambiguous = False
+
+                    if accepted_hit:
+                        candidate_name = str(accepted_hit.get("name", "") or "")
+                        candidate_score = float(accepted_hit.get("score", 0.0) or 0.0)
+                        if candidate_name:
+                            if candidate_name == self._party_user_candidate:
+                                self._party_user_candidate_hits += 1
+                            else:
+                                self._party_user_candidate = candidate_name
+                                self._party_user_candidate_hits = 1
+
+                            if self._party_user_candidate_hits >= required_hits:
+                                self._party_user_stable_name = candidate_name
+                                self._party_user_stable_score = candidate_score
+                                self._party_user_stable_source = "findtext-stable"
+                                self._party_user_stable_until = now_user + self._party_user_stable_ttl
+                                user_name = candidate_name
+                                user_score = candidate_score
+                                matched_source = "findtext-stable"
+                    else:
+                        self._party_user_candidate = ""
+                        self._party_user_candidate_hits = 0
+
+                    if not user_name and now_user <= self._party_user_stable_until and self._party_user_stable_name:
+                        user_name = self._party_user_stable_name
+                        user_score = float(self._party_user_stable_score or 0.0)
+                        matched_source = self._party_user_stable_source or "findtext-stable"
+
+                    if not user_name and not party_ambiguous:
+                        bitwise_name, bitwise_score = self.matcher.recognize_entity_bitwise(crop, "users")
+                        allowed = set(allowed_patterns)
+                        bitwise_threshold = 0.82 if user_mode == "self_status" else 0.88
+                        if bitwise_name in allowed and float(bitwise_score or 0.0) >= bitwise_threshold:
+                            user_name = bitwise_name
+                            user_score = float(bitwise_score or 0.0)
+                            matched_source = "bitwise"
+
                     if user_name:
+                        if user_name != self._last_user_info_logged or matched_source != self._last_user_info_source:
+                            print(f"[UserInfo] detected: {user_name} via {matched_source or 'unknown'}")
+                            self._last_user_info_logged = user_name
+                            self._last_user_info_source = matched_source
+                        if user_mode == "self_status" and user_name == "jump2":
+                            res_updates["last_self_userinfo_seen"] = time.time()
+                        if user_mode == "self_status":
+                            res_updates["self_status_scan_active"] = False
+                            res_updates["self_status_scan_until"] = 0.0
                         res_updates["user_name"] = user_name
                         res_updates["user_info_text"] = user_name
                         res_updates["user_kind"] = "USER"
                         res_updates["user_score"] = user_score
+                        res_updates["user_info_source"] = matched_source or ""
+                        res_updates["user_info_ambiguous"] = bool(party_ambiguous)
                         res_updates["is_user_detected"] = True
                     else:
-                        res_updates["is_user_detected"] = False
+                        if self._last_user_info_logged and user_mode == "ntab":
+                            print("[UserInfo] cleared")
+                            self._last_user_info_logged = None
+                            self._last_user_info_source = None
+                        if user_mode == "ntab":
+                            res_updates["user_score"] = 0.0
+                            res_updates["user_info_source"] = ""
+                            res_updates["user_info_ambiguous"] = bool(party_ambiguous)
+                            res_updates["is_user_detected"] = False
+                    continue
+
+                if name == "cooltime_area":
+                    bm_hit = self.find_pattern(img_np, "bm", "cooltime_area")
+                    gg_hit = self.find_pattern(img_np, "gg", "cooltime_area")
+                    bm_detected = bool(bm_hit)
+                    gg_detected = bool(gg_hit)
+                    res_updates["last_self_cooltime_scan_time"] = time.time()
+                    res_updates["self_bm_detected"] = bm_detected
+                    res_updates["self_gg_detected"] = gg_detected
+                    if bm_detected or gg_detected:
+                        res_updates["last_self_cooltime_seen"] = time.time()
                     continue
 
                 # ════════════════════════════════════════════════
                 # play_area: 2-Stage Entity Detection
-                # ════════════════════════════════════════════════
+                # ????????????????????????????????????????????????
                 if name.lower() == "play_area":
-                    # SentinelThread를 위해 원본 크롭 저장
+                    # SentinelThread? ?? ?? ?? ??
                     self.state.last_play_area_rgb = crop.copy()
-                    red_tab_enabled = self._detect_red_tab(crop)
+                    red_tab_enabled = self._detect_red_tab(crop, target_info_hint=target_info_red_tab_hint)
                     res_updates["red_tab_enabled"] = red_tab_enabled
-                    
+                    hb_matches = self.find_pattern_all(
+                        img_np,
+                        "hb",
+                        "play_area",
+                        max_results=6,
+                        overlap_px=44,
+                        err_ratio=0.15,
+                    )
+                    res_updates["hb_matches"] = hb_matches
+                    res_updates["hb_objects"] = hb_matches
+
                     play_area_overlay = self.state.ocr_preview_img
                     map_data = self.state.maps_db.get(self.state.current_map, {}) or {}
                     char_anchor_y_offset = int(map_data.get("char_anchor_y_offset", 134))

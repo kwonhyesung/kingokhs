@@ -147,6 +147,7 @@ class Skill:
     target_type:    str
     hotkey:         Optional[str] = None
     spell_char:     Optional[str] = None
+    cast_function:  str           = "SpellArrowEnter"
     enable_red_tab: bool          = False
     category:       str           = "GENERIC"
     cooldown:       float         = 0.0
@@ -242,6 +243,8 @@ class GameState:
     map_floor: str = ""
     current_floor: str = ""
     red_tab_enabled: bool = False
+    red_tab_promotion_active: bool = False
+    red_tab_promotion_until: float = 0.0
     target_info_text: str = ""
     user_info_text: str = ""
     target_kind: str = "UNKNOWN"
@@ -282,6 +285,7 @@ class GameState:
     ocr_thresholds: Dict[str, float] = field(default_factory=lambda: {str(i): 0.35 for i in range(10)})
     ocr_fps: float = 0.0
     ocr_preview_img: Optional[np.ndarray] = None
+    visual_markers: List[Dict[str, Any]] = field(default_factory=list)
     
     # GUI 업데이트 큐 (비동기 통신용)
     gui_update_queue: 'queue.Queue' = field(default_factory=lambda: queue.Queue(maxsize=1), init=False, repr=False)
@@ -320,12 +324,28 @@ class GameState:
     
     # 유저 관리
     user_name: str = ""
+    user_score: float = 0.0
+    user_info_source: str = ""
+    user_info_ambiguous: bool = False
     is_chat_active: bool = False
     is_user_detected: bool = False
+    ntab_active: bool = False
+    ntab_active_since: float = 0.0
+    self_status_scan_active: bool = False
+    self_status_scan_until: float = 0.0
     
     # 보호막 관리
     shield_active: bool = False
     shield_expire_time: float = 0.0
+    self_bm_detected: bool = False
+    self_gg_detected: bool = False
+    last_self_cooltime_seen: float = 0.0
+    last_self_cooltime_scan_time: float = 0.0
+    last_self_status_open_time: float = 0.0
+    last_self_userinfo_seen: float = 0.0
+    last_self_gg_cast_time: float = 0.0
+    hb_matches: List[Dict[str, Any]] = field(default_factory=list)
+    hb_objects: List[Dict[str, Any]] = field(default_factory=list)
     
     # 역할 관리
     role: str = "기본"
@@ -368,6 +388,10 @@ class GameState:
     user_alarm_enabled: bool = False
     user_next_enabled: bool = False
     user_stop_enabled: bool = False
+
+    # party whitelist (user_info FindText patterns)
+    # user_info ROI에서 파티원 닉네임을 FindText로 빠르게 판정할 때 사용.
+    party_userinfo_patterns: List[str] = field(default_factory=lambda: ["jump", "jump2", "dah"])
     
     # 추가 필드 (기존 코드 호환성)
     whitelist_names: List[str] = field(default_factory=list)

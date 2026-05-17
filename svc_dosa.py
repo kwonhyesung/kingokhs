@@ -6,17 +6,17 @@ import io
 import os
 
 if sys.platform == 'win32':
-    os.system('chcp 65001 > nul 2>&1')
+    preferred_encoding = 'cp949'
     try:
-        sys.stdin.reconfigure(encoding='utf-8')
-        sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
-        sys.stderr.reconfigure(encoding='utf-8', line_buffering=True)
+        sys.stdin.reconfigure(encoding=preferred_encoding)
+        sys.stdout.reconfigure(encoding=preferred_encoding, line_buffering=True)
+        sys.stderr.reconfigure(encoding=preferred_encoding, line_buffering=True)
     except AttributeError:
         try:
-            if sys.stdout.encoding != 'utf-8':
-                sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding='utf-8', line_buffering=True)
-            if sys.stderr.encoding != 'utf-8':
-                sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding='utf-8', line_buffering=True)
+            if sys.stdout.encoding != preferred_encoding:
+                sys.stdout = io.TextIOWrapper(sys.stdout.detach(), encoding=preferred_encoding, line_buffering=True)
+            if sys.stderr.encoding != preferred_encoding:
+                sys.stderr = io.TextIOWrapper(sys.stderr.detach(), encoding=preferred_encoding, line_buffering=True)
         except Exception:
             pass
 

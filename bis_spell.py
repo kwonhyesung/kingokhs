@@ -6,7 +6,10 @@
 파이썬을 처음 접하시는 분들도 쉽게 이해하고 수정할 수 있도록 모든 줄에 상세한 주석을 달았습니다.
 """
 
-import time # 시간 지연(sleep) 기능을 사용하기 위해 파이썬 기본 모듈인 time을 불러옵니다.
+import json
+import os
+import time
+import random # 시간 지연(sleep) 기능을 사용하기 위해 파이썬 기본 모듈인 time을 불러옵니다.
 from typing import Optional # 변수나 함수가 '값이 없을 수도 있음(None)'을 표시하기 위해 불러옵니다.
 from bis_core import hw, GameState, TIMING_CONFIG, humanized_sleep 
 # 우리 프로그램의 핵심 설정(bis_core)에서 하드웨어 제어기(hw), 게임 상태(GameState), 
@@ -193,6 +196,8 @@ class RecoveryManager:
                 skill = next((s for s in self.state.spells if getattr(s, "name", "") == selected), None)
                 if skill is not None and getattr(skill, "hotkey", None):
                     key = skill.hotkey # 찾은 마법에 할당된 핫키(단축키)를 가져옵니다.
+                elif skill is not None and getattr(skill, "spell_char", None):
+                    key = skill.spell_char
                 elif isinstance(selected, str) and len(selected) == 1:
                     # 만약 이름 자체가 한 글자(예: '3')라면 그냥 그 글자를 키로 씁니다.
                     key = selected
@@ -200,6 +205,43 @@ class RecoveryManager:
             pass # 에러가 나면 그냥 조용히 넘어가서 기본값을 씁니다.
             
         return key, skill
+
+    def resolve_recovery_cast_function(self, selected: str, default_func: str = "SpellEnter") -> str:
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), "spells_config.json")
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    spells = json.load(f)
+                for spell in spells:
+                    if str(spell.get("name", "") or "").strip() == str(selected or "").strip():
+                        cast_function = str(spell.get("cast_function", "") or "").strip()
+                        if cast_function in {"SpellEnter", "SpellHomeEnter", "SpellArrowEnter"}:
+                            return cast_function
+                        break
+        except Exception:
+            pass
+        return default_func
+
+    def cast_recovery_sequence(
+        self,
+        key: str,
+        cast_function: str,
+        arrow: str = "up",
+    ) -> str:
+        mode = cast_function if cast_function in {"SpellEnter", "SpellHomeEnter", "SpellArrowEnter"} else "SpellEnter"
+        self.caster._press_fast(key)
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+
+        if mode == "SpellHomeEnter":
+            self.caster._press_fast("home")
+            humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+        elif mode == "SpellArrowEnter":
+            self.caster._press_fast(arrow)
+            humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+
+        self.caster._press_fast("enter")
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+        return mode
 
     # ==========================================================
     # ── 자체 회복(Self Recovery) 로직 (도사 본인 살리기)
@@ -236,94 +278,156 @@ class RecoveryManager:
                 pass
         humanized_sleep(TIMING_CONFIG["heal_gap"]) # 힐 시전 모션이 끝날 때까지 잠깐 기다려줍니다.
 
+    def _recover_self_hp_after_boost(self, repeat_count: int | None = None):
+        if repeat_count is None:
+            repeat_count = random.randint(5, 8)
+        repeat_count = max(1, int(repeat_count))
+        print(f"[Recovery] ???? ? ?? ??: {repeat_count}?")
+        for _ in range(repeat_count):
+            self.execute_self_hp_recovery()
+            humanized_sleep(min(0.08, float(TIMING_CONFIG.get("key_gap", 0.05))), variance=0.10)
+
     def execute_self_mp_recovery(self):
         """
-        자가 MP 회복 스킬 시전 (내 마력이 부족할 때 공력증강 등 사용)
+        ?? MP ?? ?? ?? (????).
+        MP? 40000 ???? ?? ?? MP(30)? ?? ?? ????,
+        ????? MP? ???? ?? ?? ??? ??? ????.
         """
-        # 화면에 등록된 'MP 회복 마법' 단축키를 찾습니다. 없으면 기본 키 '2'번을 씁니다.
+        current_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
+        good_mp = max(0, int(getattr(self.state, "good_mp", 0) or 0))
+
+        if current_mp < 30:
+            print(f"[Recovery] ???? ??: MP={current_mp} (?? 30 ??)")
+            return
+
+        if current_mp >= 40000 and (good_mp <= 0 or current_mp >= good_mp):
+            return
+
         key, skill = self.resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
         now = time.time()
         self._last_mp_recover_time = now
 
         if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
             return
-            
-        self.caster._press_fast(key) # 공력증강 단축키(예: 2)를 누릅니다. 공력증강은 즉발이라 엔터가 필요 없습니다.
+
+        before_mp = current_mp
+        # Self MP recovery should start from a cleared target state.
+        self.caster._press_fast("esc")
+        humanized_sleep(TIMING_CONFIG["key_gap"])
+        cast_function = self.resolve_recovery_cast_function(
+            getattr(self.state, "recovery_mp_spell", ""),
+            default_func="SpellEnter",
+        )
+        self.cast_recovery_sequence(key, cast_function)
         if skill is not None:
             try:
                 skill.last_cast_time = now
             except Exception:
                 pass
-        # 0.05초와 설정 파일(config.json)의 대기 시간 중 더 작은 시간만큼 기다립니다.
-        humanized_sleep(min(0.05, float(TIMING_CONFIG.get("key_gap", 0.05)))) 
 
-    # ==========================================================
-    # ── 파티원 회복(Party Recovery) 로직 (격수 살리기)
-    # ==========================================================
-    def execute_party_hp_recovery(self, snapshot: dict):
+        target_mp = max(40000, good_mp)
+        success = False
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            refreshed_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
+            if refreshed_mp >= target_mp or refreshed_mp > before_mp:
+                success = True
+                break
+            humanized_sleep(0.06, variance=0.10)
+
+        if not success:
+            print(f"[Recovery] ???? ?? ???: before={before_mp}, now={int(getattr(self.state, 'mp', 0) or 0)}")
+            return
+
+        print(f"[Recovery] ???? ??: before={before_mp}, now={int(getattr(self.state, 'mp', 0) or 0)}")
+        self._recover_self_hp_after_boost()
+
+
+    def execute_party_hp_recovery(self, snapshot: dict, use_red_tab: bool = False, force_direct: bool = False):
         """
         파티원(격수) HP 회복 스킬 시전
-        격수의 체력(snapshot 데이터)을 보고 위험할 때 힐을 주는 함수입니다.
+        격수의 체력(snapshot 데이터)을 보고 필요할 때 힐을 주는 함수입니다.
         """
-        # 파티원 힐 마법을 찾습니다. 없으면 기본 키 'c' (주로 생명의기원 등)를 씁니다.
         key, skill = self.resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="c")
         now = time.time()
-        
-        # 연속으로 마구잡이로 힐이 나가는 걸 막기 위해, 최소 0.3초의 간격을 둡니다.
+
         elapsed = now - self._last_party_hp_recover_time
-        if elapsed < 0.3:
-            return # 0.3초가 안 지났으면 바로 함수를 끝내버립니다(return).
-            
-        self._last_party_hp_recover_time = now # 방금 힐을 했으니 현재 시간을 기록합니다.
-        
+        if elapsed < 0.18:
+            return
+
+        self._last_party_hp_recover_time = now
+
         if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
             print(f"[Support] HP heal skill on cooldown: {getattr(skill, 'name', key)}")
             return
-            
-        # 격수의 현재 체력 수치를 로그창에 띄워서 개발자/사용자가 볼 수 있게 합니다.
+
         hp_val = int(snapshot.get('hp', 0) or 0)
         print(f"[Support] HP heal casting on warrior: key={key}, hp={hp_val}")
-        
-        # 격수에게 힐을 주는 올바른 시퀀스(순서): ESC -> 키 -> Tab(최근 타겟 지정) -> Enter
-              
-        self.caster._press_fast(key) # 힐 마법(예: c)을 켭니다.
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-                
-        self.caster._press_fast("tab") # Tab을 눌러 우리 파티원(격수)에게 마름모 커서를 맞춥니다.
-        humanized_sleep(TIMING_CONFIG["tab_wait"]) # 커서가 이동할 때까지 살짝 대기
-        
-        self.caster._press_fast("enter") # 엔터를 눌러서 마법을 발동!
-        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
-        
+        cast_function = self.resolve_recovery_cast_function(
+            getattr(self.state, "recovery_hp_spell", ""),
+            default_func="SpellEnter",
+        )
+
+        red_locked = bool(getattr(self.state, "red_tab_enabled", False))
+        if use_red_tab and not red_locked and not force_direct:
+            print("[Support] HP heal skipped: warrior red_tab not locked.")
+            return
+
+        if use_red_tab and (red_locked or force_direct):
+            used_mode = self.cast_recovery_sequence(key, cast_function)
+            if skill is not None:
+                try:
+                    skill.last_cast_time = now
+                except Exception:
+                    pass
+            if red_locked:
+                print(f"[Support] HP heal complete. ({used_mode}, red_tab)")
+            else:
+                print(f"[Support] HP heal complete. ({used_mode}, red_tab forced)")
+            return
+
+        used_mode = self.cast_recovery_sequence(key, cast_function)
+
         if skill is not None:
             try:
                 skill.last_cast_time = now
             except Exception:
                 pass
-        print(f"[Support] HP heal complete. (esc→key→tab→enter)")
+        print(f"[Support] HP heal complete. ({used_mode})")
 
-    def execute_party_mp_recovery(self, snapshot: dict):
+    def execute_party_mp_recovery(self, snapshot: dict, use_red_tab: bool = False, force_direct: bool = False):
         """
-        파티원(격수) MP 회복 스킬 시전 
-        격수의 마력이 모자랄 때 마나를 채워주는 마법(혼마술 등)을 씁니다.
+        파티원(격수) MP 회복 스킬 시전
+        격수의 마력이 부족할 때 마나 회복 스킬을 발동합니다.
         """
-        # 파티원 MP 회복 마법을 찾습니다. 없으면 기본 키 '2'를 씁니다.
         key, skill = self.resolve_recovery_key(getattr(self.state, "recovery_mp_spell", ""), default_key="2")
         now = time.time()
         self._last_mp_recover_time = now
-        
+
         if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
             return
-            
-        self.caster._press_fast(key) # 바로 단축키 발동! (필요에 따라 탭-엔터를 추가할 수도 있습니다)
+
+        red_locked = bool(getattr(self.state, "red_tab_enabled", False))
+        if use_red_tab and not red_locked and not force_direct:
+            print("[Support] MP heal skipped: warrior red_tab not locked.")
+            return
+
+        cast_function = self.resolve_recovery_cast_function(
+            getattr(self.state, "recovery_mp_spell", ""),
+            default_func="SpellEnter",
+        )
+        used_mode = self.cast_recovery_sequence(key, cast_function)
         if skill is not None:
             try:
                 skill.last_cast_time = now
             except Exception:
                 pass
-        print(f"[Support] MP heal cast on warrior: key={key}, mp={int(snapshot.get('mp', 0) or 0)}")
-        humanized_sleep(min(0.05, float(TIMING_CONFIG.get("key_gap", 0.05))))
+        if use_red_tab and (red_locked or force_direct):
+            print(f"[Support] MP heal cast on warrior: key={key}, mp={int(snapshot.get('mp', 0) or 0)} ({used_mode}, red_tab)")
+        else:
+            print(f"[Support] MP heal cast on warrior: key={key}, mp={int(snapshot.get('mp', 0) or 0)} ({used_mode})")
 
+    # ==========================================================
     # ==========================================================
     # ── 기타 통합 기능 (bis_logic v3_heal 등 공용)
     # ==========================================================

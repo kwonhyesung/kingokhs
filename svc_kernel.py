@@ -298,6 +298,7 @@ class GameState:
         self.user_stop_enabled  = False
         self.user_next_enabled  = True
         self.combat_start_time = 0.0
+        self.visual_markers = []    # [{ 'x', 'y', 'color', 'size', 'expiry' }, ...] 오버레이용
         self.maps_db = {}
         self.char_grid = (0, 0)
         self.detected_item_grid = None
