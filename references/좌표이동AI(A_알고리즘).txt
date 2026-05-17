@@ -1,0 +1,374 @@
+#NoEnv
+#Persistent
+#SingleInstance Force
+#Include ft.ahk
+
+Global itemCoords :=
+Global defaultGoals := [[8,12],[21,16]] ;이동할 좌표
+Global goalIndex := 1
+
+; 아이템좌표
+Global dx :=
+Global dy :=
+
+;케릭중심 필셀좌표 (1배율)
+Global cx := 333
+Global cy := 222
+
+;한칸크기 (1배율)
+Global GridSizeX := 24
+Global GridSizeY := 24
+
+f1::
+SetTimer, 이동로직, 90
+SetTimer, 아이템체크, 1000
+return
+
+;맵데이터 (흉가9층 기준)
+이동로직:
+map := []
+map.push([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1])
+map.push([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1])
+map.push([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1])
+map.push([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1])
+map.push([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,1,0,0,1,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,1,0,0,1,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,1,1,1,1,1,1,0,0,1,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,1,1,1,1,1,1,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,0,0,0,0,1,1,0,0,0,0,0,1])
+map.push([1,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,1,1,0,0,0,0,0,1])
+map.push([1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1])
+map.push([1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1])
+map.push([1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1])
+
+; ---------------------- 목표 좌표 설정 ----------------------
+if (itemCoords.Length() > 0) {
+			goal := itemCoords[1][1] "," itemCoords[1][2]
+			;tooltip, %itemCoords% / %goal%
+			; 아이템에 도착했으면 줍고 제거
+			if (xPos = itemCoords[1][1] && yPos = itemCoords[1][2]) {
+				sleep, 100
+				ControlSend,, `,, MapleStory Worlds-바람의나라 클래식
+				sleep, 100
+				itemCoords := []
+				;itemCoords.RemoveAt(closestIndex)
+
+				;아이템 다 없으면 기본 목적지로 복귀
+				if (itemCoords.Length() = 0) {
+					goal := defaultGoals[goalIndex][1] "," defaultGoals[goalIndex][2]
+				}
+				return
+			}
+		} else {
+			goal := defaultGoals[goalIndex][1] "," defaultGoals[goalIndex][2]
+			
+		}
+		
+		
+		if (itemCoords.Length() > 0 && (xPos != itemCoords[1][1] || yPos != itemCoords[1][2])) {
+		goal := itemCoords[1][1] "," itemCoords[1][2]
+		}
+		
+		
+		
+		; ---------------------- 도착 시 목적지 순환 ----------------------
+		if (itemCoords.Length() = 0) {
+			;msgbox, 1
+			if (defaultGoals.Length() > 1) {
+				;ToolTip, %defaultGoals%
+				; 목적지가 여러 개일 때만 순환
+				if (xPos = defaultGoals[goalIndex][1] && yPos = defaultGoals[goalIndex][2]) {
+					;ToolTip, %goal%
+					;sleep, 10000 ;목적지 도착 후 10초간 머문다
+					goalIndex--
+					if (goalIndex < 1)
+						goalIndex := defaultGoals.Length()
+					goal := defaultGoals[goalIndex][1] "," defaultGoals[goalIndex][2]
+				}
+			} else {
+				; 목적지가 1개일 때는 그대로 유지
+				goal := defaultGoals[1][1] "," defaultGoals[1][2]
+			}
+		}
+		;msgbox, %goal%
+		;ToolTip, 2/%goal%
+		; ---------------------- 경로 계산 및 이동 ----------------------
+
+		pathStr := AStar(map, xPos "," yPos, goal)
+		pathArr := StrSplit(pathStr, " → ")
+
+		;tooltip, %xPos%> %pathStr%
+
+		if (pathArr.Length() > 1) {
+			current := pathArr[1]
+			c := StrSplit(current, ",")
+			
+			Loop {
+				if (xPos = c[1] && yPos = c[2])
+					break
+				Sleep, 10 ; 10ms 간격으로 체크
+			}
+			
+			if (xPos = c[1] && yPos = c[2]) {
+				; 현재 위치가 경로의 첫 좌표일 때만 다음으로 이동
+				next := pathArr[2]
+				n := StrSplit(next, ",")
+
+				dmx := n[1] - c[1]
+				dmy := n[2] - c[2]
+
+				if (dmx = 1) {
+					;Send, {Right}
+					ControlSend,, {Right}, MapleStory Worlds-바람의나라 클래식
+					mmm = Right
+				} else if (dmx = -1) {
+					;Send, {Left}
+					ControlSend,, {Left}, MapleStory Worlds-바람의나라 클래식
+					mmm = Left
+				} else if (dmy = 1) {
+					;Send, {Down}
+					ControlSend,, {Down}, MapleStory Worlds-바람의나라 클래식
+					mmm = Down
+				} else if (dmy = -1) {
+					;Send, {Up}
+					ControlSend,, {Up}, MapleStory Worlds-바람의나라 클래식
+					mmm = Up
+				}
+				
+				;sleep, 300
+				;if (xPos = c[1] && yPos = c[2] && pathArr.Length() > 1)
+					;pathArr.RemoveAt(1)
+				
+			}
+		}
+
+		
+		; ----------------------정체 감지 및 우회 처리----------------------
+		if (xPos = lastX && yPos = lastY) {
+			
+			stuckTime += 200
+			
+			if (stuckTime >= 1000) {
+				; 현재 위치 기억
+				stuckX := xPos
+				stuckY := yPos
+				
+				blockedX := xPos + dmx
+				blockedY := yPos + dmy
+				
+				;msgbox, %blockedX% / %blockedY%
+				if (blockedY >= 0 && blockedY < map.Length() && blockedX >= 0 && blockedX < map[1].Length()) {
+					if (map[blockedY+1][blockedX+1] = 0) {
+						map[blockedY+1][blockedX+1] := 2 ; 임시 장애물 등록
+					}
+				}
+				
+				;장애물 등록 후 경로 재계산
+				pathStr := AStar(map, xPos "," yPos, goal)
+				;msgbox, %pathStr%
+				if (pathStr = "") {
+					; 경로가 없으면 임시 장애물(값이 2인 셀) 모두 제거
+					for yIdx, row in map {
+						for xIdx, val in row {
+							if (val = 2)
+								map[yIdx][xIdx] := 0
+						}
+					}
+					; 경로 재계산 후 다시 시도
+					pathStr := AStar(map, xPos "," yPos, goal)
+				}
+				
+				stuckTime := 0
+				
+			}
+		} else {
+			; 이동했으면 임시 장애물 제거
+			if (stuckX != "" && stuckY != "") {
+				if (xPos != stuckX || yPos != stuckY) {
+					for yIdx, row in map {
+						for xIdx, val in row {
+							if (val = 2)
+								map[yIdx][xIdx] := 0
+						}
+					}
+					; 경로 재계산 후 다시 시도
+					;pathStr := AStar(map, xPos "," yPos, goal)
+					; 기억 초기화
+					stuckX := ""
+					stuckY := ""
+				}
+			}
+			
+			stuckTime := 0
+			lastX := xPos
+			lastY := yPos
+		}
+		
+		
+	}
+}
+return
+
+
+아이템체크:
+itemText .= "<조각>##0.90$0/0/BBD3AB,1/0/BBD3AB,2/0/97B77F,3/0/97B77F,4/0/779B5B,5/0/779B5B,5/1/779B5B,5/2/779B5B,5/3/779B5B,5/4/779B5B,4/4/779B5B,3/4/779B5B,2/4/779B5B,1/4/779B5B,0/4/779B5B,0/3/97B77F,2/3/97B77F,1/2/97B77F,0/1/BBD3AB"
+
+closest := getClosestCoord(0, 0, A_ScreenWidth, A_ScreenHeight, itemText)
+
+if (closest)
+{
+    itemCoords := [[closest.fx, closest.fy]]
+    MsgBox, 가장 가까운 조각: %itemCoords%
+}
+return
+
+
+;---------------------- A* 및 기타 함수 ---------------------
+AStar(map, start, goal) {
+    openSet := {}
+    cameFrom := {}
+
+    gScore := {}
+    fScore := {}
+
+    openSet[start] := true
+    gScore[start] := 0
+    fScore[start] := Heuristic(start, goal)
+
+    while (Count(openSet) > 0) {
+        current := LowestFScore(openSet, fScore)
+        if (current = goal)
+            return ReconstructPath(cameFrom, current)
+
+        openSet.Delete(current)
+        x := StrSplit(current, ",")[1]
+        y := StrSplit(current, ",")[2]
+
+        for each, neighbor in GetNeighbors(map, x, y) {
+            neighborKey := neighbor[1] "," neighbor[2]
+            tentativeG := gScore[current] + 1
+
+            if (!gScore.HasKey(neighborKey) || tentativeG < gScore[neighborKey]) {
+                cameFrom[neighborKey] := current
+                gScore[neighborKey] := tentativeG
+                fScore[neighborKey] := tentativeG + Heuristic(neighborKey, goal)
+                openSet[neighborKey] := true
+            }
+        }
+    }
+    return ""
+}
+
+Heuristic(a, b) {
+    a := StrSplit(a, ",")
+    b := StrSplit(b, ",")
+    return Abs(a[1] - b[1]) + Abs(a[2] - b[2])
+}
+
+LowestFScore(set, fScore) {
+    lowest := ""
+    lowVal := 999999
+    for key in set {
+        if (fScore[key] < lowVal) {
+            lowVal := fScore[key]
+            lowest := key
+        }
+    }
+    return lowest
+}
+
+GetNeighbors(map, x, y) {
+    neighbors := []
+    dirs := [[-1,0], [1,0], [0,-1], [0,1]] ; 좌우상하
+    for each, dir in dirs {
+        nx := x + dir[1]
+        ny := y + dir[2]
+        if (ny >= 1 && ny <= map.MaxIndex() && nx >= 1 && nx <= map[1].MaxIndex()) {
+            if (map[ny][nx] = 0)
+                neighbors.push([nx, ny])
+        }
+    }
+    return neighbors
+}
+
+Count(set) {
+    c := 0
+    for _ in set
+        c++
+    return c
+}
+
+ReconstructPath(cameFrom, current) {
+    path := [current]
+    while (cameFrom.HasKey(current)) {
+        current := cameFrom[current]
+        path.InsertAt(1, current)
+    }
+    return Join(path)
+}
+
+Join(arr) {
+    out := ""
+    for i, v in arr {
+        out .= v
+        if (i < arr.MaxIndex())
+            out .= " → "
+    }
+    return out
+}
+
+; === 함수: 화면에서 가장 가까운 좌표 찾기 ===
+getClosestCoord(x1, y1, x2, y2, pattern, accX := 0.000001, accY := 0.000001, zoomX := 1, zoomY := 1)
+{
+    minDist := 999999
+    closest := ""
+
+    if (found := FindText(X, Y, x1, y1, x2, y2, accX, accY, pattern, 0,,,,,, zoomX, zoomY))
+    {
+        for index, item in found
+        {
+            dx := item.x
+            dy := item.y
+            pos := CalculateStatusCoordinates(dx, dy, xPos, yPos)
+
+            dist := Sqrt((xPos - pos.fx)**2 + (yPos - pos.fy)**2)
+            if (dist < minDist)
+            {
+                minDist := dist
+                closest := {dx: dx, dy: dy, fx: pos.fx, fy: pos.fy}
+            }
+        }
+    }
+    return closest
+}
+
+; === 함수: 게임 격자 기준 좌표 계산 ===
+CalculateStatusCoordinates(dx, dy, xPos, yPos)
+{
+    global cx, cy, GridSizeX, GridSizeY
+
+    if (xPos <= 8) {
+        fx := Round((dx - (cx - (8 * GridSizeX))) / GridSizeX)
+    } else if (ix >= 9) {
+        fx := xPos + Round((dx - cx) / GridSizeX)
+    }
+
+    if (yPos <= 7) {
+        fy := Round((dy - (cy - (7 * GridSizeY))) / GridSizeY)
+    } else if (iy >= 8) {
+        fy := yPos + Round((dy - cy) / GridSizeY)
+    }
+
+    return {fx: fx, fy: fy}
+}

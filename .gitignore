@@ -17,6 +17,9 @@ debug_analysis/
 debug_crops/
 ocr_debug/
 scratch/
+logs/
+*.log
+*.err.log
 
 # Local UI state
 gui_state.json

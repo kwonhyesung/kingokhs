@@ -39,6 +39,7 @@ import os
 import json
 import csv
 import time
+import subprocess
 from datetime import datetime
 import keyboard
 import threading
@@ -65,6 +66,7 @@ from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_slee
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
+from patrol_routes import inject_patrol_points, load_patrol_points_csv, parse_route_point
 
 # 怨좏빐?곷룄(65?몄튂 ?? 紐⑤땲???명솚?깆쓣 ?꾪븳 DPI ?몄떇 ?쒖꽦??
 try:
@@ -83,6 +85,9 @@ MULT = 1
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
 LOG_FILE_STR = os.path.join(SCRIPT_DIR, "game_log_str.csv")
+PATROL_ROUTE_FILES = {
+    "천안궁흉가5": os.path.join(SCRIPT_DIR, "patrol_points_cheonan_heunggga5.csv"),
+}
 
 from config_utils import *
 from gui_overlay import *
@@ -566,7 +571,7 @@ class AppView:
         ctk.CTkLabel(left_panel, text="CALIBRATION", font=("Inter", 11, "bold"), text_color="#00D4FF").pack(pady=(6, 4))
         target_grid = ctk.CTkFrame(left_panel, fg_color="transparent")
         target_grid.pack(pady=2)
-        targets = ["hp", "mp", "exp", "money", "x", "y", "hp_trig", "mp_trig", "stat_info", "target_info", "user_info", "map_info", "play_area"]
+        targets = ["hp", "mp", "exp", "money", "x", "y", "hp_trig", "mp_trig", "stat_info", "target_info", "user_info", "cooltime_area", "map_info", "play_area"]
         for i, t in enumerate(targets):
             r, c = divmod(i, 3)
             ctk.CTkButton(target_grid, text=t.upper(), width=64, height=22, font=("Inter", 9),
@@ -1467,7 +1472,11 @@ class AppView:
                             writer.writerow([map_name, floor_num, "Entry", e.get("x",0), e.get("y",0), e.get("direction",""), e.get("reverse_action",""), ""])
                         if "points" in data:
                             for point in data["points"]:
-                                writer.writerow([map_name, floor_num, "Hunt", 0, 0, "", "", point])
+                                parsed_point = parse_route_point(point)
+                                if parsed_point and parsed_point.get("mode") == "absolute":
+                                    writer.writerow([map_name, floor_num, "Hunt", parsed_point["x"], parsed_point["y"], "", "", ""])
+                                else:
+                                    writer.writerow([map_name, floor_num, "Hunt", 0, 0, "", "", point])
                         if "exit" in data:
                             ex = data["exit"]
                             writer.writerow([map_name, floor_num, "Exit", ex.get("x",0), ex.get("y",0), ex.get("direction",""), ex.get("reverse_action",""), ""])
@@ -1508,7 +1517,11 @@ class AppView:
                         elif t_type == "Exit":
                             target_dict["exit"] = {"x":x, "y":y, "direction":d, "reverse_action":r_act}
                         elif t_type == "Hunt":
-                            if g_str: target_dict["points"].append(g_str)
+                            if g_str:
+                                target_dict["points"].append(g_str)
+                            elif x or y:
+                                target_dict.setdefault("point_mode", "absolute")
+                                target_dict["points"].append({"x": x, "y": y, "radius": 1, "combat_allowed": True})
             except Exception as e:
                 print(f"[Warn] CSV 濡쒕뱶 ?ㅽ뙣, JSON ?대갚 ?쒕룄: {e}")
         
@@ -1519,6 +1532,10 @@ class AppView:
                     loaded_db = json.load(f)
             except (OSError, json.JSONDecodeError):
                 loaded_db = {}
+
+        for patrol_map_name, patrol_csv_path in PATROL_ROUTE_FILES.items():
+            patrol_points = load_patrol_points_csv(patrol_csv_path)
+            inject_patrol_points(loaded_db, patrol_map_name, "1", patrol_points)
         
         self.state.waypoints_db = loaded_db
         
@@ -1528,9 +1545,16 @@ class AppView:
         
         # 痢??쒕∼?ㅼ슫 ?낅뜲?댄듃
         current_map = self.hunting_map_var.get()
+        if map_names and current_map not in self.state.waypoints_db:
+            current_map = "천안궁흉가5" if "천안궁흉가5" in self.state.waypoints_db else map_names[0]
+            self.hunting_map_var.set(current_map)
         if current_map in self.state.waypoints_db:
+            self.state.current_map = current_map
             floors = list(self.state.waypoints_db[current_map].keys())
             self.hunting_floor_dropdown.configure(values=floors if floors else ["1"])
+            current_floor = self.hunting_floor_var.get()
+            if floors and current_floor not in floors:
+                self.hunting_floor_var.set(floors[0])
         
         # ?쒗??濡쒕뱶
         self.refresh_seq_tree()
@@ -1563,8 +1587,14 @@ class AppView:
             # ?щ깷??
             if "points" in seq_data:
                 for point in seq_data["points"]:
-                    col, row = self.GridConverter.name_to_index(point)
-                    grid_str = point if isinstance(point, str) and len(point) <= 5 else ""
+                    parsed_point = parse_route_point(point)
+                    if parsed_point and parsed_point.get("mode") == "absolute":
+                        col, row = parsed_point["x"], parsed_point["y"]
+                        grid_str = ""
+                    else:
+                        grid_value = parsed_point["grid"] if parsed_point else point
+                        col, row = self.GridConverter.name_to_index(grid_value)
+                        grid_str = grid_value if isinstance(grid_value, str) and len(grid_value) <= 5 else ""
                     self.seq_tree.insert("", "end", values=(
                         "Hunt",
                         col if col is not None else 0,
@@ -1591,6 +1621,7 @@ class AppView:
     def on_hunting_map_change(self, value):
         """Docstring."""
         current_map = value
+        self.state.current_map = current_map
         if current_map in self.state.waypoints_db:
             floors = list(self.state.waypoints_db[current_map].keys())
             self.hunting_floor_dropdown.configure(values=floors if floors else ["1"])
@@ -1741,15 +1772,23 @@ class AppView:
             elif item_type == "Hunt":
                 x = int(values[1]) if values[1] else 0
                 y = int(values[2]) if values[2] else 0
-                grid_name = self.GridConverter.index_to_name(x, y)
-                if grid_name:
-                    points.append(grid_name)
+                grid_value = str(values[5]).strip() if len(values) > 5 and values[5] else ""
+                if seq_data.get("point_mode") == "absolute" or (not grid_value and (x or y)):
+                    points.append({"x": x, "y": y, "radius": 1, "combat_allowed": True})
+                else:
+                    grid_name = grid_value or self.GridConverter.index_to_name(x, y)
+                    if grid_name:
+                        points.append(grid_name)
         
         if entry_data:
             seq_data["entry"] = entry_data
         if exit_data:
             seq_data["exit"] = exit_data
         seq_data["points"] = points
+        if points and isinstance(points[0], dict):
+            seq_data["point_mode"] = "absolute"
+        else:
+            seq_data.pop("point_mode", None)
         
         self.save_waypoints()
 
@@ -2098,11 +2137,34 @@ class AppView:
                 self.spell_db = json.load(f)
         else:
             self.spell_db = []
+        self._rebuild_state_spells_from_db()
         self.sync_slots_from_db()
+
+    def _rebuild_state_spells_from_db(self):
+        self.state.spells.clear()
+        for s in self.spell_db:
+            if not s.get("use", True):
+                continue
+            slot = str(s.get("slot", "") or "").strip()
+            hotkey = slot if len(slot) == 1 and slot.isdigit() else None
+            spell_char = str(s.get("spell_char", "") or "").strip() or None
+            if spell_char is None and hotkey is not None:
+                spell_char = hotkey
+            self.state.spells.append(Skill(
+                name=s["name"],
+                target_type=s.get("target_type", "대상선택형"),
+                hotkey=hotkey,
+                spell_char=spell_char,
+                cast_function=s.get("cast_function", "SpellArrowEnter"),
+                enable_red_tab=bool(s.get("enable_red_tab", False)),
+                category=s.get("category", "기타")
+            ))
 
     def save_spells_db(self):
         with open(self.spell_db_path, 'w', encoding='utf-8') as f:
             json.dump(self.spell_db, f, indent=4, ensure_ascii=False)
+        self._rebuild_state_spells_from_db()
+        return
         # GameState ?숆린??
         self.state.spells.clear()
         for s in self.spell_db:
@@ -2285,20 +2347,46 @@ class AppView:
         if not hwnd:
             self.show_toast("[Err] WINDOW NOT FOUND", "#FF5555")
             return
-            
+
+        try:
+            if hasattr(self, "tune_target"):
+                self.tune_target.set(target_name)
+        except Exception:
+            pass
+
+        calibration_popup = getattr(self, "calibration_popup", None)
+
+        def restore_calibration_popup():
+            if calibration_popup is None:
+                return
+            try:
+                if calibration_popup.winfo_exists():
+                    calibration_popup.deiconify()
+                    calibration_popup.lift()
+                    calibration_popup.focus_force()
+                    calibration_popup.update_idletasks()
+            except Exception:
+                pass
+
         def save_result(sx, sy, dx, dy, *args):
             reader_thread = getattr(self, 'reader_thread', None)
             reader_thread.regions[target_name] = Region(sx, sy, dx, dy)
             conf = load_config()
             conf[target_name] = asdict(Region(sx, sy, dx, dy))
             save_config(conf)
+            restore_calibration_popup()
             self.show_toast(f"# {target_name.upper()} AREA SAVED")
-            # 利됱떆 ?꾨━酉?媛깆떊
             if hasattr(self, "update_calibration_preview"):
                 self.update_calibration_preview()
 
-        # ?ㅽ겕由곗꺑 李?????ㅼ떆媛??ㅻ쾭?덉씠 ?ㅽ뻾
-        OverlaySelector(self.root, hwnd, save_result)
+        try:
+            if calibration_popup is not None and calibration_popup.winfo_exists():
+                calibration_popup.withdraw()
+        except Exception:
+            pass
+
+        selector = OverlaySelector(self.root, hwnd, save_result)
+        selector.bind("<Destroy>", lambda _e: restore_calibration_popup(), add="+")
 
     def toggle_ocr_engine(self):
         self.state.ocr_enabled = not self.state.ocr_enabled
@@ -2316,7 +2404,7 @@ class AppView:
             if not hwnd:
                 self.show_toast("??GAME NOT FOUND", "#FF5555")
                 return
-            self.indicator = ROIIndicator(self.root, hwnd)
+            self.indicator = ROIIndicator(self.root, hwnd, self.state)
             
         self.indicator.visible = not self.indicator.visible
         if self.indicator.visible:
@@ -2779,7 +2867,8 @@ class AppView:
         if normalized in {"FOLLOW_SERVICE", "SERVICE", "F2"}:
             control_mode = "FOLLOW+SERVICE"
             follow_enabled = True
-            route_enabled = False
+            # Warrior uses patrol route mode while service loop is on.
+            route_enabled = bool(getattr(self.state, "role", "") == "격수")
             avoid_enabled = True
             service_enabled = True
             auto_hunt_enabled = True
@@ -2808,6 +2897,10 @@ class AppView:
         self.state.sentinel_enabled = bool(follow_enabled or service_enabled)
         self.state.is_combat_busy = False
         self.state.combat_start_time = 0.0
+        # F2(FOLLOW+SERVICE)에서만 도사 혼(디버프) 루프를 활성화한다.
+        self.state.f2_service_debuff_enabled = bool(
+            control_mode == "FOLLOW+SERVICE" and getattr(self.state, "role", "") == "도사"
+        )
         if not service_enabled:
             self.state.target_locked = False
             self.state.target_name = ""
@@ -2815,6 +2908,10 @@ class AppView:
         action_thread = getattr(self, 'action_thread', None)
         if action_thread is not None:
             action_thread.task_active = service_enabled
+            if service_enabled and getattr(self.state, "role", "") == "도사":
+                prepare = getattr(action_thread, "request_initial_direct_heal_target_prepare", None)
+                if callable(prepare):
+                    prepare()
 
         self._sync_control_mode_widgets()
         if announce:
@@ -2896,10 +2993,16 @@ class AppView:
             self.close_calibration_popup()
         except Exception:
             pass
+        restart_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "svc_dosa.py")]
         try:
             self.root.destroy()
         except Exception:
             pass
+        try:
+            subprocess.Popen(restart_cmd, cwd=SCRIPT_DIR)
+            print("[PANIC] Restart requested.")
+        except Exception as exc:
+            print(f"[PANIC] Restart failed: {exc}")
         os._exit(0)
 
     def debug_ocr(self):

@@ -1,0 +1,5 @@
+# Warrior launcher
+svc_warrior.py
+
+# Shared required files
+# See manifests/required_common_files.txt
