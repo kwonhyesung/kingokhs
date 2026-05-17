@@ -119,8 +119,9 @@ class LogicSvc(threading.Thread):
         self._ntab_repeat_per_direction = 1
         self._ntab_confirm_required_hits = 1
         self._ntab_confirm_timeout = 0.42
-        self._warrior_next_action_key = "3"
-        self._warrior_next_action_at = 0.0
+        self._warrior_next_attack_at = 0.0
+        self._warrior_next_loot_at = 0.0
+        self._last_warrior_cycle_log_time = 0.0
         self._red_tab_confirm_required_hits = 2
         self._red_tab_confirm_timeout = 0.45
         self._red_tab_promotion_timeout = 0.95
@@ -1968,7 +1969,7 @@ class LogicSvc(threading.Thread):
                 continue
 
             # ?? 2?쒖쐞: Moving (?대룞/?ㅻ퉬寃뚯씠?? ??????????????????
-            if self.state.auto_hunt:
+            if self.state.auto_hunt or getattr(self.state, "service_active", False):
                 self._handle_moving()
                 continue
 
@@ -2244,9 +2245,16 @@ class LogicSvc(threading.Thread):
         """?꾪닾 泥섎━ (?곗꽑?쒖쐞 1)"""
         # ?꾪닾 以묒뿉??is_combat_busy ?뚮옒洹??ㅼ젙
         self._set_combat_busy(True)
-        
+
+        role_name = str(getattr(self.state, "role", "") or "").strip()
+        network_role = str(getattr(self.state, "network_role", "") or "").strip()
+        is_warrior = (
+            role_name in {"격수", "Warrior", "寃⑹닔"}
+            or network_role in {"격수", "Warrior", "寃⑹닔"}
+        )
+
         # ??븷蹂??꾪닾 濡쒖쭅
-        if self.state.role == "격수":
+        if is_warrior:
             self._run_dps_server_mode()
         elif self.state.role == "도사":
             self._run_support_mode()
@@ -2262,8 +2270,17 @@ class LogicSvc(threading.Thread):
         """?대룞/?ㅻ퉬寃뚯씠??泥섎━ (?곗꽑?쒖쐞 2)"""
         # ?꾪닾 以묒씠 ?꾨땺 ?뚮쭔 ?대룞
         if not self.state.is_combat_busy:
+            # Route mode on F2 should always keep warrior attack/loot loop alive.
+            if getattr(self.state, "service_active", False) and getattr(self.state, "nav_route_enabled", False):
+                self._run_warrior_attack_loot_cycle()
+                return
             # ?대룞 濡쒖쭅? RouteSvc?먯꽌 泥섎━
-            if self.state.role == "격수":
+            role_name = str(getattr(self.state, "role", "") or "").strip()
+            network_role = str(getattr(self.state, "network_role", "") or "").strip()
+            if (
+                role_name in {"격수", "Warrior", "寃⑹닔"}
+                or network_role in {"격수", "Warrior", "寃⑹닔"}
+            ):
                 self._run_warrior_attack_loot_cycle()
 
     # ----------------------------------------------------------
@@ -2271,8 +2288,8 @@ class LogicSvc(threading.Thread):
     # ----------------------------------------------------------
     def _run_dps_server_mode(self):
         """격수 모드: 데이터 송신 + 이동 중 3/0 교대 자동사냥."""
-        # ?? ?먮룞?щ깷 鍮꾪솢???????????????????????????????
-        if not self.state.auto_hunt:
+        # Keep warrior loop alive while F2 service mode is active.
+        if not bool(getattr(self.state, "service_active", False)):
             self.state.last_bomu_time    = 0
             self.state.combat_start_time = 0.0
             humanized_sleep(TIMING_CONFIG["idle_sleep"])
@@ -2304,16 +2321,44 @@ class LogicSvc(threading.Thread):
         humanized_sleep(TIMING_CONFIG["action_loop"])
 
     def _run_warrior_attack_loot_cycle(self):
-        """격수 전용: 3(공격) <-> 0(노획) 교대 입력, 0.3~0.5초 랜덤 간격."""
-        if not self.state.auto_hunt:
+        """격수 전용: 3은 짧게 반복, 0은 긴 랜덤 쿨타임으로 독립 관리."""
+        # Route thread may keep moving even if auto_hunt flips false transiently.
+        # For warrior F2 mode, run loop based on service_active.
+        if not bool(getattr(self.state, "service_active", False)):
             return
         now = time.time()
-        if now < self._warrior_next_action_at:
+        attack_due = now >= float(getattr(self, "_warrior_next_attack_at", 0.0) or 0.0)
+        loot_due = now >= float(getattr(self, "_warrior_next_loot_at", 0.0) or 0.0)
+        if not attack_due and not loot_due:
             return
-        key = self._warrior_next_action_key
-        hw.humanized_press(key)
-        self._warrior_next_action_key = "0" if key == "3" else "3"
-        self._warrior_next_action_at = now + random.uniform(0.3, 0.5)
+
+        # Loot has lower frequency but should not starve behind the attack loop.
+        if loot_due:
+            if not self._is_hw_ready():
+                self._warrior_next_loot_at = now + 0.10
+                return
+            try:
+                hw.force_press("0", variance=0.08)
+                pressed = True
+            except Exception:
+                pressed = False
+            if not pressed:
+                self._warrior_next_loot_at = now + 0.10
+                return
+            self._warrior_next_loot_at = now + random.uniform(2.0, 14.0)
+            if now - self._last_warrior_cycle_log_time >= 1.0:
+                print(f"[WarriorLoop] cast=0 next_loot={max(0.0, self._warrior_next_loot_at - now):.2f}s")
+                self._last_warrior_cycle_log_time = now
+            return
+
+        pressed = self._press_hw_key("3", variance=0.08, skip_focus_guard=True)
+        if not pressed:
+            self._warrior_next_attack_at = now + 0.10
+            return
+        self._warrior_next_attack_at = now + random.uniform(0.3, 0.5)
+        if now - self._last_warrior_cycle_log_time >= 1.0:
+            print(f"[WarriorLoop] cast=3 next_attack={max(0.0, self._warrior_next_attack_at - now):.2f}s")
+            self._last_warrior_cycle_log_time = now
 
     # ----------------------------------------------------------
     # ?? 吏??紐⑤뱶: ?꾩궗 - 寃⑹닔 ?곗씠???섏떊 諛?吏??????????????????
@@ -3481,7 +3526,16 @@ class RouteSvc(threading.Thread):
                     continue
 
             # ?? 2?쒖쐞: Group Follow Mode (is_connected && nav_follow_enabled) ??
-            if self.state.is_connected and self.state.nav_follow_enabled:
+            role_name = str(getattr(self.state, "role", "") or "").strip()
+            network_role = str(getattr(self.state, "network_role", "") or "").strip()
+            warrior_route_priority = bool(
+                self.state.nav_route_enabled
+                and (
+                    role_name in {"격수", "Warrior", "寃⑹닔"}
+                    or network_role in {"격수", "Warrior", "寃⑹닔"}
+                )
+            )
+            if self.state.is_connected and self.state.nav_follow_enabled and not warrior_route_priority:
                 follow_target = self._calc_follow_target()
                 if follow_target:
                     self._set_nav_context("follow")

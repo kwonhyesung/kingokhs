@@ -1096,6 +1096,10 @@ class AppView:
         # ?쇰? ?섍꼍(Linux/X11)?먯꽌 delta ???Button-4/5 ?대깽?몃? ?ъ슜
         self.root.bind_all("<Control-Button-4>", self.on_ctrl_mousewheel)
         self.root.bind_all("<Control-Button-5>", self.on_ctrl_mousewheel)
+        self.root.bind_all("<F1>", lambda _e: self.toggle_follow())
+        self.root.bind_all("<F2>", lambda _e: self.toggle_service())
+        self.root.bind_all("<F3>", lambda _e: self.toggle_pause_resume())
+        self.root.bind_all("<F4>", lambda _e: self.emergency_exit())
 
     def on_ctrl_mousewheel(self, event):
         delta = 0
