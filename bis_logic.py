@@ -1,38 +1,39 @@
 ﻿"""
-bis_logic.py  ?  BIS Logic Engine (?곗꽑?쒖쐞 湲곕컲 FSM)
-??????????????????????????????????????????????????????????????
-???곗꽑?쒖쐞 泥닿퀎: Emergency -> Combat -> Moving
-???꾪닾 以묒뿉??Navigation 利됱떆 ?湲?(?명꽣?쏀듃)
-??紐⑤뱺 ?쒕젅?? ??humanized_sleep / TIMING_CONFIG 寃쎌쑀
-???꾪닾 Fail-safe  ??combat_timeout 珥덇낵 ??猷⑦봽 利됱떆 break + ESC
-??吏?ν삎 Stuck ?덉텧  ???꾩쭊 ??吏곴컖 ?쒕뜡 ?대룞 ???ы깘??
-???ъ쟾 寃利? ??"嫄몃━吏 ?딆쓬" / 鍮꾨が?ㅽ꽣 ?寃?利됱떆 ESC
-??????????????????????????????????????????????????????????????
+bis_logic.py  -  BIS Logic Engine (자동 사냥 상태 FSM)
+──────────────────────────────────────────────────────────────
+기본 상태 흐름: Emergency -> Combat -> Moving
+일부 구간에서 Navigation 갱신(스레드)
+모든 사이클에 humanized_sleep / TIMING_CONFIG 적용
+전투 Fail-safe  combat_timeout 초과시 강제로 break + ESC
+이동 불가(Stuck) 탐지  반복 점프나 이동 안될 경우 복구 시도
+파티전 도중 "모험가가 아님" / 보너스맵 도달시 ESC
+──────────────────────────────────────────────────────────────
 
 Purpose:
-    - ?곗꽑?쒖쐞 湲곕컲 FSM(Finite State Machine) ?붿쭊 援ы쁽
-    - Emergency(湲닿툒) > Combat(?꾪닾) > Moving(?대룞) ?쒖꽌 泥섎━
-    - NavigationThread? ?꾩쟾 蹂묐젹 ?숈옉?쇰줈 吏???녿뒗 ?꾪닾 ???
-    - Anti-cheat ?뚰뵾瑜??꾪븳 ?먯뿰?ㅻ윭???낅젰 ?⑦꽩 援ы쁽
-    
+    - 자동 사냥 상태 FSM(Finite State Machine) 로직 구현
+    - Emergency(긴급처치) > Combat(전투) > Moving(이동) 순으로 처리
+    - NavigationThread와 상태값 동기화 하여 실제 전투 진행
+    - Anti-cheat 탐지를 위한 랜덤화 및 입력 변조 적용
+
 Core Features:
-    - ?먭?/?뚰떚 HP/MP ?뚮났 ?쒖뒪??
-    - ?먮룞 踰꾪봽/?붾쾭??愿由?
-    - 吏?ν삎 ?寃??먯깋 諛??꾪닾
-    - 留됲옒 媛먯? 諛??먮룞 ?덉텧
-    - ?ㅽ궗 荑⑤떎??愿由?
-    
+    - 물약/회복 HP/MP 자동 사용
+    - 자동 이동 버프/파티 지원
+    - 이동 불가 상태 복구 및 전투 재시도
+    - 문제 상황 감지 및 이동 제한 차단
+    - 버프 자동화
+
 Integration:
-    - svc_worker.py: GUI ?쒖뼱 諛??곹깭 愿由?
-    - svc_kernel.py: ?섎뱶?⑥뼱 ?낅젰 諛???대컢 ?쒖뼱
-    - bis_route.py: 寃쎈줈 ?먯깋 諛??대룞 愿由?
-    - spells_config.json: ?ㅽ궗 ?ㅼ젙 諛?愿由?
+    - svc_worker.py: GUI 연동 및 상태 전달 역할
+    - svc_kernel.py: 키입력 처리 및 커맨드 실행 기능
+    - bis_route.py: 경로 탐색 및 이동 관리
+    - spells_config.json: 버프 설정 정보 활용
 """
 
 import time
 import threading
 import random
 import win32gui
+import win32con
 
 from bis_core import (
     AppStatus, TargetType, hw, GameState,
@@ -42,6 +43,8 @@ from bis_route import RouteManager
 from bis_spell import RecoveryManager
 from patrol_routes import parse_route_point
 from support_runtime_rules import (
+    adjust_follow_target_by_axis_gap,
+    build_f5_hon_sequence,
     confirm_support_lock_by_hp_gain,
     SELF_HP_EMERGENCY_THRESHOLD,
     SELF_MP_PRIORITY_THRESHOLD,
@@ -50,10 +53,20 @@ from support_runtime_rules import (
     follow_manhattan_gap,
     is_confirmed_zero_hp_state,
     next_zero_hp_count,
+    should_allow_follow_navigation,
     should_allow_party_support_cast,
+    should_block_party_heal,
+    should_cast_periodic_heewon,
+    should_continue_self_hp_recovery,
+    should_defer_stuck_escape_for_support,
+    should_hold_follow_gap,
     should_hold_follow_position,
+    should_ignore_monster_combat_for_support_autohunt,
     should_prioritize_self_mp,
+    should_prioritize_self_mp_over_party_heal,
+    should_retarget_after_support_follow_stuck,
     should_trigger_self_hp_emergency,
+    speed_up_delay,
 )
 
 
@@ -63,55 +76,55 @@ from support_runtime_rules import (
 # ============================================================
 class LogicSvc(threading.Thread):
     """
-    留덈쾿 ?쒖쟾 / ?꾪닾 FSM ?ㅻ젅??(NavigationThread? ?꾩쟾 蹂묐젹)
-    
+    논리 처리 / 자동전투 FSM 스레드 (NavigationThread와 독립적으로 동작)
+
     Purpose:
-        - 寃뚯엫 ??紐⑤뱺 ?≪뀡 濡쒖쭅 泥섎━ (?꾪닾, ?뚮났, 踰꾪봽, ?대룞)
-        - ?곗꽑?쒖쐞 湲곕컲 ?곹깭 ?꾪솚 諛??≪뀡 ?ㅽ뻾
-        - ?ㅼ떆媛??곹깭 異붿쟻 諛??곸쓳?????
+        - 게임 내 모든 액션 루틴 처리 (전투, 회복, 버프, 이동)
+        - 상태 및 이벤트 기반 FSM 전환과 액션 실행
+        - 비정상 상황 자동 감지 및 복구 지원
         
     Architecture:
-        - FSM(Finite State Machine) 湲곕컲 ?곹깭 愿由?
-        - ?낅┰ ?ㅻ젅?쒕줈 NavigationThread? 蹂묐젹 ?숈옉
-        - rate-limiting?쇰줈 ?낅젰 ?ㅽ뙵 諛⑹?
-        - fail-safe 硫붿빱?덉쬁?쇰줈 臾댄븳 猷⑦봽 諛⑹?
+        - FSM(Finite State Machine) 상태기반 구조
+        - 메인 스레드에서 NavigationThread와 분리 실행 시작
+        - rate-limiting으로 입력 제어 및 반복 최소화
+        - fail-safe 메커니즘으로 예외 상황 감지 및 회복
         
     State Flow:
-        IDLE ??EMERGENCY_HEAL/MANA_REGEN/COMBAT/SCANNING ??BUFFING ??IDLE
+        IDLE → EMERGENCY_HEAL/MANA_REGEN/COMBAT/SCANNING → BUFFING → IDLE
         
     Key Features:
-        - 珥덇퀬???ㅽ궗 ?쒖쟾 (v3 ???쒖뒪??
-        - 吏?ν삎 ?寃?愿由?(OCR 湲곕컲)
-        - ?먮룞 ?뚮났/踰꾪봽 ?ъ씠??
-        - 留됲옒 媛먯? 諛??먮룞 ?덉텧
+        - 자동전투 핵심 로직 (v3 엔진)
+        - 직업군별 자동탐색(OCR 기반)
+        - 자동 회복/버프 알고리즘 구현
+        - 다양한 예외 및 비정상 이동 처리
     """
 
     def __init__(self, state: GameState):
         """
-        LogicSvc 珥덇린??
+        LogicSvc 클래스 초기화
         
         Args:
-            state (GameState): ?꾩뿭 寃뚯엫 ?곹깭 媛앹껜
+            state (GameState): 게임 상태 객체
             
         Attributes:
-            state: ?꾩뿭 寃뚯엫 ?곹깭 李몄“
-            current_state: ?꾩옱 FSM ?곹깭 (AppStatus Enum)
-            last_load_time: 留덉?留??ㅼ젙 濡쒕뱶 ?쒓컙
-            task_active: ?쒕퉬???쒖꽦???뚮옒洹?(F2 ???쒖뼱)
-            _last_*_time: 媛??≪뀡蹂?rate-limiting ?쒓컙
+            state: 게임 상태 참조
+            current_state: 현재 FSM 상태 (AppStatus Enum)
+            last_load_time: 마지막 설정/로드 시간
+            task_active: 자동 사냥 동작 활성화 여부 (F2 등으로 제어)
+            _last_*_time: 각종 반응 rate-limiting 체크용 시간값
         """
-        super().__init__(daemon=True)  # 硫붿씤 ?ㅻ젅??醫낅즺 ???먮룞 醫낅즺
-        self.state         = state  # ?꾩뿭 ?곹깭 李몄“
-        self.current_state = AppStatus.IDLE  # 珥덇린 ?곹깭: ?湲?
-        self.last_load_time = time.time()  # ?ㅼ젙 蹂寃?媛먯???
-        self.task_active   = False  # F2 ?쒕퉬???쒖꽦???뚮옒洹?
+        super().__init__(daemon=True)  # 메인 프로세스 종료 시 자동 종료
+        self.state         = state  # 게임 상태 참조
+        self.current_state = AppStatus.IDLE  # 초기 상태: 대기
+        self.last_load_time = time.time()  # 마지막 설정 변경 시각
+        self.task_active   = False  # F2 자동 사냥 동작 여부
         
-        # Trigger reaction rate-limit (?낅젰 ?ㅽ뙵 諛⑹?, 鍮좊Ⅸ ?묐떟 ?좎?)
-        self._last_hp_recover_time = 0.0  # HP ?뚮났 留덉?留??쒓컙
-        self._last_mp_recover_time = 0.0  # MP ?뚮났 留덉?留??쒓컙
-        self._last_target_search_time = 0.0  # ?寃??먯깋 留덉?留??쒓컙
-        self._last_monster_seen_time = 0.0  # 紐ъ뒪??媛먯? 留덉?留??쒓컙
-        
+        # Trigger 반응 rate-limit (회복/탐색/전투, 중복 처리 방지)
+        self._last_hp_recover_time = 0.0  # HP 회복 처리 시간 제한
+        self._last_mp_recover_time = 0.0  # MP 회복 처리 시간 제한
+        self._last_target_search_time = 0.0  # 타겟 탐색 시간 제한
+        self._last_monster_seen_time = 0.0  # 몬스터 최근 인지 시간
+ 
         self.recovery_manager = RecoveryManager(self.state)
         self._support_self_pattern = "jump2"
         self._support_warrior_pattern = "jump"
@@ -146,11 +159,14 @@ class LogicSvc(threading.Thread):
         self._last_party_hp_support_time = 0.0
         self._last_party_hp_value = 0
         self._last_party_hp_check_log_time = 0.0
-        self._party_hp_tick_base_interval_min = 0.20
-        self._party_hp_tick_base_interval_max = 0.25
-        self._party_hp_tick_fast_interval_min = 0.20
-        self._party_hp_tick_fast_interval_max = 0.22
-        self._party_hp_next_tick_interval = 0.21
+        self._last_party_direct_heal_log_time = 0.0
+        self._last_dosa_f2_watchdog_log_time = 0.0
+        self._last_dosa_f2_idle_reason_log_time = 0.0
+        self._party_hp_tick_base_interval_min = 0.18
+        self._party_hp_tick_base_interval_max = 0.22
+        self._party_hp_tick_fast_interval_min = 0.16
+        self._party_hp_tick_fast_interval_max = 0.20
+        self._party_hp_next_tick_interval = 0.18
         self._last_warrior_bomu_attempt_time = 0.0
         self._warrior_bomu_fail_retry_sec = 6.0
         self._last_redtab_lock_attempt_time = 0.0
@@ -170,7 +186,12 @@ class LogicSvc(threading.Thread):
         self._last_self_emergency_hp_time = 0.0
         self._self_emergency_hp_cooldown = 0.80
         self._last_self_mp_priority_time = 0.0
-        self._self_mp_priority_interval = 1.20
+        self._self_mp_priority_interval = 0.65
+        self._self_mp_priority_failed_until = 0.0
+        self._self_mp_priority_defer_until = 0.0
+        self._mp_follow_self_heal_until = 0.0
+        self._mp_stationary_self_heal_threshold = 50000
+        self._last_party_heal_blocked_log_time = 0.0
         self._death_recovery_heal_attempts = 6
         self._self_gg_retry_cooldown_until = 0.0
         self._self_bm_retry_cooldown_until = 0.0
@@ -179,6 +200,7 @@ class LogicSvc(threading.Thread):
         self._party_direct_heal_key = "3"
         self._party_direct_heal_verified = False
         self._party_direct_heal_target_prepared = False
+        self._party_heal_blocked_until = 0.0
         self._direct_heal_prepare_requested = False
         self._party_direct_heal_fail_count = 0
         self._warrior_redtab_verified = False
@@ -194,92 +216,160 @@ class LogicSvc(threading.Thread):
         self._warrior_debuff_active = False
         self._post_debuff_follow_until = 0.0
         self._post_debuff_recover_prepare_pending = False
+        self._follow_pause_until = 0.0
         self._self_cooltime_refresh_timeout = 0.22
         self._self_gg_verify_timeout = 0.18
         self._self_gg_retry_cooldown_sec = 0.08
         self._last_box_collision_recover_time = 0.0
+        self._support_phase = "idle"
+        self._support_phase_until = 0.0
+        self._support_party_heal_follow_guard_until = 0.0
+        self._support_follow_hold_distance = 1
+        self._support_follow_resume_distance = 2
+        self._warrior_heewon_interval = 16.0
+        self._last_warrior_heewon_time = 0.0
+        self._warrior_heewoncheom_interval = 25.0
+        self._last_warrior_heewoncheom_time = 0.0
+        self._periodic_support_min_mp = 50000
 
     # ----------------------------------------------------------
 
-    # ?? ?대?: ???쒗???????????????????????????????????
+    # 지원 및 리커버리 관련: 회복/지원 관련 보조 메서드들
     # ----------------------------------------------------------
     def _execute_v3_heal(self, skill):
         """
-        珥덇퀬???먭? ?뚮났: RecoveryManager濡??꾩엫?섏뿬 ?ㅽ뻾
+        회복 실행: RecoveryManager를 통해 실행
         """
         self.recovery_manager.execute_v3_heal(skill)
 
     def _press_fast(self, key: str, variance: float = 0.15):
         """
-        珥덇퀬?????낅젰: SpellCaster濡??꾩엫?섏뿬 ?ㅽ뻾
+        회복 단축키 입력: SpellCaster를 통해 실행
         """
         self.recovery_manager.caster._press_fast(key, variance)
 
     def _resolve_recovery_key(self, selected: str, default_key: str):
         """
-        GUI ?좏깮 ?ㅽ궗???ロ궎濡??댁꽍: RecoveryManager濡??꾩엫?섏뿬 ?ㅽ뻾
+        GUI에서 선택된 단축키로 복구키 매핑: RecoveryManager를 통해 실행
         """
         return self.recovery_manager.resolve_recovery_key(selected, default_key)
 
     def _clear_nav_context(self):
-        """Pause/Resume ?명솚??LogicSvc ?대퉬寃뚯씠??臾몃㎘ 珥덇린??"""
+        """Pause/Resume 명령 시 LogicSvc 현재 네비게이션 컨텍스트 초기화"""
         self._current_nav_context = None
 
     def _get_visible_monsters(self) -> list[dict]:
         """
-        ?붾㈃??蹂댁씠??紐ъ뒪??紐⑸줉 諛섑솚
+        화면에 보이는 몬스터 리스트 반환
         
         Purpose:
-            - ?꾩옱 ?붾㈃??媛먯???紐ъ뒪??紐⑸줉 媛?몄삤湲?
-            - ?꾪닾/?寃잜똿 濡쒖쭅?먯꽌 ?ъ슜
-            - ?좏슚??由ъ뒪???뺤떇?몄? 寃利?
-            
+            - 현재 화면에 인식된 몬스터 리스트 얻기
+            - 타겟팅/탐색 로직에서 사용
+            - 유효한 엔티티만 반환
+        
         Returns:
-            list[dict]: 紐ъ뒪???뺣낫 紐⑸줉 (?놁쑝硫?鍮?由ъ뒪??
-            
+            list[dict]: 몬스터 엔티티 정보 리스트 (없으면 빈 리스트)
+        
         Integration:
-            - svc_monitor.py: OCR濡?媛먯???紐ъ뒪???곗씠??
-            - GameState.entities: ?꾩뿭 ?곹깭?먯꽌 紐ъ뒪???뺣낫 愿由?
+            - svc_monitor.py: OCR을 통해 인식된 몬스터 정보
+            - GameState.entities: 게임 상태에서 몬스터 정보 제공
         """
         monsters = self.state.entities.get("monsters", [])
         return monsters if isinstance(monsters, list) else []
 
+    def _set_support_phase(self, phase: str, duration: float = 0.0):
+        self._support_phase = str(phase or "idle")
+        self._support_phase_until = time.time() + max(0.0, float(duration or 0.0))
+
+    def _clear_support_phase(self, expected: str | None = None):
+        if expected and str(getattr(self, "_support_phase", "idle")) != str(expected):
+            return
+        self._support_phase = "idle"
+        self._support_phase_until = 0.0
+
+    def _is_support_phase_active(self, phase: str | None = None) -> bool:
+        current_phase = str(getattr(self, "_support_phase", "idle") or "idle")
+        if phase and current_phase != str(phase):
+            return False
+        if current_phase == "idle":
+            return False
+        return time.time() < float(getattr(self, "_support_phase_until", 0.0) or 0.0)
+
+    def _mark_support_party_heal_follow_guard(self, duration: float = 0.8):
+        self._support_party_heal_follow_guard_until = time.time() + max(0.1, float(duration or 0.0))
+
+    def _is_support_follow_guard_active(self) -> bool:
+        if self._is_support_phase_active("self_recover") or self._is_support_phase_active("retarget"):
+            return True
+        return time.time() < float(getattr(self, "_support_party_heal_follow_guard_until", 0.0) or 0.0)
+
+    def _pause_follow_for_action(self, duration: float = 1.0):
+        self._follow_pause_until = max(
+            float(getattr(self, "_follow_pause_until", 0.0) or 0.0),
+            time.time() + max(0.1, float(duration or 0.0)),
+        )
+        self.state.nav_follow_enabled = False
+
+    def _restore_follow_after_action(self, previous_follow: bool):
+        self._follow_pause_until = 0.0
+        if bool(previous_follow) and bool(getattr(self.state, "service_active", False)):
+            self.state.nav_follow_enabled = True
+
+    def _is_party_heal_blocked(self) -> bool:
+        return should_block_party_heal(
+            self._is_support_phase_active("retarget"),
+            time.time(),
+            float(getattr(self, "_party_heal_blocked_until", 0.0) or 0.0),
+        )
+
+    def _should_hold_follow_at_gap(self, gap: int) -> bool:
+        hold_distance = 1
+        if self._is_support_follow_guard_active():
+            hold_distance = int(self._support_follow_hold_distance)
+        return should_hold_follow_gap(gap, hold_distance=hold_distance)
+
+    def _find_spell_by_name(self, spell_name: str):
+        wanted = str(spell_name or "").strip()
+        if not wanted:
+            return None
+        return next((s for s in self.state.spells if str(getattr(s, "name", "") or "").strip() == wanted), None)
+
     def _get_good_hp_threshold(self) -> int:
         """
-        HP ?뚮났 ?꾧퀎媛?諛섑솚
+        HP 회복 기준값 반환
         
         Purpose:
-            - GUI?먯꽌 ?ㅼ젙??HP 湲곗?媛?媛?몄삤湲?
-            - ?먭?/?뚰떚 ?뚮났 濡쒖쭅?먯꽌 ?ъ슜
-            - ?덉쇅 泥섎━濡??덉쟾??湲곕낯媛??쒓났
-            
+            - GUI에서 설정한 HP 회복 기준값 얻기
+            - 자기자신/파티 회복 로직에서 사용
+            - 예외 처리로 기본값 반환
+        
         Returns:
-            int: HP ?뚮났 湲곗?媛?(湲곕낯媛?0)
-            
+            int: HP 회복 기준값(최소값 100000)
+        
         Integration:
-            - svc_worker.py: GUI?먯꽌 ?ㅼ젙??good_hp 媛?
-            - _needs_hp_recovery(): ?꾧퀎媛?鍮꾧탳
+            - svc_worker.py: GUI에서 설정한 good_hp 값
+            - _needs_hp_recovery(): 기준값 판별에 사용
         """
         try:
-            return max(0, int(getattr(self.state, "good_hp", 0) or 0))
+            return max(100000, int(getattr(self.state, "good_hp", 100000) or 100000))
         except Exception:
-            return 0
+            return 100000
 
     def _get_good_mp_threshold(self) -> int:
         """
-        MP ?뚮났 ?꾧퀎媛?諛섑솚
+        MP 회복 기준값 반환
         
         Purpose:
-            - GUI?먯꽌 ?ㅼ젙??MP 湲곗?媛?媛?몄삤湲?
-            - ?먭?/?뚰떚 ?뚮났 濡쒖쭅?먯꽌 ?ъ슜
-            - ?덉쇅 泥섎━濡??덉쟾??湲곕낯媛??쒓났
-            
+            - GUI에서 설정한 MP 회복 기준값 얻기
+            - 자기자신/파티 회복 로직에서 사용
+            - 예외 처리로 기본값 반환
+        
         Returns:
-            int: MP ?뚮났 湲곗?媛?(湲곕낯媛?0)
-            
+            int: MP 회복 기준값(기본값 0)
+        
         Integration:
-            - svc_worker.py: GUI?먯꽌 ?ㅼ젙??good_mp 媛?
-            - _needs_mp_recovery(): ?꾧퀎媛?鍮꾧탳
+            - svc_worker.py: GUI에서 설정한 good_mp 값
+            - _needs_mp_recovery(): 기준값 판별에 사용
         """
         try:
             return max(0, int(getattr(self.state, "good_mp", 0) or 0))
@@ -288,24 +378,24 @@ class LogicSvc(threading.Thread):
 
     def _needs_hp_recovery(self) -> bool:
         """
-        ?먭? HP ?뚮났 ?꾩슂 ?щ? ?뺤씤
+        자기자신 HP 회복 필요 여부 판별
         
         Purpose:
-            - ?꾩옱 HP ?곹깭 湲곕컲?쇰줈 ?뚮났 ?꾩슂???먮떒
-            - GUI ?ㅼ젙媛믨낵 ?몃━嫄??곹깭 醫낇빀 怨좊젮
-            - rate-limiting?쇰줈 怨쇰룄???뚮났 諛⑹?
-            
+            - 현재 HP 상태 기반으로 회복 필요 조건 판단
+            - GUI 기준값과 트리거 상태 반영
+            - rate-limiting 등으로 불필요 회복 제한
+        
         Algorithm:
-            1. ?꾩옱 HP 媛?몄삤湲?(?뚯닔 諛⑹?)
-            2. GUI ?ㅼ젙 ?꾧퀎媛?鍮꾧탳
-            3. HP ?몃━嫄??곹깭 ?뺤씤
-            
+            1. 현재 HP 값 확인(예외처리)
+            2. GUI 설정 기준값 판별
+            3. HP 트리거 상태 확인
+        
         Returns:
-            bool: HP ?뚮났 ?꾩슂?섎㈃ True
-            
+            bool: HP 회복 필요하면 True
+        
         Integration:
-            - _recover_hp(): ?ㅼ젣 ?뚮났 ?ㅽ궗 ?쒖쟾
-            - _recover_party_hp(): ?뚰떚???뚮났
+            - _recover_hp(): 실제 회복 로직 실행 전
+            - _recover_party_hp(): 파티원 회복 전
         """
         current_hp = max(0, int(getattr(self.state, "hp", 0) or 0))
         good_hp = self._get_good_hp_threshold()
@@ -315,24 +405,25 @@ class LogicSvc(threading.Thread):
 
     def _needs_mp_recovery(self) -> bool:
         """
-        ?먭? MP ?뚮났 ?꾩슂 ?щ? ?뺤씤
+        자기자신 MP 회복 필요 여부 판별
         
         Purpose:
-            - ?꾩옱 MP ?곹깭 湲곕컲?쇰줈 ?뚮났 ?꾩슂???먮떒
-            - GUI ?ㅼ젙媛믨낵 ?몃━嫄??곹깭 醫낇빀 怨좊젮
-            - rate-limiting?쇰줈 怨쇰룄???뚮났 諛⑹?
-            
+            - 현재 MP 상태 기반으로 회복 필요 조건 판단
+            - GUI 기준값과 트리거 상태 반영
+            - rate-limiting 등으로 불필요 회복 제한
+        
         Algorithm:
-            1. ?꾩옱 MP 媛?몄삤湲?(?뚯닔 諛⑹?)
-            2. GUI ?ㅼ젙 ?꾧퀎媛?鍮꾧탳
-            3. MP ?몃━嫄??곹깭 ?뺤씤
-            
+            1. 현재 MP 값 확인(예외처리)
+            2. 우선 자기자신 MP 우선 회복 조건 판단
+            3. GUI 기준값 판별
+            4. MP 트리거 상태 확인
+        
         Returns:
-            bool: MP ?뚮났 ?꾩슂?섎㈃ True
-            
+            bool: MP 회복 필요하면 True
+        
         Integration:
-            - _recover_mp(): ?ㅼ젣 ?뚮났 ?ㅽ궗 ?쒖쟾
-            - _recover_party_mp(): ?뚰떚???뚮났
+            - _recover_mp(): 실제 회복 로직 실행 전
+            - _recover_party_mp(): 파티원 회복 전
         """
         current_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
         if should_prioritize_self_mp(current_mp, self._self_mp_priority_threshold):
@@ -343,36 +434,36 @@ class LogicSvc(threading.Thread):
         return bool(getattr(self.state, "mp_trig_active", False))
 
     def _get_support_target_data(self) -> dict | None:
-        """Return the ally snapshot that the dosa should support, if available."""
-        # 1?쒖쐞: role='寃⑹닔'濡?紐낆떆???곗씠???먯깋
+        """도사가 지원해야 할 대상(아군)의 스냅샷 정보 반환 (가능하면)"""
+        # 1순위: role='격수'로 명시된 원격 데이터 사용
         remote = self.state.get_remote_data_by_role("격수")
-        # 2?쒖쐞: role 留ㅼ묶 ?ㅽ뙣 ??other_pc_data??泥?踰덉㎏ ?곗씠???ъ슜
+        # 2순위: role 무관, other_pc_data에서 첫 번째 정보 사용
         if not remote:
             remote = self.state.get_remote_data()
         
-        # 寃⑹닔 ?곗씠???섏떊 ?뺤씤 濡쒓렇
+        # 격수 데이터 수신 여부 확인 및 로깅
         if remote and isinstance(remote, dict):
             hp = remote.get("hp", 0)
             mp = remote.get("mp", 0)
             heal_request = remote.get("heal_request", False)
             mp_request = remote.get("mp_request", False)
             
-            # ?좏샇 ?섏떊 濡쒓렇 (10珥덈쭏????踰덈쭔 異쒕젰)
+            # 신호 수신 로깅 (10초에 한 번 출력)
             current_time = time.time()
             last_log_time = getattr(self.state, 'last_signal_log_time', 0)
             if current_time - last_log_time > 10:
                 good_hp = remote.get("good_hp", 0)
                 good_mp = remote.get("good_mp", 0)
                 red_tab_enabled = remote.get("red_tab_enabled", False)
-                print(f"[Signal] 寃⑹닔 ?곗씠???섏떊 - HP: {hp}, MP: {mp}, ?먯슂泥? {heal_request}, MP?붿껌: {mp_request}")
-                print(f"[Signal] HP?꾧퀎媛? {good_hp}, MP?꾧퀎媛? {good_mp}, ?덈뱶?? {red_tab_enabled}")
-                print(f"[Signal] ?먯슂泥?怨꾩궛: good_hp>0={good_hp>0}, hp>0={hp>0}, hp<=good_hp={hp<=good_hp}")
+                print(f"[Signal] 격수 데이터 수신 - HP: {hp}, MP: {mp}, 힐요청: {heal_request}, MP요청: {mp_request}")
+                print(f"[Signal] HP기준값: {good_hp}, MP기준값: {good_mp}, red_tab: {red_tab_enabled}")
+                print(f"[Signal] 요청 계산: good_hp>0={good_hp>0}, hp>0={hp>0}, hp<=good_hp={hp<=good_hp}")
                 self.state.last_signal_log_time = current_time
         else:
             current_time = time.time()
             last_log_time = getattr(self.state, 'last_signal_log_time', 0)
             if current_time - last_log_time > 10:
-                print("[Signal] 寃⑹닔 ?곗씠??誘몄닔??- other_pc_data 鍮꾩뼱?덉쓬")
+                print("[Signal] 격수 데이터 미수신 - other_pc_data 비어있음")
                 self.state.last_signal_log_time = current_time
         
         if not isinstance(remote, dict) or not remote:
@@ -418,6 +509,49 @@ class LogicSvc(threading.Thread):
         except Exception:
             pass
 
+    def _release_movement_keys_only(self):
+        for direction in ("up", "down", "left", "right"):
+            try:
+                hw.release_key(direction)
+            except Exception:
+                pass
+
+    def _cast_self_hp_micro_follow_tick(self) -> bool:
+        """이동형 자힐 1틱: 방향키만 짧게 끊고 3>home>enter 후 follow를 즉시 재개한다."""
+        if not self._is_hw_ready() or not self._is_game_window_active():
+            return False
+        key, skill = self.recovery_manager.resolve_recovery_key(
+            getattr(self.state, "recovery_hp_spell", ""),
+            default_key="3",
+        )
+        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
+            return False
+
+        now = time.time()
+        try:
+            self.recovery_manager._last_hp_recover_time = now
+        except Exception:
+            pass
+
+        previous_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+        self.state.support_input_blocked_until = max(previous_block, time.time() + 0.16)
+        self._release_movement_keys_only()
+        for press_key in (key, "home", "enter"):
+            if not self._press_hw_key(str(press_key), variance=0.06, skip_focus_guard=True):
+                return False
+            self._sleep_ui_gap(0.018)
+        if skill is not None:
+            try:
+                skill.last_cast_time = now
+            except Exception:
+                pass
+        self.state.support_input_blocked_until = min(
+            float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
+            time.time() + 0.02,
+        )
+        print(f"[Recovery] self HP micro-follow tick: key={key}")
+        return True
+
     def _mark_self_status_scan_window(self, duration: float | None = None):
         window = float(duration if duration is not None else self._self_status_scan_window_sec)
         until = time.time() + max(0.25, window)
@@ -448,7 +582,7 @@ class LogicSvc(threading.Thread):
         self.state.last_self_gg_cast_time = 0.0
 
         try:
-            for key in ("esc", "4", "home", "enter"):
+            for key in ("esc", "5", "home", "enter"):
                 if not self._press_hw_key(key, variance=0.10, skip_focus_guard=True):
                     return False
                 self._sleep_ui_gap(0.12 if key != "enter" else 0.20)
@@ -492,34 +626,169 @@ class LogicSvc(threading.Thread):
         self._last_self_emergency_hp_time = now
         self._invalidate_warrior_redtab_verification()
         self._direct_heal_prepare_requested = False
-        self._set_support_input_block(1.2)
-        self._stop_support_movement_inputs()
-        self._set_combat_busy(True)
-        try:
-            for _ in range(3):
-                self.recovery_manager.execute_self_hp_recovery()
-                latest_hp = int(getattr(self.state, "hp", 0) or 0)
-                if latest_hp > (self._self_hp_emergency_threshold + 7000):
-                    break
-            self._refresh_self_cooltime_view("[Recovery] self emergency status refresh.")
-            self._execute_self_geumgang_cycle(skip_refresh=True, force_cast=True)
-            self._execute_self_bomu_cycle(skip_refresh=True, force_cast=True)
-        finally:
-            self._set_combat_busy(False)
-        if self.state.role == "도사" and self.state.service_active:
+        recovered = self._recover_self_hp_until_good_hp(
+            reason_log="[Recovery] self emergency sustain recovery.",
+            support_block_duration=2.4,
+            max_attempts=8,
+        )
+        if recovered:
+            self._complete_self_hp_recovery_reengage(
+                source_log="[Recovery] self emergency recovery complete."
+            )
+        elif self.state.role == "도사" and self.state.service_active:
             self.request_initial_direct_heal_target_prepare()
         return True
 
-    def _handle_self_mp_priority(self, support_target: dict | None = None) -> bool:
-        if not self._should_prioritize_self_mp():
+    def _recover_self_hp_until_good_hp(
+        self,
+        reason_log: str,
+        support_block_duration: float = 2.0,
+        max_attempts: int = 6,
+    ) -> bool:
+        self._set_support_phase("self_recover", duration=max(1.2, float(support_block_duration or 0.0) + 0.8))
+        self._set_support_input_block(max(0.8, float(support_block_duration or 0.0)))
+        self._stop_support_movement_inputs()
+        self._set_combat_busy(True)
+        try:
+            attempts = 0
+            while attempts < max(1, int(max_attempts)):
+                current_hp = int(getattr(self.state, "hp", 0) or 0)
+                good_hp = self._get_good_hp_threshold()
+                if not should_continue_self_hp_recovery(
+                    current_hp,
+                    good_hp,
+                    self._self_hp_emergency_threshold,
+                ):
+                    return current_hp > 0
+                self.recovery_manager.execute_self_hp_recovery()
+                attempts += 1
+
+            final_hp = int(getattr(self.state, "hp", 0) or 0)
+            target_hp = max(
+                int(self._self_hp_emergency_threshold) + 7000,
+                int(self._get_good_hp_threshold() or 0),
+            )
+            if final_hp < target_hp:
+                print(
+                    f"{reason_log} hp={final_hp} target={target_hp} "
+                    f"attempts={attempts}"
+                )
+            return final_hp > 0 and final_hp >= target_hp
+        finally:
+            self._clear_support_phase(expected="self_recover")
+            self._set_combat_busy(False)
+
+    def _cast_emergency_gg_hold(self, hold_duration: float = 1.5) -> bool:
+        if not self._is_hw_ready() or not self._is_game_window_active():
+            return False
+        if not self._clear_red_tab_for_self_cast():
             return False
 
-        if support_target:
-            remote_hp = int(support_target.get("hp", 0) or 0)
-            remote_good_hp = int(support_target.get("good_hp", self._get_good_hp_threshold()) or 0)
-            remote_noncritical_floor = max(60000, int(remote_good_hp * 0.65))
-            if remote_hp <= remote_noncritical_floor:
-                return False
+        base_hold = max(1.35, float(hold_duration or 0.0))
+        for attempt in range(2):
+            actual_hold = max(1.35, min(1.75, random.uniform(base_hold * 0.97, base_hold * 1.10)))
+            print(
+                "[Recovery] self emergency GG hold cast: "
+                f"attempt={attempt + 1} hold={actual_hold:.2f}s"
+            )
+            try:
+                hw.press_key("0")
+                humanized_sleep(actual_hold, variance=0.08)
+            finally:
+                try:
+                    hw.release_key("0")
+                except Exception:
+                    pass
+            self.state.last_self_gg_cast_time = time.time()
+            humanized_sleep(0.18, variance=0.10)
+        return True
+
+    def _complete_self_hp_recovery_reengage(self, source_log: str) -> bool:
+        print(source_log)
+        moving_follow = bool(
+            getattr(self.state, "nav_follow_enabled", False)
+            and getattr(self.state, "service_active", False)
+        )
+        self._set_support_phase("retarget", duration=2.0 if moving_follow else 3.0)
+        if not moving_follow:
+            self._set_support_input_block(2.4)
+            self._stop_support_movement_inputs()
+        self._invalidate_warrior_redtab_verification()
+        self._party_direct_heal_target_prepared = False
+        self._party_heal_blocked_until = time.time() + (1.4 if moving_follow else 3.0)
+        previous_busy = bool(getattr(self.state, "is_combat_busy", False))
+        if not moving_follow:
+            self._set_combat_busy(True)
+        try:
+            self._cast_emergency_gg_hold(hold_duration=1.5)
+            humanized_sleep(0.025, variance=0.08)
+            if moving_follow:
+                self._set_support_input_block(0.65)
+                self._release_movement_keys_only()
+            red_tab_reacquired = self._reacquire_warrior_red_tab_after_emergency()
+            if self.state.role == "도사" and self.state.service_active and not red_tab_reacquired:
+                print("[Recovery] red_tab reacquire failed. Queue direct target prepare fallback.")
+                self.request_initial_direct_heal_target_prepare()
+            return red_tab_reacquired
+        finally:
+            self._clear_support_phase(expected="retarget")
+            if not moving_follow:
+                self._set_combat_busy(previous_busy)
+
+    def _reacquire_warrior_red_tab_after_emergency(self) -> bool:
+        if not self._is_hw_ready() or not self._is_game_window_active():
+            return False
+
+        self._invalidate_warrior_redtab_verification()
+        self._party_direct_heal_target_prepared = False
+        self._set_support_input_block(0.8)
+        self._stop_support_movement_inputs()
+        humanized_sleep(0.025, variance=0.08)
+        for attempt in range(3):
+            wait_between_tabs = random.uniform(
+                0.075,
+                0.105,
+            )
+            print(
+                "[Recovery] reacquire warrior red_tab: "
+                f"attempt={attempt + 1} ESC -> TAB ({wait_between_tabs:.2f}s) -> TAB"
+            )
+            self.state.red_tab_promotion_active = True
+            self.state.red_tab_promotion_until = time.time() + 2.0
+            try:
+                if not self._press_hw_key("esc", variance=0.10, skip_focus_guard=True):
+                    continue
+                humanized_sleep(0.025, variance=0.08)
+                if bool(getattr(self.state, "red_tab_enabled", False)):
+                    if not self._press_hw_key("esc", variance=0.10, skip_focus_guard=True):
+                        continue
+                    humanized_sleep(0.030, variance=0.08)
+                if not self._press_hw_key("tab", variance=0.10, skip_focus_guard=True):
+                    continue
+                humanized_sleep(wait_between_tabs, variance=0.08)
+                if not self._press_hw_key("tab", variance=0.10, skip_focus_guard=True):
+                    continue
+                # TAB 입력 자체가 성공하면 OCR 판정이 늦어도 다음 F2 루프에서 3힐을 막지 않는다.
+                self._party_direct_heal_target_prepared = True
+                self._party_heal_blocked_until = time.time() + 0.03
+                self._last_party_hp_support_time = 0.0
+                print("[Recovery] warrior red_tab physical TAB>TAB complete. Direct 3 heal can resume immediately.")
+                return True
+            finally:
+                self.state.red_tab_promotion_active = False
+            humanized_sleep(speed_up_delay(0.24, factor=3.0), variance=0.10)
+        self._party_direct_heal_target_prepared = False
+        return False
+
+    def _handle_self_mp_priority(self, support_target: dict | None = None) -> bool:
+        trigger_mp = int(getattr(self.state, "mp", 0) or 0)
+        if not should_prioritize_self_mp(trigger_mp, self._self_mp_priority_threshold):
+            return False
+
+        if time.time() < float(getattr(self, "_self_mp_priority_failed_until", 0.0) or 0.0):
+            return False
+        if time.time() < float(getattr(self, "_self_mp_priority_defer_until", 0.0) or 0.0):
+            return False
 
         now = time.time()
         if (now - self._last_self_mp_priority_time) < self._self_mp_priority_interval:
@@ -527,10 +796,124 @@ class LogicSvc(threading.Thread):
 
         self._last_self_mp_priority_time = now
         print(
-            f"[Recovery] self MP priority: mp={int(getattr(self.state, 'mp', 0) or 0)} "
-            f"< {self._self_mp_priority_threshold}"
+            f"[Recovery] self MP priority: mp={trigger_mp} "
+            f"<= {self._self_mp_priority_threshold}"
         )
-        self.recovery_manager.execute_self_mp_recovery()
+        self._execute_self_mp_recovery_and_retarget(
+            support_target,
+            source_log="[Recovery] self MP priority complete.",
+            trigger_mp=trigger_mp,
+        )
+        return True
+
+    def _execute_self_mp_recovery_and_retarget(
+        self,
+        support_target: dict | None = None,
+        source_log: str = "[Recovery] self MP recovery complete.",
+        trigger_mp: int | None = None,
+    ) -> bool:
+        self._set_support_phase("mp_recover", duration=0.45)
+        try:
+            before_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
+            before_hp = max(0, int(getattr(self.state, "hp", 0) or 0))
+            casted_mp = self._cast_self_mp_recovery_fast(trigger_mp=trigger_mp)
+            humanized_sleep(0.06, variance=0.10)
+            after_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
+            after_hp = max(0, int(getattr(self.state, "hp", 0) or 0))
+            if not casted_mp:
+                self._self_mp_priority_failed_until = time.time() + 0.35
+                print(
+                    f"[Recovery] self MP boost skipped: before={before_mp}, after={after_mp}. "
+                    "Allow warrior heal before retry."
+                )
+            else:
+                self._self_mp_priority_defer_until = time.time() + 0.35
+                good_hp = self._get_good_hp_threshold()
+                print(
+                    "[Recovery] self MP boost result: "
+                    f"mp={before_mp}->{after_mp}, hp={before_hp}->{after_hp}, good_hp={good_hp}"
+                )
+                if after_hp > 0 and after_hp <= int(getattr(self, "_mp_stationary_self_heal_threshold", 50000) or 50000):
+                    self._mp_follow_self_heal_until = 0.0
+                    print(
+                        "[Recovery] post-MP critical HP. "
+                        f"Stop follow briefly and recover self hp={after_hp}/{good_hp}."
+                    )
+                    recovered = self._recover_self_hp_until_good_hp(
+                        reason_log="[Recovery] post-MP critical self HP recovery.",
+                        support_block_duration=2.4,
+                        max_attempts=14,
+                    )
+                    if recovered:
+                        self._complete_self_hp_recovery_reengage(
+                            source_log="[Recovery] post-MP critical self HP recovery complete."
+                        )
+                    return True
+                if after_hp > 0 and after_hp <= good_hp:
+                    self._mp_follow_self_heal_until = time.time() + 3.0
+                    self._cast_self_hp_micro_follow_tick()
+                    print("[Recovery] post-MP self HP micro recovery requested. Follow remains active.")
+                    return True
+            if self.state.role != "도사" or not bool(getattr(self.state, "service_active", False)):
+                return True
+            if support_target is None:
+                support_target = self._get_support_target_data()
+            if not support_target:
+                print(f"{source_log} no warrior telemetry. Skip retarget in moving MP flow.")
+                return True
+            # Moving MP flow intentionally skips immediate ESC>TAB>TAB.
+            # Retarget only when the next warrior-heal path actually needs it.
+            self._party_direct_heal_target_prepared = False
+            self._party_direct_heal_verified = False
+            print(f"{source_log} moving flow complete. Retarget deferred until warrior heal.")
+            return True
+        finally:
+            self._clear_support_phase(expected="mp_recover")
+
+    def _cast_self_mp_recovery_fast(self, trigger_mp: int | None = None) -> bool:
+        current_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
+        good_mp = max(0, int(getattr(self.state, "good_mp", 0) or 0))
+        effective_mp = current_mp
+        if trigger_mp is not None:
+            try:
+                trigger_mp_int = max(0, int(trigger_mp))
+            except Exception:
+                trigger_mp_int = current_mp
+            if trigger_mp_int <= self._self_mp_priority_threshold:
+                effective_mp = trigger_mp_int
+        if current_mp < 30 and trigger_mp is None:
+            print(f"[Recovery] self MP boost skipped: MP={current_mp} (<30)")
+            return False
+        if effective_mp > self._self_mp_priority_threshold and (good_mp <= 0 or current_mp >= good_mp):
+            return False
+
+        key, skill = self.recovery_manager.resolve_recovery_key(
+            getattr(self.state, "recovery_mp_spell", ""),
+            default_key="2",
+        )
+        if skill is not None and hasattr(skill, "is_ready") and not skill.is_ready():
+            print(f"[Recovery] self MP boost skipped: cooldown key={key}")
+            return False
+
+        now = time.time()
+        try:
+            self.recovery_manager._last_mp_recover_time = now
+        except Exception:
+            pass
+
+        self._press_hw_key("esc", variance=0.10, skip_focus_guard=True)
+        self._sleep_ui_gap(0.035)
+        cast_function = self.recovery_manager.resolve_recovery_cast_function(
+            getattr(self.state, "recovery_mp_spell", ""),
+            default_func="SpellEnter",
+        )
+        self.recovery_manager.cast_recovery_sequence(key, cast_function)
+        if skill is not None:
+            try:
+                skill.last_cast_time = now
+            except Exception:
+                pass
+        print(f"[Recovery] self MP boost fast cast: key={key}, mp={current_mp}, trigger_mp={trigger_mp}")
         return True
 
     def _needs_hp_recovery_for(self, snapshot: dict | None) -> bool:
@@ -540,14 +923,23 @@ class LogicSvc(threading.Thread):
         current_hp = max(0, int(snapshot.get("hp", 0) or 0))
         snap_good_hp = int(snapshot.get("good_hp", 0) or 0)
         
-        # [FIX] ?듭떊 ?ㅻ쪟???ㅼ젙 ?꾨씫 ??寃⑹닔 泥대젰 湲곗? ?섎뱶肄붾뵫 (280000)
-        good_hp = snap_good_hp if snap_good_hp > 0 else 280000
+        # [FIX] ?듭떊 ?ㅻ쪟???ㅼ젙 ?꾨씫 ??寃⑹닔 泥대젰 湲곗? ?섎뱶肄붾뵫 (800000)
+        good_hp = snap_good_hp if snap_good_hp > 0 else 800000
         
         # HP媛 good_hp ?댄븯?대㈃ ??긽 ?뚮났 ?ㅽ뻾 (?먯슂泥?臾댁떆)
         if good_hp > 0 and current_hp <= good_hp:
             return True
         # 鍮꾩긽 ?곹솴: HP媛 10000 ?댄븯?대㈃ ??긽 ?뚮났
         return current_hp <= 10000
+
+    def _get_party_good_hp_threshold(self, snapshot: dict | None) -> int:
+        if not snapshot:
+            return 800000
+        try:
+            snap_good_hp = int(snapshot.get("good_hp", 0) or 0)
+        except Exception:
+            snap_good_hp = 0
+        return snap_good_hp if snap_good_hp > 0 else 800000
 
     def _needs_mp_recovery_for(self, snapshot: dict | None) -> bool:
         if not snapshot:
@@ -641,6 +1033,13 @@ class LogicSvc(threading.Thread):
         if monsters:
             self._last_monster_seen_time = now
 
+        if should_ignore_monster_combat_for_support_autohunt(
+            getattr(self.state, "role", ""),
+            getattr(self.state, "service_active", False),
+            getattr(self.state, "nav_follow_enabled", False),
+        ):
+            return False
+
         if self.state.target_locked:
             acquire_grace = max(0.30, float(TIMING_CONFIG.get("ocr_wait", 0.10)) * 3.0)
             if self.state.target_name:
@@ -693,11 +1092,15 @@ class LogicSvc(threading.Thread):
         if not snapshot or not self._needs_hp_recovery_for(snapshot):
             return False
         before_hp = max(0, int(snapshot.get("hp", 0) or 0))
-        if self._party_direct_heal_verified:
+        if self._is_party_heal_blocked():
+            return False
+        if self._party_direct_heal_verified and self._party_direct_heal_target_prepared:
             if not self._cast_party_direct_heal(snapshot):
                 return False
             self._last_party_hp_value = before_hp
             return True
+        if self._party_direct_heal_verified and not self._party_direct_heal_target_prepared:
+            self._party_direct_heal_verified = False
 
         if not self._party_direct_heal_target_prepared and not self._prepare_direct_tab_heal_target():
             now = time.time()
@@ -712,19 +1115,10 @@ class LogicSvc(threading.Thread):
         if not self._cast_party_direct_heal(snapshot):
             return False
 
-        self._last_party_hp_value = before_hp
-        healed, after_hp = self._confirm_party_heal_by_hp_gain(before_hp)
-        if not healed:
-            self._party_direct_heal_fail_count += 1
-            if self._party_direct_heal_fail_count >= 2:
-                self._party_direct_heal_verified = False
-                self._party_direct_heal_target_prepared = False
-            print("[Support] warrior heal verification failed: no HP gain after direct 3 heal.")
-            return False
         self._party_direct_heal_verified = True
         self._party_direct_heal_target_prepared = True
         self._party_direct_heal_fail_count = 0
-        print(f"[Support] warrior direct heal verified by HP gain: {before_hp} -> {after_hp}")
+        self._last_party_hp_value = before_hp
         return True
 
     def _roll_party_hp_tick_interval(self, rapid_heal: bool = False) -> float:
@@ -778,11 +1172,11 @@ class LogicSvc(threading.Thread):
         self._set_support_input_block(0.9)
         self._stop_support_movement_inputs()
         if not self._prepare_direct_tab_heal_target():
-            print("[Support] F2 initial direct target prepare failed.")
+            print("[Support] 자동사냥 초기 direct target prepare failed.")
             return True
         self._party_direct_heal_target_prepared = True
         self._last_party_hp_support_time = 0.0
-        print("[Support] F2 initial direct target prepared: esc -> tab -> tab")
+        print("[Support] 자동사냥 초기 direct target prepared: esc -> tab -> tab")
         return True
 
     def _handle_box_collision_reprepare_request(self) -> bool:
@@ -793,8 +1187,9 @@ class LogicSvc(threading.Thread):
         if (now - float(getattr(self, "_last_box_collision_recover_time", 0.0) or 0.0)) < 1.0:
             return False
         self._last_box_collision_recover_time = now
-        print("[Support] box collision recover: re-prepare direct target (F2 flow).")
+        print("[Support] box collision recover: re-prepare direct target (자동사냥 flow).")
         self.request_initial_direct_heal_target_prepare()
+        self._handle_initial_direct_heal_prepare_request()
         return True
 
     def _prepare_direct_tab_heal_target(self) -> bool:
@@ -823,12 +1218,115 @@ class LogicSvc(threading.Thread):
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
         hp_val = int((snapshot or {}).get("hp", 0) or 0)
-        print(f"[Support] HP heal casting on warrior: key={self._party_direct_heal_key}, hp={hp_val}, direct_verified={self._party_direct_heal_verified}")
+        now = time.time()
+        if (now - float(getattr(self, "_last_party_direct_heal_log_time", 0.0) or 0.0)) >= 1.0:
+            print(f"[Support] HP heal casting on warrior: key={self._party_direct_heal_key}, hp={hp_val}, direct_verified={self._party_direct_heal_verified}")
+            self._last_party_direct_heal_log_time = now
         if not self._press_hw_key(self._party_direct_heal_key, variance=0.10):
             return False
         self._last_party_hp_support_time = time.time()
         self._sleep_ui_gap(random.uniform(0.012, 0.030))
         return True
+
+    def _cast_party_heewon(self, snapshot: dict | None = None) -> bool:
+        if not self._is_hw_ready() or not self._restore_game_window_focus_for_support():
+            return False
+        spell = self._find_spell_by_name("희원")
+        if spell is not None and hasattr(spell, "is_ready") and not spell.is_ready():
+            return False
+        hp_val = int((snapshot or {}).get("hp", 0) or 0)
+        print(f"[Support] Heewon casting on warrior: key=1, hp={hp_val}")
+        if not self._press_hw_key("1", variance=0.10):
+            return False
+        now = time.time()
+        self._last_warrior_heewon_time = now
+        if spell is not None:
+            try:
+                spell.last_cast_time = now
+            except Exception:
+                pass
+        self._sleep_ui_gap(random.uniform(0.018, 0.036))
+        return True
+
+    def _cast_party_heewoncheom(self, snapshot: dict | None = None) -> bool:
+        if not self._is_hw_ready() or not self._restore_game_window_focus_for_support():
+            return False
+        spell = self._find_spell_by_name("희원첨")
+        if spell is not None and hasattr(spell, "is_ready") and not spell.is_ready():
+            return False
+        hp_val = int((snapshot or {}).get("hp", 0) or 0)
+        print(f"[Support] Heewoncheom casting on warrior: key=4, hp={hp_val}")
+        if not self._press_hw_key("4", variance=0.10):
+            return False
+        now = time.time()
+        self._last_warrior_heewoncheom_time = now
+        if spell is not None:
+            try:
+                spell.last_cast_time = now
+            except Exception:
+                pass
+        self._sleep_ui_gap(random.uniform(0.018, 0.036))
+        return True
+
+    def _cast_due_periodic_party_support(self, snapshot: dict | None, now_support: float | None = None) -> bool:
+        if not snapshot:
+            return False
+        current_mp = int(getattr(self.state, "mp", 0) or 0)
+        if current_mp <= self._periodic_support_min_mp:
+            return False
+        now_support = time.time() if now_support is None else float(now_support)
+        hp_val = int(snapshot.get("hp", 0) or 0)
+
+        heewoncheom_elapsed = now_support - float(getattr(self, "_last_warrior_heewoncheom_time", 0.0) or 0.0)
+        if should_cast_periodic_heewon(heewoncheom_elapsed, self._warrior_heewoncheom_interval):
+            if not self._party_direct_heal_target_prepared and not self._prepare_direct_tab_heal_target():
+                return False
+            if self._cast_party_heewoncheom(snapshot):
+                self._last_party_hp_value = hp_val
+                return True
+
+        heewon_elapsed = now_support - float(getattr(self, "_last_warrior_heewon_time", 0.0) or 0.0)
+        if should_cast_periodic_heewon(heewon_elapsed, self._warrior_heewon_interval):
+            if not self._party_direct_heal_target_prepared and not self._prepare_direct_tab_heal_target():
+                return False
+            if self._cast_party_heewon(snapshot):
+                self._last_party_hp_value = hp_val
+                return True
+
+        return False
+
+    def cast_repeat_6_up_enter(self, repeat_count: int = 5) -> bool:
+        if not self._is_hw_ready() or not self._is_game_window_active():
+            return False
+        previous_follow = bool(getattr(self.state, "nav_follow_enabled", False))
+        estimated_duration = 0.35 + (max(1, int(repeat_count or 1)) * 0.22)
+        self._pause_follow_for_action(duration=max(1.6, estimated_duration + 0.8))
+        self._set_support_input_block(1.8)
+        self._stop_support_movement_inputs()
+        previous_busy = bool(getattr(self.state, "is_combat_busy", False))
+        self._set_combat_busy(True)
+        try:
+            print("[Hon] follow paused. Cast ESC>6>UP>ENTER.")
+            tick_interval = 0.20
+            sequence = build_f5_hon_sequence(repeat_count=repeat_count)
+            for idx in range(0, max(0, len(sequence) - 3), 4):
+                tick_started = time.perf_counter()
+                for key, delay in zip(sequence[idx:idx + 4], (0.04, 0.04, 0.04, 0.06)):
+                    if not self._press_hw_key(key, variance=0.10, skip_focus_guard=True):
+                        return False
+                    self._sleep_ui_gap(min(delay, 0.03 if key != "enter" else 0.04))
+                remaining = tick_interval - (time.perf_counter() - tick_started)
+                if remaining > 0:
+                    humanized_sleep(remaining, variance=0.05)
+            for key, delay in zip(sequence[-3:], (0.07, 0.08, 0.08)):
+                if not self._press_hw_key(key, variance=0.10, skip_focus_guard=True):
+                    return False
+                self._sleep_ui_gap(delay)
+            print("[Hon] cast complete. Follow resumed.")
+            return True
+        finally:
+            self._set_combat_busy(previous_busy)
+            self._restore_follow_after_action(previous_follow)
 
     def _get_latest_warrior_snapshot(self) -> dict | None:
         remote = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
@@ -873,6 +1371,37 @@ class LogicSvc(threading.Thread):
                     return True
             return False
         except Exception:
+            return False
+
+    def _is_dosa_f2_follow_service(self) -> bool:
+        return (
+            self.state.role == "도사"
+            and bool(getattr(self.state, "service_active", False))
+            and bool(getattr(self.state, "nav_follow_enabled", False))
+            and bool(getattr(self.state, "auto_hunt", False))
+        )
+
+    def _restore_game_window_focus_for_support(self) -> bool:
+        if self._is_game_window_active():
+            return True
+        if not self._is_dosa_f2_follow_service():
+            return False
+        hwnd = getattr(self.state, "hwnd", None)
+        if not hwnd:
+            return False
+        try:
+            if not win32gui.IsWindow(hwnd):
+                return False
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            humanized_sleep(0.025, variance=0.04)
+            win32gui.SetForegroundWindow(hwnd)
+            humanized_sleep(0.035, variance=0.04)
+            return self._is_game_window_active()
+        except Exception as exc:
+            now = time.time()
+            if now - self._last_focus_skip_log_time >= 2.0:
+                print(f"[Support] game window focus restore failed: {exc}")
+                self._last_focus_skip_log_time = now
             return False
 
     def _is_self_status_visible(self) -> bool:
@@ -1201,6 +1730,8 @@ class LogicSvc(threading.Thread):
         return True
 
     def _execute_warrior_debuff_cycle(self, snapshot: dict | None) -> bool:
+        # 혼(디버프)은 현재 불안정해서 F2 루프에서 임시 제외한다.
+        return False
         if not snapshot:
             return False
         # 혼(디버프)은 F2(FOLLOW+SERVICE) 루프 내부에서만 실행한다.
@@ -1238,11 +1769,15 @@ class LogicSvc(threading.Thread):
         key = "6"
         loop_count = random.randint(8, 14)
         previous_busy = bool(getattr(self.state, "is_combat_busy", False))
+        previous_follow = bool(getattr(self.state, "nav_follow_enabled", False))
         self._warrior_debuff_active = True
-        self._set_support_input_block(2.2)
+        estimated_duration = 0.5 + (loop_count * 0.22)
+        self._pause_follow_for_action(duration=max(2.2, estimated_duration + 0.8))
+        self._set_support_input_block(max(2.2, estimated_duration + 0.6))
         self._stop_support_movement_inputs()
         self._set_combat_busy(True)
         try:
+            print("[Debuff] follow paused before warrior hon cast.")
             for _ in range(loop_count):
                 if not self._press_hw_key("esc", variance=0.10):
                     return False
@@ -1275,6 +1810,7 @@ class LogicSvc(threading.Thread):
         finally:
             self._warrior_debuff_active = False
             self._set_combat_busy(previous_busy)
+            self._restore_follow_after_action(previous_follow)
 
     def _press_hw_key(self, key: str, variance: float = 0.10, skip_focus_guard: bool = False):
         if not self._is_hw_ready():
@@ -1283,7 +1819,7 @@ class LogicSvc(threading.Thread):
                 print(f"[Support] hardware not ready. Skip key: {key}")
                 self._last_hw_skip_log_time = now
             return False
-        if not skip_focus_guard and not self._is_game_window_active():
+        if not skip_focus_guard and not self._restore_game_window_focus_for_support():
             now = time.time()
             if now - self._last_focus_skip_log_time >= 2.0:
                 print(f"[Support] game window inactive. Skip key: {key}")
@@ -1680,38 +2216,44 @@ class LogicSvc(threading.Thread):
         if not skill: return
 
         print(f"[Debuff] ?붾쾭???ㅼ틪 ?쒖옉: {debuff_spell}")
+        previous_follow = bool(getattr(self.state, "nav_follow_enabled", False))
+        self._pause_follow_for_action(duration=float(TIMING_CONFIG["combat_timeout"]) + 1.0)
+        self._stop_support_movement_inputs()
         num_cycles  = random.randint(10, 20)
         fail_count  = 0
         start_time  = time.time()
         timeout     = TIMING_CONFIG["combat_timeout"]
 
-        for _ in range(num_cycles):
-            # ?? Fail-safe ???????????????????????????????????
-            if time.time() - start_time > timeout * random.uniform(0.9, 1.1):
-                print("[Failsafe] [FAIL-SAFE] ?붾쾭???ㅼ틪 ??꾩븘??-> 猷⑦봽 媛뺤젣 以묐떒.")
-                hw.panic_escape()
-                break
-
-            # 1. ?二???
-            hw.humanized_press(skill.hotkey)
-            humanized_sleep(TIMING_CONFIG["debuff_key_wait"])
-            # 2. Up (?ㅼ쓬 ?寃?
-            hw.humanized_press("up")
-            humanized_sleep(TIMING_CONFIG["debuff_up_wait"])
-            # 3. Enter (?寃??뺤젙)
-            hw.humanized_press("enter")
-            humanized_sleep(TIMING_CONFIG["debuff_ocr_wait"])
-
-            # 4. ?ㅽ뙣 寃利?
-            if "嫄몃━吏 ?딆뒿?덈떎" in self.state.target_name:
-                fail_count += 1
-                print(f"[Warn] ?寃?臾댄슚 ({fail_count}/5)")
-                if fail_count >= 5:
-                    print("[Stop] ?좏슚 ?寃?遺??-> ?붾쾭???ㅼ틪 議곌린 醫낅즺.")
-                    hw.panic_escape(2)
+        try:
+            for _ in range(num_cycles):
+                # ?? Fail-safe ???????????????????????????????????
+                if time.time() - start_time > timeout * random.uniform(0.9, 1.1):
+                    print("[Failsafe] [FAIL-SAFE] ?붾쾭???ㅼ틪 ??꾩븘??-> 猷⑦봽 媛뺤젣 以묐떒.")
+                    hw.panic_escape()
                     break
-            else:
-                fail_count = 0
+
+                # 1. ?二???
+                hw.humanized_press(skill.hotkey)
+                humanized_sleep(TIMING_CONFIG["debuff_key_wait"])
+                # 2. Up (?ㅼ쓬 ?寃?
+                hw.humanized_press("up")
+                humanized_sleep(TIMING_CONFIG["debuff_up_wait"])
+                # 3. Enter (?寃??뺤젙)
+                hw.humanized_press("enter")
+                humanized_sleep(TIMING_CONFIG["debuff_ocr_wait"])
+
+                # 4. ?ㅽ뙣 寃利?
+                if "嫄몃━吏 ?딆뒿?덈떎" in self.state.target_name:
+                    fail_count += 1
+                    print(f"[Warn] ?寃?臾댄슚 ({fail_count}/5)")
+                    if fail_count >= 5:
+                        print("[Stop] ?좏슚 ?寃?遺??-> ?붾쾭???ㅼ틪 議곌린 醫낅즺.")
+                        hw.panic_escape(2)
+                        break
+                else:
+                    fail_count = 0
+        finally:
+            self._restore_follow_after_action(previous_follow)
 
         self.state.last_debuff_x = self.state.x
         self.state.last_debuff_y = self.state.y
@@ -1936,7 +2478,7 @@ class LogicSvc(threading.Thread):
                 humanized_sleep(0.02)
                 continue
 
-            if not getattr(self.state, "service_active", False):
+            if not getattr(self.state, "service_active", False) and not self._restore_dosa_service_if_follow_autohunt():
                 if self.state.is_combat_busy:
                     self._set_combat_busy(False)
                 self.state.last_bomu_time = 0.0
@@ -2013,8 +2555,6 @@ class LogicSvc(threading.Thread):
                 self.state.target_locked = False
 
     def _is_follow_reposition_needed(self) -> bool:
-        if not bool(getattr(self.state, "is_connected", False)):
-            return False
         if not bool(getattr(self.state, "nav_follow_enabled", False)):
             return False
 
@@ -2039,29 +2579,113 @@ class LogicSvc(threading.Thread):
         follow_y = target_y + behind_offset[1]
         current_x = int(getattr(self.state, "x", 0) or 0)
         current_y = int(getattr(self.state, "y", 0) or 0)
-        return not should_hold_follow_position(follow_x, follow_y, current_x, current_y)
+        follow_x, follow_y = adjust_follow_target_by_axis_gap(
+            follow_x,
+            follow_y,
+            current_x,
+            current_y,
+            target_x,
+            target_y,
+            min_axis_gap=1,
+        )
+        gap = follow_manhattan_gap(follow_x, follow_y, current_x, current_y)
+        return not self._should_hold_follow_at_gap(gap)
+
+    def _repair_dosa_f2_runtime_state(self):
+        if self.state.role != "도사" or not bool(getattr(self.state, "service_active", False)):
+            return
+
+        changed = []
+        follow_pause_active = time.time() < float(getattr(self, "_follow_pause_until", 0.0) or 0.0)
+        if (not follow_pause_active) and not bool(getattr(self.state, "nav_follow_enabled", False)):
+            self.state.nav_follow_enabled = True
+            changed.append("follow")
+        if not bool(getattr(self.state, "auto_hunt", False)):
+            self.state.auto_hunt = True
+            changed.append("auto_hunt")
+        if not bool(getattr(self.state, "sentinel_enabled", False)):
+            self.state.sentinel_enabled = True
+            changed.append("sentinel")
+
+        busy_is_stale = (
+            bool(getattr(self.state, "is_combat_busy", False))
+            and not self._is_support_phase_active()
+            and not bool(getattr(self, "_warrior_debuff_active", False))
+            and not bool(getattr(self, "_death_recovery_active", False))
+            and time.time() >= float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+        )
+        if busy_is_stale:
+            self._set_combat_busy(False)
+            changed.append("combat_busy")
+
+        if changed:
+            now = time.time()
+            if now - float(getattr(self, "_last_dosa_f2_watchdog_log_time", 0.0) or 0.0) >= 1.0:
+                print(f"[F2Watchdog] restored: {','.join(changed)}")
+                self._last_dosa_f2_watchdog_log_time = now
+
+    def _restore_dosa_service_if_follow_autohunt(self) -> bool:
+        if self.state.role != "도사":
+            return False
+        if bool(getattr(self.state, "service_active", False)):
+            return True
+        if not (
+            bool(getattr(self.state, "auto_hunt", False))
+            and bool(getattr(self.state, "nav_follow_enabled", False))
+        ):
+            return False
+        self.state.service_active = True
+        self.state.control_mode = "FOLLOW+SERVICE"
+        self.state.sentinel_enabled = True
+        now = time.time()
+        if now - float(getattr(self, "_last_dosa_f2_watchdog_log_time", 0.0) or 0.0) >= 1.0:
+            print("[F2Watchdog] restored: service_active")
+            self._last_dosa_f2_watchdog_log_time = now
+        return True
+
+    def _log_dosa_f2_idle_reason(self, reason: str, interval: float = 1.0):
+        now = time.time()
+        if now - float(getattr(self, "_last_dosa_f2_idle_reason_log_time", 0.0) or 0.0) < max(0.2, float(interval)):
+            return
+        self._last_dosa_f2_idle_reason_log_time = now
+        print(
+            f"[F2Idle] {reason} | "
+            f"service={bool(getattr(self.state, 'service_active', False))} "
+            f"follow={bool(getattr(self.state, 'nav_follow_enabled', False))} "
+            f"auto_hunt={bool(getattr(self.state, 'auto_hunt', False))} "
+            f"busy={bool(getattr(self.state, 'is_combat_busy', False))} "
+            f"block_left={max(0.0, float(getattr(self.state, 'support_input_blocked_until', 0.0) or 0.0) - time.time()):.2f}s"
+        )
 
     def _run_dosa_service_cycle(self, support_target: dict | None) -> bool:
         """
         ?? ??? ?? ??.
         ?? ??/?? ??? ?? ????, ?? ?? red_tab ?? ???? ????.
         """
-        if not self.state.service_active:
+        if not self._restore_dosa_service_if_follow_autohunt():
             return False
 
+        self._repair_dosa_f2_runtime_state()
+
         if not self._is_hw_ready():
+            try:
+                hw.auto_reconnect()
+            except Exception:
+                pass
             now = time.time()
             if now - self._last_hw_skip_log_time >= 2.0:
                 print("[Support] hardware not ready. Skip service loop.")
                 self._last_hw_skip_log_time = now
+            self._log_dosa_f2_idle_reason("hardware_not_ready")
             self._pace_service_loop("idle")
             return True
 
-        if not self._is_game_window_active():
+        if not self._restore_game_window_focus_for_support():
             now = time.time()
             if now - self._last_focus_skip_log_time >= 2.0:
                 print("[Support] game window inactive. Skip service loop.")
                 self._last_focus_skip_log_time = now
+            self._log_dosa_f2_idle_reason("game_window_inactive")
             self._pace_service_loop("idle")
             return True
 
@@ -2095,24 +2719,86 @@ class LogicSvc(threading.Thread):
             self.state.last_self_buff_time = 0.0
             self.state.last_self_gg_cast_time = 0.0
 
-        if self._handle_self_hp_emergency():
+        # 1) ?먭? ?앹〈? ??긽 ?곗꽑
+        good_hp = self._get_good_hp_threshold()
+        current_self_hp = int(getattr(self.state, "hp", 0) or 0)
+        if current_self_hp >= good_hp or current_self_hp <= int(getattr(self, "_mp_stationary_self_heal_threshold", 50000) or 50000):
+            self._mp_follow_self_heal_until = 0.0
+        party_hp_needed_before_self_recover = bool(
+            support_target and self._needs_hp_recovery_for(support_target)
+        )
+        if support_target and should_prioritize_self_mp_over_party_heal(
+            int(getattr(self.state, "mp", 0) or 0),
+            int(support_target.get("hp", 0) or 0),
+            self._self_mp_priority_threshold,
+            warrior_critical_hp=30000,
+        ):
+            if self._handle_self_mp_priority(support_target):
+                self._pace_service_loop("active")
+                return True
+
+        if (
+            current_self_hp > 0
+            and current_self_hp < good_hp
+            and current_self_hp > int(getattr(self, "_mp_stationary_self_heal_threshold", 50000) or 50000)
+            and time.time() < float(getattr(self, "_mp_follow_self_heal_until", 0.0) or 0.0)
+        ):
+            self._cast_self_hp_micro_follow_tick()
+            self._log_dosa_f2_idle_reason(
+                f"post_mp_micro_self_heal self_hp={current_self_hp}/{good_hp}",
+                interval=0.5,
+            )
             self._pace_service_loop("active")
             return True
 
-        # 1) ?먭? ?앹〈? ??긽 ?곗꽑
-        good_hp = self._get_good_hp_threshold()
-        if self.state.hp > 0 and self.state.hp <= good_hp:
-            self.recovery_manager.execute_self_hp_recovery()
+        if (
+            party_hp_needed_before_self_recover
+            and current_self_hp > self._self_hp_emergency_threshold
+            and not self._is_party_heal_blocked()
+        ):
+            self._cast_due_periodic_party_support(support_target)
+            if self._recover_party_hp(support_target):
+                self._party_hp_next_tick_interval = self._roll_party_hp_tick_interval(True)
+                self._log_dosa_f2_idle_reason(
+                    f"party_heal_prioritized_over_self_recover self_hp={current_self_hp}/{good_hp}",
+                    interval=1.0,
+                )
+                self._pace_service_loop("active")
+                return True
+
+        if current_self_hp > 0 and current_self_hp < good_hp:
+            if party_hp_needed_before_self_recover and current_self_hp > self._self_hp_emergency_threshold:
+                self._log_dosa_f2_idle_reason(
+                    f"self_recover_deferred_for_party_heal self_hp={current_self_hp}/{good_hp}",
+                    interval=1.0,
+                )
+                self._pace_service_loop("active")
+                return True
+            recovered = self._recover_self_hp_until_good_hp(
+                reason_log="[Recovery] self low HP sustain recovery.",
+                support_block_duration=1.8,
+                max_attempts=6,
+            )
+            if recovered:
+                self._complete_self_hp_recovery_reengage(
+                    source_log="[Recovery] self low-HP recovery complete."
+                )
+            elif self.state.role == "도사" and self.state.service_active:
+                self.request_initial_direct_heal_target_prepare()
             self._pace_service_loop("active")
             return True
 
         # 2) 寃⑹닔 ?곗씠?곌? ?놁쑝硫?吏??猷⑦봽 ????湲?(遺덊븘?뷀븳 gg/bm ?고? 諛⑹?)
         if not support_target:
+            self._log_dosa_f2_idle_reason("no_warrior_telemetry")
             if self._handle_self_mp_priority(None):
                 self._pace_service_loop("active")
                 return True
             if self._needs_mp_recovery():
-                self.recovery_manager.execute_self_mp_recovery()
+                self._execute_self_mp_recovery_and_retarget(
+                    None,
+                    source_log="[Recovery] self MP recovery without warrior telemetry complete.",
+                )
                 self._pace_service_loop("active")
                 return True
             self._pace_service_loop("no_target")
@@ -2128,17 +2814,35 @@ class LogicSvc(threading.Thread):
             self._last_cycle_debug_time = now_dbg
             needs_hp_dbg = self._needs_hp_recovery_for(support_target)
             hp_dbg = int(support_target.get('hp', 0) or 0)
-            good_hp_dbg = int(support_target.get('good_hp', 0) or 0)
-            print(f"[CycleDBG] ???????=True, ???={needs_hp_dbg}, HP={hp_dbg}/{good_hp_dbg}")
+            good_hp_dbg = self._get_party_good_hp_threshold(support_target)
+            follow_dbg = bool(getattr(self.state, "nav_follow_enabled", False))
+            busy_dbg = bool(getattr(self.state, "is_combat_busy", False))
+            print(
+                f"[CycleDBG] 서비스루프=True, 따라가기={follow_dbg}, busy={busy_dbg}, "
+                f"힐필요={needs_hp_dbg}, HP={hp_dbg}/{good_hp_dbg}"
+            )
 
         needs_hp = self._needs_hp_recovery_for(support_target)
         needs_mp = self._needs_mp_recovery_for(support_target)
+        warrior_hp_for_mp_priority = int(support_target.get("hp", 0) or 0)
 
         if needs_hp:
+            if self._is_party_heal_blocked():
+                now_blocked = time.time()
+                if now_blocked - float(getattr(self, "_last_party_heal_blocked_log_time", 0.0) or 0.0) >= 1.0:
+                    self._last_party_heal_blocked_log_time = now_blocked
+                    print(
+                        "[Support] warrior HP heal blocked: "
+                        f"phase={getattr(self, '_support_phase', 'idle')} "
+                        f"party_block_left={max(0.0, float(getattr(self, '_party_heal_blocked_until', 0.0) or 0.0) - now_blocked):.2f}s"
+                    )
+                self._pace_service_loop("active")
+                return True
             hp_val = int(support_target.get('hp', 0) or 0)
-            good_hp_remote = int(support_target.get('good_hp', self._get_good_hp_threshold()) or 0)
+            good_hp_remote = self._get_party_good_hp_threshold(support_target)
             remote_heal_request = bool(support_target.get("heal_request", False))
             now_support = time.time()
+            self._mark_support_party_heal_follow_guard(duration=0.90)
             rapid_heal = remote_heal_request or (good_hp_remote > 0 and hp_val <= int(good_hp_remote * 0.55))
             hp_tick_interval = float(getattr(self, "_party_hp_next_tick_interval", 0.24) or 0.24)
             if rapid_heal:
@@ -2150,6 +2854,7 @@ class LogicSvc(threading.Thread):
                 self._last_party_hp_check_log_time = now_support
                 cast_mode = "direct 3 verified" if self._party_direct_heal_verified else "esc>tab>tab acquire"
                 print(f"[Support] HP check: {hp_val} / {good_hp_remote} -> {cast_mode}")
+            self._cast_due_periodic_party_support(support_target, now_support=now_support)
             casted_hp = self._recover_party_hp(support_target)
             if casted_hp:
                 self._party_hp_next_tick_interval = self._roll_party_hp_tick_interval(rapid_heal)
@@ -2167,9 +2872,13 @@ class LogicSvc(threading.Thread):
 
         # 4) 吏???ъ쑀 援ш컙?먯꽌留??먭? ?곹깭/踰꾪봽 ?먭?
         remote_hp = int(support_target.get("hp", 0) or 0)
-        remote_good_hp = int(support_target.get("good_hp", self._get_good_hp_threshold()) or 0)
+        remote_good_hp = self._get_party_good_hp_threshold(support_target)
         support_safe = remote_hp > max(1, remote_good_hp + 30000)
         follow_repositioning = self._is_follow_reposition_needed()
+        self._log_dosa_f2_idle_reason(
+            f"warrior_heal_not_needed hp={remote_hp}/{remote_good_hp} follow_repositioning={follow_repositioning}",
+            interval=2.0,
+        )
 
         if not follow_repositioning and self._handle_self_mp_priority(support_target):
             self._pace_service_loop("active")
@@ -2184,7 +2893,10 @@ class LogicSvc(threading.Thread):
                 self._pace_service_loop("active")
                 return True
             if self._needs_mp_recovery():
-                self.recovery_manager.execute_self_mp_recovery()
+                self._execute_self_mp_recovery_and_retarget(
+                    support_target,
+                    source_log="[Recovery] self MP recovery during safe support complete.",
+                )
                 self._pace_service_loop("active")
                 return True
 
@@ -2193,6 +2905,10 @@ class LogicSvc(threading.Thread):
             self._pace_service_loop("active")
             return True
 
+        self._log_dosa_f2_idle_reason(
+            f"safe_idle hp={remote_hp}/{remote_good_hp} follow_needed={follow_repositioning}",
+            interval=1.5,
+        )
         self._pace_service_loop("idle")
         return True
 
@@ -2735,6 +3451,7 @@ def nav_pick_step_direction(
     include_entities: bool = True,
     blocked_cells: set[tuple[int, int]] | None = None,
     prefer_manhattan_reduction: bool = False,
+    aggressive_follow: bool = False,
 ) -> tuple[str | None, tuple[int, int] | None, list[str]]:
     if dx == 0 and dy == 0:
         return None, None, []
@@ -2759,6 +3476,17 @@ def nav_pick_step_direction(
             add_candidate("right" if dx > 0 else "left")
         elif axis == "y" and dy != 0:
             add_candidate("down" if dy > 0 else "up")
+
+    if aggressive_follow and dx != 0 and dy != 0:
+        primary_x = "right" if dx > 0 else "left"
+        primary_y = "down" if dy > 0 else "up"
+        if abs(dx) >= abs(dy):
+            aggressive_order = [primary_x, primary_y, "up" if dy > 0 else "down", "left" if dx > 0 else "right"]
+        else:
+            aggressive_order = [primary_y, primary_x, "left" if dx > 0 else "right", "up" if dy > 0 else "down"]
+        candidates = []
+        for direction in aggressive_order:
+            add_candidate(direction)
 
     if abs(dx) >= abs(dy):
         if dy > 0:
@@ -2865,6 +3593,81 @@ class RouteSvc(threading.Thread):
         self._blocked_cell_base_ttl = 6.0
         self._blocked_cell_max_ttl = 18.0
         self._last_box_collision_recover_request_time = 0.0
+        self._support_follow_hold_distance = 1
+        self._support_follow_soft_stuck_count = 0
+        self._last_support_quick_escape_time = 0.0
+        self._follow_blocked_memory_count = 0
+        self._last_support_quick_escape_dir = None
+
+    # ----------------------------------------------------------
+    def _should_hold_follow_at_gap(self, gap: int) -> bool:
+        return should_hold_follow_gap(
+            gap,
+            hold_distance=int(getattr(self, "_support_follow_hold_distance", 1) or 1),
+        )
+
+    def _get_nav_grid_pos(self) -> tuple[int, int]:
+        """char_grid가 초기값이면 실제 좌표를 blocked-memory 기준으로 사용한다."""
+        try:
+            gx, gy = tuple(getattr(self.state, "char_grid", (0, 0)) or (0, 0))
+            gx, gy = int(gx), int(gy)
+        except Exception:
+            gx, gy = 0, 0
+        sx = int(getattr(self.state, "x", 0) or 0)
+        sy = int(getattr(self.state, "y", 0) or 0)
+        if (gx, gy) == (0, 0) and (sx, sy) != (0, 0):
+            return sx, sy
+        return gx, gy
+
+    def _quick_support_follow_escape(self, follow_target: tuple[int, int] | None = None) -> bool:
+        """F2 follow stuck 1회차는 red_tab 재준비 대신 짧은 우회 이동만 수행한다."""
+        now = time.time()
+        if (now - float(getattr(self, "_last_support_quick_escape_time", 0.0) or 0.0)) < 0.18:
+            return False
+        self._last_support_quick_escape_time = now
+
+        try:
+            hw.stop_all_inputs(repeat=1, delay=0.005)
+        except Exception:
+            pass
+
+        ccx, ccy = self._get_nav_grid_pos()
+        last_dir = str(getattr(self.state, "last_move_dir", "") or "")
+        if last_dir in ("left", "right"):
+            candidate_dirs = ["up", "down"]
+        elif last_dir in ("up", "down"):
+            candidate_dirs = ["left", "right"]
+        else:
+            candidate_dirs = ["left", "right", "up", "down"]
+
+        blocked_cells = self._get_blocked_cells()
+        candidate_dirs = [
+            direction for direction in candidate_dirs
+            if _nav_step_from_dir(int(ccx), int(ccy), direction) not in blocked_cells
+        ] or ["left", "right", "up", "down"]
+        last_escape_dir = str(getattr(self, "_last_support_quick_escape_dir", "") or "")
+        if len(candidate_dirs) > 1 and last_escape_dir in candidate_dirs:
+            candidate_dirs = [direction for direction in candidate_dirs if direction != last_escape_dir]
+
+        if follow_target:
+            tx, ty = follow_target
+            candidate_dirs = sorted(
+                candidate_dirs,
+                key=lambda direction: follow_manhattan_gap(
+                    int(tx),
+                    int(ty),
+                    *_nav_step_from_dir(int(ccx), int(ccy), direction),
+                ),
+            )
+
+        escape_dir = candidate_dirs[0]
+        self._last_support_quick_escape_dir = escape_dir
+        print(f"[Recover] support follow quick escape: {escape_dir} (no retarget).")
+        hw.hold_move(escape_dir, "stuck_side_hold", duration=0.085)
+        self.state.last_move_dir = escape_dir
+        self._nav_attempt_pos = (self.state.x, self.state.y)
+        self._nav_attempt_started_at = time.time()
+        return True
 
     # ----------------------------------------------------------
     def _prune_blocked_cells(self):
@@ -2895,7 +3698,7 @@ class RouteSvc(threading.Thread):
             direction = str(getattr(self.state, "last_move_dir", "") or "")
             if direction not in self._ALL_DIRS:
                 return
-            ccx, ccy = tuple(getattr(self.state, "char_grid", (0, 0)) or (0, 0))
+            ccx, ccy = self._get_nav_grid_pos()
             nx, ny = _nav_step_from_dir(int(ccx), int(ccy), direction)
             self._remember_blocked_cell(nx, ny, reason=reason)
             if int(self._blocked_cell_hits.get((nx, ny), 0) or 0) >= 2:
@@ -2918,15 +3721,22 @@ class RouteSvc(threading.Thread):
 
         # Follow 紐⑤뱶?먯꽌??洹쇱젒 踰붿쐞 吏꾩엯 ??stuck ??대㉧瑜?利됱떆 ?댁젣?쒕떎.
         # (猷⑦봽 ?쒖꽌??check_stuck媛 follow 洹쇱젒 ?먯젙蹂대떎 癒쇱? ?ㅽ뻾?섍린 ?뚮Ц)
-        if bool(getattr(self.state, "is_connected", False)) and bool(getattr(self.state, "nav_follow_enabled", False)):
-            follow_target = self._calc_follow_target()
-            if follow_target:
-                tx, ty = follow_target
-                if should_hold_follow_position(int(tx), int(ty), int(self.state.x), int(self.state.y)):
-                    self._nav_attempt_pos = None
-                    self._nav_attempt_started_at = 0.0
-                    self.stuck_count = 0
-                    return False
+        follow_target = self._calc_follow_target() if bool(getattr(self.state, "nav_follow_enabled", False)) else None
+        follow_navigation_active = should_allow_follow_navigation(
+            getattr(self.state, "nav_follow_enabled", False),
+            follow_target is not None,
+            getattr(self.state, "is_connected", False),
+        )
+        if follow_navigation_active and follow_target:
+            tx, ty = follow_target
+            if self._should_hold_follow_at_gap(
+                follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
+            ):
+                self._nav_attempt_pos = None
+                self._nav_attempt_started_at = 0.0
+                self.stuck_count = 0
+                self._support_follow_soft_stuck_count = 0
+                return False
 
         now = time.time()
         current_pos = (self.state.x, self.state.y)
@@ -2937,37 +3747,70 @@ class RouteSvc(threading.Thread):
             self._nav_attempt_pos = None
             self._nav_attempt_started_at = 0.0
             self.stuck_count = 0
+            self._support_follow_soft_stuck_count = 0
             return False
 
         if self._nav_attempt_pos != current_pos:
             return False
 
         stuck_time_limit = float(TIMING_CONFIG.get("stuck_time", 4.0))
-        if bool(getattr(self.state, "is_connected", False)) and bool(getattr(self.state, "nav_follow_enabled", False)):
-            follow_target = self._calc_follow_target()
-            if follow_target:
-                tx, ty = follow_target
-                follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
-                # 2D ?듬줈(??2移??먯꽌 留됲옒? 鍮⑤━ ??댁빞 ?섎?濡?follow 以묒뿉??湲곗????⑥텞.
-                if follow_gap >= 4:
-                    stuck_time_limit = min(stuck_time_limit, 2.2)
-                elif follow_gap >= 2:
-                    stuck_time_limit = min(stuck_time_limit, 2.6)
-                else:
-                    stuck_time_limit = min(stuck_time_limit, 3.2)
+        if follow_navigation_active and follow_target:
+            tx, ty = follow_target
+            follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
+            # 2D ?듬줈(??2移??먯꽌 留됲옒? 鍮⑤━ ??댁빞 ?섎?濡?follow 以묒뿉??湲곗????⑥텞.
+            if follow_gap >= 4:
+                stuck_time_limit = min(stuck_time_limit, 0.35)
+            elif follow_gap >= 2:
+                stuck_time_limit = min(stuck_time_limit, 0.55)
+            else:
+                stuck_time_limit = min(stuck_time_limit, 1.00)
         if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= stuck_time_limit:
             self.stuck_count += 1
             self._remember_last_move_blocked_cell(reason="stuck_timeout")
-            self._trigger_box_collision_recover()
             print(f"[Stuck] no coord change for {stuck_time_limit}s ({self.stuck_count} consecutive) pos={current_pos}")
+            if should_defer_stuck_escape_for_support(
+                f"{getattr(self.state, 'role', '')} {getattr(self.state, 'network_role', '')}",
+                bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
+                getattr(self.state, "nav_follow_enabled", False),
+            ):
+                if not should_retarget_after_support_follow_stuck(
+                    int(getattr(self, "_support_follow_soft_stuck_count", 0) or 0),
+                    max_soft_stucks_before_retarget=2,
+                ):
+                    self._support_follow_soft_stuck_count += 1
+                    self._quick_support_follow_escape(follow_target)
+                    self._nav_attempt_pos = None
+                    self._nav_attempt_started_at = 0.0
+                    return False
+                self._support_follow_soft_stuck_count = 0
+                self._trigger_box_collision_recover(force_retarget=True)
+                self._nav_attempt_pos = None
+                self._nav_attempt_started_at = 0.0
+                self.stuck_count = 0
+                return False
+            self._trigger_box_collision_recover()
             return True
         return False
 
-    def _trigger_box_collision_recover(self):
+    def _trigger_box_collision_recover(self, force_retarget: bool = False):
         now = time.time()
-        if (now - float(self._last_box_collision_recover_request_time or 0.0)) < 1.2:
+        if (not force_retarget) and (now - float(self._last_box_collision_recover_request_time or 0.0)) < 1.2:
             return
         self._last_box_collision_recover_request_time = now
+        if should_defer_stuck_escape_for_support(
+            f"{getattr(self.state, 'role', '')} {getattr(self.state, 'network_role', '')}",
+            bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
+            getattr(self.state, "nav_follow_enabled", False),
+        ):
+            try:
+                hw.stop_all_inputs(repeat=1, delay=0.02)
+            except Exception:
+                pass
+            current_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+            self.state.support_input_blocked_until = max(current_block, time.time() + 0.8)
+            self.state.box_collision_reprepare_requested = True
+            print("[Recover] support box collision: stop movement + request F2 reprepare.")
+            return
         # 이동 키 입력 후 좌표 미변경 = box 충돌로 간주: ESC 1회 + F2 재준비 요청
         try:
             hw.humanized_press("esc")
@@ -3007,7 +3850,7 @@ class RouteSvc(threading.Thread):
                 hw.hold_move(move_dir, "stuck_back_hold")
                 humanized_sleep(TIMING_CONFIG["key_gap"])
 
-            ccx, ccy = tuple(getattr(self.state, "char_grid", (0, 0)) or (0, 0))
+            ccx, ccy = self._get_nav_grid_pos()
             blocked_cells = self._get_blocked_cells()
             escape_dirs = []
             for d in ["left", "right", "up", "down"]:
@@ -3135,17 +3978,28 @@ class RouteSvc(threading.Thread):
         target_x = dps_x + behind_offset[0]
         target_y = dps_y + behind_offset[1]
 
-        return (target_x, target_y)
+        current_x = int(getattr(self.state, "x", 0) or 0)
+        current_y = int(getattr(self.state, "y", 0) or 0)
+        return adjust_follow_target_by_axis_gap(
+            target_x,
+            target_y,
+            current_x,
+            current_y,
+            dps_x,
+            dps_y,
+            min_axis_gap=1,
+        )
 
     def _is_follow_reposition_needed(self) -> bool:
-        if not bool(getattr(self.state, "is_connected", False)) or not bool(getattr(self.state, "nav_follow_enabled", False)):
+        if not bool(getattr(self.state, "nav_follow_enabled", False)):
             return False
         follow_target = self._calc_follow_target()
         if not follow_target:
             return False
         tx, ty = follow_target
         cx, cy = int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0)
-        return not should_hold_follow_position(tx, ty, cx, cy)
+        gap = follow_manhattan_gap(tx, ty, cx, cy)
+        return not self._should_hold_follow_at_gap(gap)
 
     def _move_toward(self, tx: int, ty: int) -> bool:
         """Move one step toward a world target, avoiding walls / monsters / users."""
@@ -3182,8 +4036,13 @@ class RouteSvc(threading.Thread):
             self._last_nav_trace_gap = gap
             self._last_nav_trace_time = now
 
-        follow_mode = bool(getattr(self.state, "is_connected", False)) and bool(getattr(self.state, "nav_follow_enabled", False))
-        ccx, ccy = self.state.char_grid
+        follow_mode = should_allow_follow_navigation(
+            getattr(self.state, "nav_follow_enabled", False),
+            self._calc_follow_target() is not None,
+            getattr(self.state, "is_connected", False),
+        )
+        aggressive_follow = bool(follow_mode and gap >= 4)
+        ccx, ccy = self._get_nav_grid_pos()
         blocked_cells = self._get_blocked_cells()
         step_dir, next_grid, blockers = nav_pick_step_direction(
             self.state,
@@ -3193,12 +4052,42 @@ class RouteSvc(threading.Thread):
             include_entities=True,
             blocked_cells=blocked_cells,
             prefer_manhattan_reduction=follow_mode,
+            aggressive_follow=aggressive_follow,
         )
+        if step_dir is None and follow_mode and "blocked_memory" in blockers:
+            self._follow_blocked_memory_count += 1
+            if self._follow_blocked_memory_count >= 3:
+                retry_step_dir, retry_next_grid, retry_blockers = nav_pick_step_direction(
+                    self.state,
+                    (ccx, ccy),
+                    dx,
+                    dy,
+                    include_entities=True,
+                    blocked_cells=set(),
+                    prefer_manhattan_reduction=True,
+                    aggressive_follow=aggressive_follow,
+                )
+                if retry_step_dir is not None:
+                    print(
+                        "[Nav] blocked_memory bypass: "
+                        f"count={self._follow_blocked_memory_count}, dir={retry_step_dir}"
+                    )
+                    step_dir, next_grid, blockers = retry_step_dir, retry_next_grid, retry_blockers
+                    self._follow_blocked_memory_count = 0
+        elif step_dir is not None:
+            self._follow_blocked_memory_count = 0
 
         if step_dir is None:
             if blockers:
                 print(f"[Nav] blocked: {','.join(blockers)}")
             self._remember_last_move_blocked_cell(reason="no_step")
+            if follow_mode and should_defer_stuck_escape_for_support(
+                f"{getattr(self.state, 'role', '')} {getattr(self.state, 'network_role', '')}",
+                bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
+                getattr(self.state, "nav_follow_enabled", False),
+            ):
+                self._quick_support_follow_escape((tx, ty))
+                return False
             self._escape_stuck(rewind_waypoint=False)
             return False
 
@@ -3207,15 +4096,15 @@ class RouteSvc(threading.Thread):
         if follow_mode:
             # 2D/鍮꾨?媛??대룞 + ??2移??듬줈 湲곗?: follow?먯꽌 異??대룞???뺤떎??諛잙룄濡?hold瑜?媛蹂 ?뺤옣.
             if gap >= 4:
-                hold_time = max(hold_time, 0.20)
+                hold_time = max(hold_time, 0.145)
             elif gap >= 3:
-                hold_time = max(hold_time, 0.17)
+                hold_time = max(hold_time, 0.130)
             elif gap >= 2:
-                hold_time = max(hold_time, 0.14)
+                hold_time = max(hold_time, 0.115)
             else:
-                hold_time = max(hold_time, 0.11)
+                hold_time = max(hold_time, 0.090)
 
-        hold_time = max(0.050, min(0.280, random.gauss(hold_time, 0.010)))
+        hold_time = max(0.050, min(0.180, random.gauss(hold_time, 0.007)))
         if self._is_in_combat() or time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0):
             return False
         hw.hold_move(step_dir, "move_hold", duration=hold_time)
@@ -3232,7 +4121,7 @@ class RouteSvc(threading.Thread):
         """Move one step toward a grid target, avoiding walls / monsters / users."""
         if self._is_in_combat() or time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0):
             return False
-        ccx, ccy = self.state.char_grid
+        ccx, ccy = self._get_nav_grid_pos()
         dgx, dgy = gx - ccx, gy - ccy
 
         arrived = (abs(dgx) == 0 and abs(dgy) == 0)
@@ -3508,11 +4397,18 @@ class RouteSvc(threading.Thread):
                 continue
 
             # ?? ?좎궗 ?꾩슜: 紐?諛吏?以묒떖?쇰줈 ?대룞 ???湲????????????????
+            current_follow_target = self._calc_follow_target() if self.state.nav_follow_enabled else None
+            follow_navigation_active = should_allow_follow_navigation(
+                self.state.nav_follow_enabled,
+                current_follow_target is not None,
+                self.state.is_connected,
+            )
+
             if (
                 self.state.role == "술사"
                 and not self._is_in_combat()
                 and not self.state.nav_route_enabled
-                and not (self.state.is_connected and self.state.nav_follow_enabled)
+                and not follow_navigation_active
             ):
                 cluster_center = self._find_cluster_center()
                 if cluster_center:
@@ -3535,15 +4431,16 @@ class RouteSvc(threading.Thread):
                     or network_role in {"격수", "Warrior", "寃⑹닔"}
                 )
             )
-            if self.state.is_connected and self.state.nav_follow_enabled and not warrior_route_priority:
-                follow_target = self._calc_follow_target()
+            if follow_navigation_active and not warrior_route_priority:
+                follow_target = current_follow_target or self._calc_follow_target()
                 if follow_target:
                     self._set_nav_context("follow")
                     tx, ty = follow_target
                     cx, cy = self.state.x, self.state.y
                     gap_x = abs(tx - cx)
                     gap_y = abs(ty - cy)
-                    if should_hold_follow_position(tx, ty, cx, cy):
+                    follow_gap = follow_manhattan_gap(tx, ty, cx, cy)
+                    if self._should_hold_follow_at_gap(follow_gap):
                         # [FIX] Follow range ?덉뿉???湲???Stuck ??대㉧ 由ъ뀑 (?대룞 ???대룄 Stuck???꾨떂)
                         self._nav_attempt_pos = None
                         self._nav_attempt_started_at = 0.0
@@ -3555,6 +4452,9 @@ class RouteSvc(threading.Thread):
                         continue
 
                     self._move_toward(tx, ty)
+                    if follow_gap >= 4:
+                        humanized_sleep(max(0.001, float(TIMING_CONFIG["nav_loop"]) * 0.25))
+                        continue
 
             # ?? 3?쒖쐞: Waypoint Traversal (follow false/no target && is_in_combat false) ??
             elif self.state.nav_route_enabled and not self._is_in_combat():
@@ -3589,7 +4489,7 @@ class RouteSvc(threading.Thread):
                             self.wp_idx += 1
 
             loop_sleep = float(TIMING_CONFIG["nav_loop"])
-            if self.state.is_connected and self.state.nav_follow_enabled:
+            if follow_navigation_active:
                 loop_sleep = max(0.0015, loop_sleep * 0.70)
             humanized_sleep(loop_sleep)
 

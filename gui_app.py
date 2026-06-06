@@ -154,9 +154,11 @@ class AppView:
         ctk.set_widget_scaling(self.ui_scale)
         ctk.set_window_scaling(self.ui_scale)
         try:
-            self.root.geometry(gui_state["geometry"])
+            geometry = str(gui_state["geometry"] or "480x900")
+            size_only = geometry.split("+", 1)[0]
+            self.root.geometry(f"{size_only}+0+0")
         except Exception:
-            self.root.geometry("480x900")
+            self.root.geometry("480x900+0+0")
 
     def create_widgets(self):
         # Header & Status
@@ -1100,6 +1102,7 @@ class AppView:
         self.root.bind_all("<F2>", lambda _e: self.toggle_service())
         self.root.bind_all("<F3>", lambda _e: self.toggle_pause_resume())
         self.root.bind_all("<F4>", lambda _e: self.emergency_exit())
+        self.root.bind_all("<F5>", lambda _e: self.cast_f5_repeat())
 
     def on_ctrl_mousewheel(self, event):
         delta = 0
@@ -2154,6 +2157,11 @@ class AppView:
             spell_char = str(s.get("spell_char", "") or "").strip() or None
             if spell_char is None and hotkey is not None:
                 spell_char = hotkey
+            cooldown = float(s.get("cooldown", 0.0) or 0.0)
+            if str(s.get("name", "") or "").strip() == "희원" and str(spell_char or hotkey or "") == "1":
+                cooldown = max(16.0, cooldown)
+            if str(s.get("name", "") or "").strip() == "희원첨" and str(spell_char or hotkey or "") == "4":
+                cooldown = max(25.0, cooldown)
             self.state.spells.append(Skill(
                 name=s["name"],
                 target_type=s.get("target_type", "대상선택형"),
@@ -2161,7 +2169,8 @@ class AppView:
                 spell_char=spell_char,
                 cast_function=s.get("cast_function", "SpellArrowEnter"),
                 enable_red_tab=bool(s.get("enable_red_tab", False)),
-                category=s.get("category", "기타")
+                category=s.get("category", "기타"),
+                cooldown=cooldown,
             ))
 
     def save_spells_db(self):
@@ -2812,6 +2821,8 @@ class AppView:
             return "PAUSED"
         if getattr(self.state, "service_active", False) and getattr(self.state, "nav_follow_enabled", False):
             return "FOLLOW+SERVICE"
+        if getattr(self.state, "service_active", False):
+            return "SERVICE"
         if getattr(self.state, "nav_follow_enabled", False):
             return "FOLLOW"
         return "OFF"
@@ -2868,7 +2879,7 @@ class AppView:
 
     def _apply_control_mode(self, mode: str, announce: bool = True):
         normalized = str(mode or "NONE").strip().upper()
-        if normalized in {"FOLLOW_SERVICE", "SERVICE", "F2"}:
+        if normalized in {"FOLLOW_SERVICE", "F2"}:
             control_mode = "FOLLOW+SERVICE"
             follow_enabled = True
             # Warrior uses patrol route mode while service loop is on.
@@ -2876,6 +2887,13 @@ class AppView:
             avoid_enabled = True
             service_enabled = True
             auto_hunt_enabled = True
+        elif normalized in {"SERVICE", "F1"}:
+            control_mode = "SERVICE"
+            follow_enabled = False
+            route_enabled = False
+            avoid_enabled = False
+            service_enabled = True
+            auto_hunt_enabled = False
         elif normalized in {"FOLLOW", "F1"}:
             control_mode = "FOLLOW"
             follow_enabled = True
@@ -2925,6 +2943,12 @@ class AppView:
     def _toggle_control_mode(self, mode: str, label: str):
         normalized = str(mode or "NONE").strip().upper()
         current = str(getattr(self.state, "control_mode", "NONE") or "NONE").strip().upper()
+        if normalized in {"FOLLOW_SERVICE", "F2"} and current in {"FOLLOW+SERVICE", "FOLLOW_SERVICE"}:
+            now = time.time()
+            last_active = float(getattr(self, "_last_follow_service_activation_time", 0.0) or 0.0)
+            if now - last_active < 1.2:
+                print("[Hotkey] Follow+Service duplicate ignored")
+                return
         if getattr(self.state, "automation_paused", False):
             self._paused_control_mode = "NONE"
         if current == normalized and not getattr(self.state, "automation_paused", False):
@@ -2934,11 +2958,13 @@ class AppView:
             return
 
         self._apply_control_mode(normalized)
+        if normalized in {"FOLLOW_SERVICE", "F2"}:
+            self._last_follow_service_activation_time = time.time()
         print(f"[Hotkey] {label}: ON")
         self.show_toast(f"{label}: ON")
 
     def toggle_follow(self):
-        self._toggle_control_mode("FOLLOW", "Follow Mode")
+        self._toggle_control_mode("SERVICE", "Service Only")
 
     def toggle_pause_resume(self):
         if getattr(self.state, "automation_paused", False):
@@ -2951,7 +2977,7 @@ class AppView:
             return
 
         current_mode = str(getattr(self.state, "control_mode", "NONE") or "NONE").strip().upper()
-        if current_mode not in {"FOLLOW", "FOLLOW+SERVICE"}:
+        if current_mode not in {"FOLLOW", "FOLLOW+SERVICE", "SERVICE"}:
             current_mode = "NONE"
         self._paused_control_mode = current_mode
         self.state.automation_paused = True
@@ -3008,6 +3034,13 @@ class AppView:
         except Exception as exc:
             print(f"[PANIC] Restart failed: {exc}")
         os._exit(0)
+
+    def cast_f5_repeat(self):
+        action_thread = getattr(self, 'action_thread', None)
+        if action_thread is not None and hasattr(action_thread, "cast_repeat_6_up_enter"):
+            action_thread.cast_repeat_6_up_enter()
+            return
+        print("[Hotkey] F5 ignored: action thread not ready")
 
     def debug_ocr(self):
         reader_thread = getattr(self, 'reader_thread', None)

@@ -230,7 +230,7 @@ class GameState:
     money: int = 0
     x: int = 0
     y: int = 0
-    good_hp: int = 0
+    good_hp: int = 100000
     good_mp: int = 0
     # OCR 원문(또는 누락 포함) 문자열. x/y는 4자리 고정, 누락은 'x'로 채움.
     hp_str: str = ""
@@ -442,7 +442,7 @@ class GameState:
             if isinstance(combat, dict):
                 engage_range = combat.get("priest_engage_range", self.priest_engage_range)
                 self.priest_engage_range = max(0, int(engage_range))
-                self.good_hp = max(0, int(combat.get("good_hp", self.good_hp) or 0))
+                self.good_hp = max(100000, int(combat.get("good_hp", self.good_hp) or 0))
                 self.good_mp = max(0, int(combat.get("good_mp", self.good_mp) or 0))
 
             priest_test = conf.get("priest_test", {})
@@ -505,6 +505,8 @@ class GameState:
         """인식된 데이터를 동적으로 상태창에 반영"""
         with self._lock:
             for k, v in data.items():
+                if k == "good_hp":
+                    v = max(100000, int(v or 100000))
                 if hasattr(self, k):
                     setattr(self, k, v)
                 else:
@@ -518,6 +520,8 @@ class GameState:
     def update(self, **kwargs):
         with self._lock:
             for k, v in kwargs.items():
+                if k == "good_hp":
+                    v = max(100000, int(v or 100000))
                 if hasattr(self, k):
                     setattr(self, k, v)
 
@@ -761,18 +765,81 @@ class BisHardware:
         self.ser   = None  # 시리얼 포트
         self._lock = threading.Lock()  # 스레드 안전성
         self.state: Optional[GameState] = None  # 게임 상태
+        self._auto_reconnect_enabled = True
+        self._last_connect_attempt = 0
+        self._preferred_port = None
 
     def set_state(self, state: GameState):
         """게임 상태 설정"""
         self.state = state
+        if not (self.ser and self.ser.is_open):
+            self.auto_reconnect()
+
+    def _list_candidate_ports(self):
+        """Bluetooth 가상 COM 포트를 제외한 USB 시리얼 포트만 반환한다."""
+        import serial.tools.list_ports
+
+        ports = []
+        for port in serial.tools.list_ports.comports():
+            device = (port.device or "").upper()
+            description = (port.description or "").upper()
+            hwid = (port.hwid or "").upper()
+            manufacturer = (getattr(port, "manufacturer", None) or "").upper()
+
+            if not device.startswith("COM"):
+                continue
+            if "BTH" in hwid or "BLUETOOTH" in description or "BLUETOOTH" in manufacturer:
+                continue
+            if "USB" in description or "USB" in hwid or "VID_" in hwid:
+                ports.append(port.device)
+
+        return ports
 
     def connect(self, port: str) -> bool:
         """시리얼 포트 연결 (115200 baud)"""
         try:
             self.ser = serial.Serial(port, 115200, timeout=1)
+            _hw_log(f"[Hardware] 연결 성공: {port}")
             return True
-        except Exception:
+        except Exception as e:
+            _hw_log(f"[Hardware] 연결 실패: {port} - {e}")
             return False
+
+    def auto_reconnect(self) -> bool:
+        """Bluetooth 를 제외한 USB 시리얼 포트로 자동 재연결한다."""
+        if not self._auto_reconnect_enabled:
+            return False
+
+        current_time = time.time()
+        if current_time - self._last_connect_attempt < 1:
+            return False
+
+        self._last_connect_attempt = current_time
+        _hw_log("[Hardware] 자동 재연결 시도 시작...")
+
+        available_ports = self._list_candidate_ports()
+        if not available_ports:
+            _hw_log("[Hardware] 사용 가능한 USB 시리얼 포트 없음 (Bluetooth 제외)")
+            return False
+
+        _hw_log(f"[Hardware] 발견된 USB 시리얼 포트: {available_ports}")
+
+        if self._preferred_port in available_ports:
+            _hw_log(f"[Hardware] 우선 USB 포트 시도: {self._preferred_port}")
+            if self.connect(self._preferred_port):
+                _hw_log(f"[Hardware] 우선 USB 포트 연결 성공: {self._preferred_port}")
+                return True
+
+        for port in available_ports:
+            if port == self._preferred_port:
+                continue
+            _hw_log(f"[Hardware] USB 포트 시도: {port}")
+            if self.connect(port):
+                _hw_log(f"[Hardware] 자동 USB 재연결 성공: {port}")
+                return True
+
+        _hw_log("[Hardware] 자동 USB 재연결 실패: 모든 포트 시도 완료")
+        return False
 
     def press_key(self, key: str):
         """단일 키 다운 신호 전송"""
@@ -926,6 +993,11 @@ class BisHardware:
         # HumanBehaviorSimulator로 이동 동작 간 휴식 시간 시뮬레이션
         pause = HumanBehaviorSimulator.simulate_pause('move')
         time.sleep(pause)
+
+        if self.state is not None:
+            support_blocked = time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+            if support_blocked or bool(getattr(self.state, "is_combat_busy", False)):
+                return
         
         _hw_log(f"[Move] 방향키: {direction}")
         try:

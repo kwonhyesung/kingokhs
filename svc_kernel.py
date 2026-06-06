@@ -217,7 +217,7 @@ class GameState:
         self.money   = 0
         self.x       = 0
         self.y       = 0
-        self.good_hp = 0
+        self.good_hp = 100000
         self.good_mp = 0
         # OCR 원문(또는 누락 포함) 문자열. x/y는 4자리 고정, 누락은 'x'로 채움.
         self.hp_str = ""
@@ -472,16 +472,35 @@ class BisHardware:
         self.state: Optional[GameState] = None  # 게임 상태
         self._auto_reconnect_enabled = True  # 자동 재연결 활성화
         self._last_connect_attempt = 0  # 마지막 연결 시도 시간
-        self._preferred_port = "COM12"  # 기본 포트 설정
+        self._preferred_port = None  # 필요할 때만 수동으로 우선 포트 지정
 
     def set_state(self, state: GameState):
         """게임 상태 설정"""
         self.state = state
         
-        # 상태 설정 후 즉시 COM12 연결 시도
-        if self._preferred_port and not (self.ser and self.ser.is_open):
-            print(f"[Hardware] 즉시 연결 시도: {self._preferred_port}")
-            self.connect(self._preferred_port)
+        # 상태가 연결되면 Bluetooth를 제외한 USB 시리얼 포트를 자동 탐색한다.
+        if not (self.ser and self.ser.is_open):
+            self.auto_reconnect()
+
+    def _list_candidate_ports(self):
+        """Bluetooth 가상 COM 포트를 제외한 USB 시리얼 포트만 반환한다."""
+        import serial.tools.list_ports
+
+        candidates = []
+        for port in serial.tools.list_ports.comports():
+            device = (port.device or "").upper()
+            description = (port.description or "").upper()
+            hwid = (port.hwid or "").upper()
+            manufacturer = (getattr(port, "manufacturer", None) or "").upper()
+
+            if not device.startswith("COM"):
+                continue
+            if "BTH" in hwid or "BLUETOOTH" in description or "BLUETOOTH" in manufacturer:
+                continue
+            if "USB" in description or "USB" in hwid or "VID_" in hwid:
+                candidates.append(port.device)
+
+        return candidates
 
     def connect(self, port: str) -> bool:
         """시리얼 포트 연결 (115200 baud)"""
@@ -512,33 +531,31 @@ class BisHardware:
         self._last_connect_attempt = current_time
         print("[Hardware] 자동 재연결 시도 시작...")
         
-        # 사용 가능한 모든 COM 포트 자동 검색
-        import serial.tools.list_ports
-        available_ports = [port.device for port in serial.tools.list_ports.comports()]
+        available_ports = self._list_candidate_ports()
         
         if not available_ports:
-            print("[Hardware] 사용 가능한 COM 포트 없음")
+            print("[Hardware] 사용 가능한 USB 시리얼 포트 없음 (Bluetooth 제외)")
             return False
             
-        print(f"[Hardware] 발견된 포트: {available_ports}")
+        print(f"[Hardware] 발견된 USB 시리얼 포트: {available_ports}")
         
-        # COM12를 우선적으로 시도
+        # 수동 우선 포트가 있으면 먼저 시도
         if self._preferred_port in available_ports:
-            print(f"[Hardware] 우선 포트 시도: {self._preferred_port}")
+            print(f"[Hardware] 우선 USB 포트 시도: {self._preferred_port}")
             if self.connect(self._preferred_port):
-                print(f"[Hardware] 우선 포트 연결 성공: {self._preferred_port}")
+                print(f"[Hardware] 우선 USB 포트 연결 성공: {self._preferred_port}")
                 return True
         
-        # 나머지 포트 시도
+        # 나머지 USB 시리얼 포트 시도
         for port in available_ports:
             if port == self._preferred_port:
                 continue  # 이미 시도함
-            print(f"[Hardware] 포트 시도: {port}")
+            print(f"[Hardware] USB 포트 시도: {port}")
             if self.connect(port):
-                print(f"[Hardware] 자동 재연결 성공: {port}")
+                print(f"[Hardware] 자동 USB 재연결 성공: {port}")
                 return True
                 
-        print("[Hardware] 자동 재연결 실패: 모든 포트 시도 완료")
+        print("[Hardware] 자동 USB 재연결 실패: 모든 포트 시도 완료")
         return False
 
     def disconnect(self):
@@ -786,6 +803,11 @@ class BisHardware:
         # HumanBehaviorSimulator로 이동 동작 간 휴식 시간 시뮬레이션
         pause = HumanBehaviorSimulator.simulate_pause('move')
         time.sleep(pause)
+
+        if self.state is not None:
+            support_blocked = time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+            if support_blocked or bool(getattr(self.state, "is_combat_busy", False)):
+                return
         
         # duration이 명시되면 해당 시간을 사용, 없으면 설정값 사용
         hold_time = duration if duration is not None else TIMING_CONFIG.get(hold_key, 0.15)
