@@ -22,6 +22,8 @@ from support_runtime_rules import (
     should_prioritize_self_mp,
     should_prioritize_self_mp_over_party_heal,
     should_retarget_after_support_follow_stuck,
+    should_detect_warrior_transition,
+    should_prioritize_follow_distance,
     should_trigger_self_hp_emergency,
     speed_up_delay,
 )
@@ -37,6 +39,17 @@ def test_follow_hold_position_uses_manhattan_distance():
 def test_support_follow_hold_gap_uses_one_tile_spacing():
     assert should_hold_follow_gap(1, hold_distance=1) is True
     assert should_hold_follow_gap(2, hold_distance=1) is False
+
+
+def test_follow_distance_risk_starts_at_seven_tiles():
+    assert should_prioritize_follow_distance(6, risk_distance=7) is False
+    assert should_prioritize_follow_distance(7, risk_distance=7) is True
+
+
+def test_warrior_transition_detects_twelve_tile_coordinate_jump():
+    assert should_detect_warrior_transition(10, 10, 16, 15, jump_distance=12) is False
+    assert should_detect_warrior_transition(10, 10, 22, 10, jump_distance=12) is True
+    assert should_detect_warrior_transition(10, 10, 16, 16, jump_distance=12) is True
 
 
 def test_follow_target_ignores_axis_when_warrior_gap_is_one_or_less():

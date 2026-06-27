@@ -1103,6 +1103,7 @@ class AppView:
         self.root.bind_all("<F3>", lambda _e: self.toggle_pause_resume())
         self.root.bind_all("<F4>", lambda _e: self.emergency_exit())
         self.root.bind_all("<F5>", lambda _e: self.cast_f5_repeat())
+        self.root.bind_all("<F6>", lambda _e: self.toggle_sulsa_debuff_loop())
 
     def on_ctrl_mousewheel(self, event):
         delta = 0
@@ -2513,6 +2514,15 @@ class AppView:
         """Docstring."""
         global hw
         try:
+            if hw.ser and hw.ser.is_open:
+                current_port = getattr(hw.ser, "port", None) or getattr(hw.ser, "name", "") or "CONNECTED"
+                self.btn_hw_connect.configure(text="DISCONNECT", fg_color="#EF4444")
+                self.lbl_hw_status.configure(text=f"[Hardware] {current_port}", text_color="#10B981")
+                if hasattr(self, "cb_port") and current_port:
+                    self.cb_port.set(str(current_port))
+                print(f"[Hardware] Auto-connect skipped: already connected to {current_port}")
+                return
+
             # ?ъ슜 媛?ν븳 ?쒕━???ы듃 ?ㅼ틪
             comports = serial.tools.list_ports.comports()
             all_ports = [p.device for p in comports]
@@ -2879,19 +2889,20 @@ class AppView:
 
     def _apply_control_mode(self, mode: str, announce: bool = True):
         normalized = str(mode or "NONE").strip().upper()
+        role = str(getattr(self.state, "role", "") or "").strip()
         if normalized in {"FOLLOW_SERVICE", "F2"}:
             control_mode = "FOLLOW+SERVICE"
             follow_enabled = True
             # Warrior uses patrol route mode while service loop is on.
-            route_enabled = bool(getattr(self.state, "role", "") == "격수")
+            route_enabled = bool(role == "격수")
             avoid_enabled = True
             service_enabled = True
             auto_hunt_enabled = True
         elif normalized in {"SERVICE", "F1"}:
             control_mode = "SERVICE"
-            follow_enabled = False
+            follow_enabled = bool(role == "술사")
             route_enabled = False
-            avoid_enabled = False
+            avoid_enabled = bool(role == "술사")
             service_enabled = True
             auto_hunt_enabled = False
         elif normalized in {"FOLLOW", "F1"}:
@@ -2921,8 +2932,21 @@ class AppView:
         self.state.combat_start_time = 0.0
         # F2(FOLLOW+SERVICE)에서만 도사 혼(디버프) 루프를 활성화한다.
         self.state.f2_service_debuff_enabled = bool(
-            control_mode == "FOLLOW+SERVICE" and getattr(self.state, "role", "") == "도사"
+            control_mode == "FOLLOW+SERVICE" and role == "도사"
         )
+        if role == "술사":
+            if control_mode == "FOLLOW+SERVICE":
+                self.state.sulsa_attack_enabled = True
+                self.state.sulsa_debuff_enabled = True
+                self.state.sulsa_debuff_standalone = False
+            elif control_mode == "SERVICE":
+                self.state.sulsa_attack_enabled = False
+                self.state.sulsa_debuff_enabled = False
+                self.state.sulsa_debuff_standalone = False
+            elif control_mode == "NONE":
+                self.state.sulsa_attack_enabled = False
+                self.state.sulsa_debuff_enabled = False
+                self.state.sulsa_debuff_standalone = False
         if not service_enabled:
             self.state.target_locked = False
             self.state.target_name = ""
@@ -3023,7 +3047,8 @@ class AppView:
             self.close_calibration_popup()
         except Exception:
             pass
-        restart_cmd = [sys.executable, os.path.join(SCRIPT_DIR, "svc_dosa.py")]
+        launcher = "svc_sulsa.py" if str(getattr(self.state, "role", "") or "").strip() == "술사" else "svc_dosa.py"
+        restart_cmd = [sys.executable, os.path.join(SCRIPT_DIR, launcher)]
         try:
             self.root.destroy()
         except Exception:
@@ -3036,11 +3061,29 @@ class AppView:
         os._exit(0)
 
     def cast_f5_repeat(self):
+        if str(getattr(self.state, "role", "") or "").strip() == "술사":
+            self.toggle_sulsa_debuff_loop()
+            return
         action_thread = getattr(self, 'action_thread', None)
         if action_thread is not None and hasattr(action_thread, "cast_repeat_6_up_enter"):
             action_thread.cast_repeat_6_up_enter()
             return
         print("[Hotkey] F5 ignored: action thread not ready")
+
+    def toggle_sulsa_debuff_loop(self):
+        if str(getattr(self.state, "role", "") or "").strip() != "술사":
+            print("[Hotkey] F6 ignored: not sulsa role")
+            return
+        enabled = not bool(getattr(self.state, "sulsa_debuff_standalone", False))
+        self.state.sulsa_debuff_standalone = enabled
+        self.state.sulsa_debuff_enabled = enabled
+        self.state.service_active = enabled or bool(getattr(self.state, "auto_hunt", False))
+        self.state.sentinel_enabled = bool(self.state.service_active or getattr(self.state, "nav_follow_enabled", False))
+        action_thread = getattr(self, 'action_thread', None)
+        if action_thread is not None:
+            action_thread.task_active = bool(self.state.service_active)
+        print(f"[Hotkey] Sulsa debuff loop: {'ON' if enabled else 'OFF'}")
+        self.show_toast(f"SULSA DEBUFF: {'ON' if enabled else 'OFF'}")
 
     def debug_ocr(self):
         reader_thread = getattr(self, 'reader_thread', None)

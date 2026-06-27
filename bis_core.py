@@ -245,6 +245,19 @@ class GameState:
     red_tab_enabled: bool = False
     red_tab_promotion_active: bool = False
     red_tab_promotion_until: float = 0.0
+    portal_follow_active: bool = False
+    portal_follow_retarget_requested: bool = False
+    portal_follow_started_at: float = 0.0
+    portal_follow_finished_at: float = 0.0
+    portal_follow_coord: Optional[Tuple[int, int]] = None
+    portal_follow_dir: Optional[str] = None
+    sulsa_attack_enabled: bool = False
+    sulsa_debuff_enabled: bool = False
+    sulsa_debuff_standalone: bool = False
+    sulsa_item_slots: List[str] = field(default_factory=lambda: ["z", "y", "x", "w", "v", "u", "t", "s", "r", "q"])
+    sulsa_item_slot_index: int = 0
+    sulsa_item_slot_uses: int = 0
+    sulsa_item_uses_per_slot: int = 100
     target_info_text: str = ""
     user_info_text: str = ""
     target_kind: str = "UNKNOWN"
@@ -797,6 +810,13 @@ class BisHardware:
 
     def connect(self, port: str) -> bool:
         """시리얼 포트 연결 (115200 baud)"""
+        if self.ser and self.ser.is_open:
+            current_port = str(getattr(self.ser, "port", "") or getattr(self.ser, "name", "") or "")
+            if current_port.upper() == str(port or "").upper():
+                _hw_log(f"[Hardware] already connected: {current_port}")
+                return True
+            _hw_log(f"[Hardware] already connected to {current_port}; skip switching to {port}")
+            return False
         try:
             self.ser = serial.Serial(port, 115200, timeout=1)
             _hw_log(f"[Hardware] 연결 성공: {port}")

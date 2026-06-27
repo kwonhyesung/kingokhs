@@ -7,6 +7,14 @@ def follow_manhattan_gap(target_x: int, target_y: int, current_x: int, current_y
     return abs(int(target_x) - int(current_x)) + abs(int(target_y) - int(current_y))
 
 
+def should_prioritize_follow_distance(gap: int, risk_distance: int = 7) -> bool:
+    return max(0, int(gap)) >= max(1, int(risk_distance))
+
+
+def should_detect_warrior_transition(prev_x: int, prev_y: int, cur_x: int, cur_y: int, jump_distance: int = 12) -> bool:
+    return follow_manhattan_gap(prev_x, prev_y, cur_x, cur_y) >= max(1, int(jump_distance))
+
+
 def should_hold_follow_gap(gap: int, hold_distance: int = 1) -> bool:
     return max(0, int(gap)) <= max(0, int(hold_distance))
 

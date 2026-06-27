@@ -340,6 +340,11 @@ def main(
                     lambda _event: _dispatch_gui_hotkey(gui_instance, "F5", gui_instance.cast_f5_repeat),
                 )
                 print("[DEBUG] F5 핫키 등록 완료")
+                HOTKEY_HANDLES["f6"] = keyboard.on_press_key(
+                    "f6",
+                    lambda _event: _dispatch_gui_hotkey(gui_instance, "F6", gui_instance.toggle_sulsa_debuff_loop),
+                )
+                print("[DEBUG] F6 핫키 등록 완료")
 
                 # [TEST] ` 키로 JSON 등록 패턴과 user_info 상태를 함께 점검
                 def test_patterns():
