@@ -41,6 +41,7 @@ from support_runtime_rules import (
     is_hub_network_role,
     is_support_role,
     normalize_network_role,
+    resolve_runtime_network_role,
     speed_up_delay,
 )
 from bis_core import GameState
@@ -51,6 +52,16 @@ def test_network_role_normalization_keeps_priest2_as_udp_client():
     assert normalize_network_role("Priest2") == "도사2"
     assert is_hub_network_role("도사1") is True
     assert is_hub_network_role("도사2") is False
+
+
+def test_runtime_role_uses_one_resolved_value_for_gui_and_udp():
+    assert resolve_runtime_network_role("격수") == "격수"
+    assert resolve_runtime_network_role("격수", explicit_role="도사2") == "도사2"
+    assert resolve_runtime_network_role(
+        "격수",
+        explicit_role="도사2",
+        explicit_network_role="도사1",
+    ) == "도사1"
 
 
 def test_both_priests_are_support_roles_for_warrior_follow_and_service():

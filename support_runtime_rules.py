@@ -23,6 +23,18 @@ def normalize_network_role(role: object, default: str = "도사1") -> str:
     return NETWORK_ROLE_ALIASES.get(value.lower(), value or default)
 
 
+def resolve_runtime_network_role(
+    configured_role: object,
+    explicit_role: object = None,
+    explicit_network_role: object = None,
+) -> str:
+    """Resolve one role shared by the GUI, game state, and UDP sender."""
+    for candidate in (explicit_network_role, explicit_role, configured_role):
+        if str(candidate or "").strip():
+            return normalize_network_role(candidate)
+    return normalize_network_role(None)
+
+
 def is_hub_network_role(role: object) -> bool:
     return normalize_network_role(role) == "도사1"
 

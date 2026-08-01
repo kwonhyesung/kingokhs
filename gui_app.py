@@ -309,7 +309,8 @@ class AppView:
 
         self.net_local_strip = ctk.CTkFrame(self.net_box, fg_color="#111827", corner_radius=4, border_width=1, border_color="#38BDF8")
         self.net_local_strip.pack(fill="x", padx=6, pady=(0, 4))
-        ctk.CTkLabel(self.net_local_strip, text=f"[{self._display_role_name(self.state.role)}] LOCAL", font=("Inter", 8, "bold"), text_color="#38BDF8").pack(side="left", padx=(6, 4), pady=4)
+        self.lbl_local_identity = ctk.CTkLabel(self.net_local_strip, text="LOCAL", font=("Inter", 8, "bold"), text_color="#38BDF8")
+        self.lbl_local_identity.pack(side="left", padx=(6, 4), pady=4)
         self.lbl_local_status = ctk.CTkLabel(self.net_local_strip, text="-", font=("Inter", 8), anchor="w", justify="left")
         self.lbl_local_status.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=4)
 
@@ -2957,6 +2958,12 @@ class AppView:
             except Exception:
                 pass
         local_text = "OFFLINE"
+        udp_role = self._effective_role_name(getattr(self.state, "network_role", active_role))
+        pc_name = str(getattr(self.state, "network_peer_name", "LOCAL") or "LOCAL")
+        local_identity = f"[{self._display_role_name(active_role)}] {pc_name} | UDP:{self._display_role_name(udp_role)}"
+        if hasattr(self, "lbl_local_identity") and local_identity != self.last_values.get("net_local_identity"):
+            self.lbl_local_identity.configure(text=local_identity)
+            self.last_values["net_local_identity"] = local_identity
         if local_snapshot is not None:
             map_text = self._format_map_text(local_snapshot)
             x_text, y_text = self._format_coord_text(local_snapshot)

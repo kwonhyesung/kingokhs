@@ -67,6 +67,7 @@ from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_slee
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
+from support_runtime_rules import resolve_runtime_network_role
 
 # ?⑥쥚鍮?怨룸즲(65?紐꾪뒄 ?? 筌뤴뫀????紐낆넎?源놁뱽 ?袁る립 DPI ?紐꾨뻼 ??뽮쉐??
 try:
@@ -281,15 +282,23 @@ def main(
     # 揶????묽 ??살쟿???λ뜃由??(bootstrap.py 疫꿸퀡??????)
     config_file = os.path.join(SCRIPT_DIR, "config.json")
     network_cfg = load_network_config()
-    if preset_network_role:
-        network_cfg["role"] = preset_network_role
-    state.network_role = network_cfg.get("role", state.network_role)
+    resolved_role = resolve_runtime_network_role(
+        network_cfg.get("role"),
+        explicit_role=role_arg,
+        explicit_network_role=net_role_arg,
+    )
+    network_cfg["role"] = resolved_role
+    state.role = resolved_role
+    state.network_role = resolved_role
     state.network_server_ip = network_cfg.get("server_ip", state.network_server_ip)
     state.network_bind_host = network_cfg.get("bind_host", state.network_bind_host)
     state.network_telemetry_port = int(network_cfg.get("telemetry_port", state.network_telemetry_port))
     state.network_local_port = int(network_cfg.get("local_port", state.network_local_port))
-    if not role_arg and (not state.role or str(state.role).strip() == "기본"):
-        state.role = state.network_role or state.role
+    print(
+        f"[Net] runtime identity: pc={state.network_peer_name} "
+        f"gui_role={state.role} udp_role={state.network_role} "
+        f"hub={state.network_server_ip}:{state.network_telemetry_port}"
+    )
 
     spell_db_file = os.path.join(SCRIPT_DIR, "spells_config.json")
 
