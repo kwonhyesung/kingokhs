@@ -43,6 +43,7 @@ import subprocess
 from datetime import datetime
 import keyboard
 import threading
+import queue
 import serial.tools.list_ports
 import ctypes
 import socket as pysocket
@@ -107,6 +108,7 @@ class AppView:
         self.hwnd = hwnd
         self.network_thread = None
         self.root = ctk.CTk()
+        self._ui_action_queue = queue.Queue(maxsize=256)
         # GameState??gui_update_queue ?ъ슜 (以묐났 ???쒓굅)
         self.waypoint_index = 0  # ?쒖감???대룞???몃뜳??
         self.ui_scale = 1.0
@@ -142,6 +144,7 @@ class AppView:
         
         self.create_widgets()
         self.bind_global_zoom_controls()
+        self.root.after(50, self._drain_ui_action_queue)
         self.update_fast_labels()
         self.update_network_panel()
         self.update_slow_ui()
@@ -2683,6 +2686,35 @@ class AppView:
         except Exception as exc:
             print(f"[Net] failed to save server_ip: {exc}")
         self.show_toast(f"SERVER IP: {server_ip}")
+
+    def enqueue_ui_action(self, action_name: str, callback) -> bool:
+        try:
+            self._ui_action_queue.put_nowait((action_name, callback))
+            return True
+        except queue.Full:
+            print(f"[Hotkey] UI action queue full; dropped {action_name}")
+            return False
+
+    def _drain_ui_action_queue(self):
+        try:
+            while True:
+                action_name, callback = self._ui_action_queue.get_nowait()
+                try:
+                    callback()
+                except Exception as exc:
+                    print(f"[Hotkey] {action_name} callback error: {exc}")
+                    traceback.print_exc()
+        except queue.Empty:
+            pass
+        except Exception as exc:
+            print(f"[Hotkey] UI action drain failed: {exc}")
+            traceback.print_exc()
+        finally:
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(50, self._drain_ui_action_queue)
+            except tk.TclError:
+                pass
 
     def toggle_sentinel(self):
         """Docstring."""

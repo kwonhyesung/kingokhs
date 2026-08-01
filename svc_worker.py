@@ -122,16 +122,12 @@ def _dispatch_gui_hotkey(gui_instance, hotkey_name: str, callback):
         return
     HOTKEY_LAST_TRIGGER[hotkey_name] = now
     print(f"[Hotkey] {hotkey_name} pressed")
-
-    def _run_on_ui():
-        try:
-            callback()
-        except Exception as exc:
-            print(f"[Hotkey] {hotkey_name} callback error: {exc}")
-            traceback.print_exc()
-
     try:
-        gui_instance.root.after(0, _run_on_ui)
+        enqueue = getattr(gui_instance, "enqueue_ui_action", None)
+        if callable(enqueue):
+            if enqueue(hotkey_name, callback):
+                return
+        print(f"[Hotkey] {hotkey_name} ignored: GUI is not ready")
     except Exception as exc:
         print(f"[Hotkey] {hotkey_name} schedule failed: {exc}")
         traceback.print_exc()
