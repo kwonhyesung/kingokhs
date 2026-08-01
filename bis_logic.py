@@ -1389,7 +1389,7 @@ class LogicSvc(threading.Thread):
         return False, latest_hp
 
     def _is_hw_ready(self) -> bool:
-        return bool(getattr(hw, "ser", None) and hw.ser and hw.ser.is_open)
+        return hw.is_input_ready()
 
     def _is_game_window_active(self) -> bool:
         try:

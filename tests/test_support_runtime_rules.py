@@ -4,6 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import bis_core
 from support_runtime_rules import (
     adjust_follow_target_by_axis_gap,
     build_f5_hon_sequence,
@@ -45,7 +46,7 @@ from support_runtime_rules import (
     resolve_runtime_network_role,
     speed_up_delay,
 )
-from bis_core import GameState
+from bis_core import BisHardware, GameState
 
 
 def test_network_role_normalization_keeps_priest2_as_udp_client():
@@ -69,6 +70,31 @@ def test_peer_role_conflict_requires_same_pc_with_live_different_session_and_rol
     assert is_peer_role_conflict("old", "도사2", "new", "격수") is True
     assert is_peer_role_conflict("old", "도사2", "new", "도사2") is False
     assert is_peer_role_conflict("old", "도사2", "old", "격수") is False
+
+
+def test_input_backend_falls_back_to_software_without_esp32():
+    controller = BisHardware()
+    assert controller.get_input_backend() == "SW"
+    assert controller.is_input_ready() is True
+
+
+def test_software_input_backend_translates_force_key_command(monkeypatch):
+    events = []
+
+    class FakeKeyboard:
+        @staticmethod
+        def press(key):
+            events.append(("press", key))
+
+        @staticmethod
+        def release(key):
+            events.append(("release", key))
+
+    monkeypatch.setattr(bis_core, "software_keyboard", FakeKeyboard())
+    controller = BisHardware()
+    controller.send_force("K,3")
+
+    assert events == [("press", "3"), ("release", "3")]
 
 
 def test_both_priests_are_support_roles_for_warrior_follow_and_service():

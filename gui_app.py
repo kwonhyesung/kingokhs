@@ -2557,6 +2557,8 @@ class AppView:
                     
             if not ports:
                 print("[Hardware] Auto-connect failed: no USB serial ports found (non-USB ports skipped)")
+                self.btn_hw_connect.configure(text="CONNECT ESP32", fg_color="#6366F1")
+                self.lbl_hw_status.configure(text="[Input] SW", text_color="#F59E0B")
                 return
             
             # Try each detected port in order.
@@ -2579,8 +2581,8 @@ class AppView:
         if hw.ser and hw.ser.is_open:
             hw.disconnect()
             self.btn_hw_connect.configure(text="CONNECT ESP32", fg_color="#6366F1")
-            self.lbl_hw_status.configure(text="[Hardware] NONE", text_color="#FF5555")
-            self.show_toast("HARDWARE DISCONNECTED", "#FFB800")
+            self.lbl_hw_status.configure(text="[Input] SW", text_color="#F59E0B")
+            self.show_toast("SW INPUT ACTIVE", "#F59E0B")
         else:
             port = self.cb_port.get()
             if hw.connect(port):

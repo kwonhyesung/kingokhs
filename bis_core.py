@@ -9,6 +9,11 @@ import queue
 import re
 import uuid
 
+try:
+    import keyboard as software_keyboard
+except ImportError:
+    software_keyboard = None
+
 VERBOSE_STATE_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
 VERBOSE_HW_LOGS = os.environ.get("SVC_HW_LOGS", "0") == "1"
 
@@ -952,6 +957,47 @@ class BisHardware:
         if not (self.ser and self.ser.is_open):
             self.auto_reconnect()
 
+    def is_hardware_ready(self) -> bool:
+        return bool(self.ser and self.ser.is_open)
+
+    def get_input_backend(self) -> str:
+        return "HW" if self.is_hardware_ready() else "SW"
+
+    def is_input_ready(self) -> bool:
+        return self.is_hardware_ready() or software_keyboard is not None
+
+    @staticmethod
+    def _software_release_all() -> None:
+        if software_keyboard is None:
+            return
+        for key in ("left", "right", "up", "down", "shift", "ctrl", "alt", "esc", "space", "enter"):
+            try:
+                software_keyboard.release(key)
+            except Exception:
+                pass
+
+    def _send_software(self, cmd: str) -> None:
+        if software_keyboard is None:
+            _hw_log(f"[Software] input unavailable: {cmd}")
+            return
+        command = str(cmd or "").strip()
+        try:
+            if command == "RELEASE_ALL" or command == "U:all":
+                self._software_release_all()
+            elif command.startswith("D:"):
+                software_keyboard.press(command[2:].strip())
+            elif command.startswith("U:"):
+                software_keyboard.release(command[2:].strip())
+            elif command.startswith("K,"):
+                key = command[2:].strip()
+                software_keyboard.press(key)
+                humanized_sleep(TIMING_CONFIG["key_down_hold"], variance=0.05)
+                software_keyboard.release(key)
+            else:
+                _hw_log(f"[Software] unsupported command: {command}")
+        except Exception as exc:
+            _hw_log(f"[Software] input failed: {command} - {exc}")
+
     def _list_candidate_ports(self):
         """Bluetooth 가상 COM 포트를 제외한 USB 시리얼 포트만 반환한다."""
         import serial.tools.list_ports
@@ -1105,6 +1151,45 @@ class BisHardware:
                     _hw_log(f"[Hardware] 강제전송 실패: {cmd} - {e}")
             else:
                 _hw_log(f"[Hardware] 강제전송 불가: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
+
+    def _is_game_window_focused_for_input(self) -> bool:
+        if self.state is None:
+            return False
+        try:
+            current_hwnd = win32gui.GetForegroundWindow()
+            if current_hwnd == self.state.hwnd:
+                return True
+            return "ory" in (win32gui.GetWindowText(current_hwnd) or "")
+        except Exception:
+            return False
+
+    def _write_hardware_command(self, cmd: str) -> None:
+        padding = " " * random.randint(1, 16)
+        self.ser.write(f"{cmd}{padding}\n".encode("ascii"))
+
+    def send(self, cmd: str):
+        with self._lock:
+            command = str(cmd or "")
+            if not self._is_game_window_focused_for_input() and not command.startswith("U:"):
+                return
+            try:
+                if self.is_hardware_ready():
+                    self._write_hardware_command(command)
+                else:
+                    self._send_software(command)
+            except Exception as exc:
+                _hw_log(f"[Input] send failed: {command} - {exc}")
+
+    def send_force(self, cmd: str):
+        with self._lock:
+            command = str(cmd or "")
+            try:
+                if self.is_hardware_ready():
+                    self._write_hardware_command(command)
+                else:
+                    self._send_software(command)
+            except Exception as exc:
+                _hw_log(f"[Input] force send failed: {command} - {exc}")
 
     def _reset_serial_buffers(self):
         """Best-effort: clear buffered serial I/O to reduce stuck input risk."""
