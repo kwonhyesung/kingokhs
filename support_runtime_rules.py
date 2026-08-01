@@ -402,8 +402,27 @@ def should_retarget_after_support_follow_stuck(
     return int(consecutive_soft_stucks) >= max(0, int(max_soft_stucks_before_retarget))
 
 
-def should_allow_party_support_cast(red_tab_confirmed: bool) -> bool:
-    return bool(red_tab_confirmed)
+def should_allow_party_support_cast(
+    red_tab_confirmed: bool,
+    target_prepared: bool = True,
+) -> bool:
+    return bool(red_tab_confirmed) and bool(target_prepared)
+
+
+def support_retarget_block_duration(moving_follow: bool) -> float:
+    return 0.18 if bool(moving_follow) else 2.4
+
+
+def should_clear_target_box_after_support_stuck(
+    support_follow_active: bool,
+    red_tab_confirmed: bool,
+    targeting_active: bool,
+) -> bool:
+    return (
+        bool(support_follow_active)
+        and not bool(red_tab_confirmed)
+        and not bool(targeting_active)
+    )
 
 
 def should_block_party_heal(

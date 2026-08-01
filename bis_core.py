@@ -265,6 +265,7 @@ class GameState:
     red_tab_enabled: bool = False
     red_tab_promotion_active: bool = False
     red_tab_promotion_until: float = 0.0
+    support_targeting_active: bool = False
     portal_follow_active: bool = False
     portal_follow_retarget_requested: bool = False
     portal_follow_started_at: float = 0.0

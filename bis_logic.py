@@ -66,6 +66,7 @@ from support_runtime_rules import (
     should_allow_party_support_cast,
     should_attempt_portal_enter,
     should_block_party_heal,
+    should_clear_target_box_after_support_stuck,
     should_cast_periodic_heewon,
     classify_map_sync,
     should_continue_self_hp_recovery,
@@ -80,6 +81,7 @@ from support_runtime_rules import (
     should_prioritize_follow_distance,
     should_trigger_self_hp_emergency,
     speed_up_delay,
+    support_retarget_block_duration,
     WARRIOR_TRANSITION_JUMP_DISTANCE,
     is_plausible_transition_coord,
 )
@@ -666,7 +668,7 @@ class LogicSvc(threading.Thread):
             self._complete_self_hp_recovery_reengage(
                 source_log="[Recovery] self emergency recovery complete."
             )
-        elif self.state.role == "도사" and self.state.service_active:
+        elif is_support_role(getattr(self.state, "network_role", "") or self.state.role) and self.state.service_active:
             self.request_initial_direct_heal_target_prepare()
         return True
 
@@ -741,8 +743,8 @@ class LogicSvc(threading.Thread):
             and getattr(self.state, "service_active", False)
         )
         self._set_support_phase("retarget", duration=2.0 if moving_follow else 3.0)
+        self._set_support_input_block(support_retarget_block_duration(moving_follow))
         if not moving_follow:
-            self._set_support_input_block(2.4)
             self._stop_support_movement_inputs()
         self._invalidate_warrior_redtab_verification()
         self._party_direct_heal_target_prepared = False
@@ -754,26 +756,32 @@ class LogicSvc(threading.Thread):
             self._cast_emergency_gg_hold(hold_duration=1.5)
             humanized_sleep(0.025, variance=0.08)
             if moving_follow:
-                self._set_support_input_block(0.65)
+                self._set_support_input_block(support_retarget_block_duration(True))
                 self._release_movement_keys_only()
-            red_tab_reacquired = self._reacquire_warrior_red_tab_after_emergency()
-            if self.state.role == "도사" and self.state.service_active and not red_tab_reacquired:
-                print("[Recovery] red_tab reacquire failed. Queue direct target prepare fallback.")
-                self.request_initial_direct_heal_target_prepare()
+            red_tab_reacquired = self._reacquire_warrior_red_tab_after_emergency(moving_follow=moving_follow)
+            if is_support_role(getattr(self.state, "network_role", "") or self.state.role) and self.state.service_active and not red_tab_reacquired:
+                if moving_follow:
+                    self._party_heal_blocked_until = time.time() + 0.15
+                    print("[Recovery] red_tab 재확인 실패: 추적은 계속하고 격수 회복 입력은 잠시 보류합니다.")
+                else:
+                    print("[Recovery] red_tab 재확인 실패. 직접 대상 준비를 다시 요청합니다.")
+                    self.request_initial_direct_heal_target_prepare()
             return red_tab_reacquired
         finally:
             self._clear_support_phase(expected="retarget")
             if not moving_follow:
                 self._set_combat_busy(previous_busy)
 
-    def _reacquire_warrior_red_tab_after_emergency(self) -> bool:
+    def _reacquire_warrior_red_tab_after_emergency(self, moving_follow: bool = False) -> bool:
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
 
         self._invalidate_warrior_redtab_verification()
         self._party_direct_heal_target_prepared = False
-        self._set_support_input_block(0.8)
-        self._stop_support_movement_inputs()
+        self._set_support_input_block(support_retarget_block_duration(moving_follow))
+        self.state.support_targeting_active = True
+        if not moving_follow:
+            self._stop_support_movement_inputs()
         humanized_sleep(0.025, variance=0.08)
         for attempt in range(3):
             wait_between_tabs = random.uniform(
@@ -799,16 +807,19 @@ class LogicSvc(threading.Thread):
                 humanized_sleep(wait_between_tabs, variance=0.08)
                 if not self._press_hw_key("tab", variance=0.10, skip_focus_guard=True):
                     continue
-                # TAB 입력 자체가 성공하면 OCR 판정이 늦어도 다음 F2 루프에서 3힐을 막지 않는다.
-                self._party_direct_heal_target_prepared = True
-                self._party_heal_blocked_until = time.time() + 0.03
-                self._last_party_hp_support_time = 0.0
-                print("[Recovery] warrior red_tab physical TAB>TAB complete. Direct 3 heal can resume immediately.")
-                return True
+                if self._wait_for_red_tab_lock(timeout=0.28, min_hits=1):
+                    self._party_direct_heal_target_prepared = True
+                    self._party_heal_blocked_until = time.time() + 0.03
+                    self._last_party_hp_support_time = 0.0
+                    print("[Recovery] warrior red_tab confirmed after TAB>TAB.")
+                    self.state.support_targeting_active = False
+                    return True
+                self._cancel_ntab_selection()
             finally:
                 self.state.red_tab_promotion_active = False
             humanized_sleep(speed_up_delay(0.24, factor=3.0), variance=0.10)
         self._party_direct_heal_target_prepared = False
+        self.state.support_targeting_active = False
         return False
 
     def _handle_self_mp_priority(self, support_target: dict | None = None) -> bool:
@@ -882,12 +893,12 @@ class LogicSvc(threading.Thread):
                     return True
                 if after_hp > 0 and after_hp <= good_hp:
                     self._mp_follow_self_heal_until = time.time() + 3.0
-                    self._set_support_input_block(0.65)
+                    self._set_support_input_block(support_retarget_block_duration(True))
                     self._release_movement_keys_only()
-                    red_tab_reacquired = self._reacquire_warrior_red_tab_after_emergency()
+                    red_tab_reacquired = self._reacquire_warrior_red_tab_after_emergency(moving_follow=True)
                     if not red_tab_reacquired:
                         self._cast_self_hp_micro_follow_tick()
-                        self.request_initial_direct_heal_target_prepare()
+                        self._party_heal_blocked_until = time.time() + 0.15
                     print("[Recovery] post-MP self HP recovery re-synced. Follow remains active.")
                     return True
             if self.state.role != "도사" or not bool(getattr(self.state, "service_active", False)):
@@ -1132,13 +1143,18 @@ class LogicSvc(threading.Thread):
         before_hp = max(0, int(snapshot.get("hp", 0) or 0))
         if self._is_party_heal_blocked():
             return False
-        if self._party_direct_heal_verified and self._party_direct_heal_target_prepared:
+        red_tab_confirmed = bool(getattr(self.state, "red_tab_enabled", False))
+        if self._party_direct_heal_verified and should_allow_party_support_cast(
+            red_tab_confirmed,
+            self._party_direct_heal_target_prepared,
+        ):
             if not self._cast_party_direct_heal(snapshot):
                 return False
             self._last_party_hp_value = before_hp
             return True
-        if self._party_direct_heal_verified and not self._party_direct_heal_target_prepared:
+        if self._party_direct_heal_verified:
             self._party_direct_heal_verified = False
+            self._party_direct_heal_target_prepared = False
 
         if not self._party_direct_heal_target_prepared and not self._prepare_direct_tab_heal_target():
             now = time.time()
@@ -1149,6 +1165,15 @@ class LogicSvc(threading.Thread):
         if not self._party_direct_heal_target_prepared:
             print("[Support] direct heal target prepared: esc -> tab -> tab")
             self._party_direct_heal_target_prepared = True
+
+        if not should_allow_party_support_cast(
+            bool(getattr(self.state, "red_tab_enabled", False)),
+            self._party_direct_heal_target_prepared,
+        ):
+            self._cancel_ntab_selection()
+            self._party_direct_heal_target_prepared = False
+            self._party_heal_blocked_until = time.time() + 0.12
+            return False
 
         if not self._cast_party_direct_heal(snapshot):
             return False
@@ -1196,7 +1221,11 @@ class LogicSvc(threading.Thread):
 
     def request_initial_direct_heal_target_prepare(self):
         self._invalidate_warrior_redtab_verification()
-        self._set_support_input_block(1.0)
+        moving_follow = bool(
+            getattr(self.state, "nav_follow_enabled", False)
+            and getattr(self.state, "service_active", False)
+        )
+        self._set_support_input_block(support_retarget_block_duration(moving_follow))
         self._direct_heal_prepare_requested = True
 
     def _handle_initial_direct_heal_prepare_request(self) -> bool:
@@ -1207,8 +1236,13 @@ class LogicSvc(threading.Thread):
             return False
         self._direct_heal_prepare_requested = False
         self._invalidate_warrior_redtab_verification()
-        self._set_support_input_block(0.9)
-        self._stop_support_movement_inputs()
+        moving_follow = bool(
+            getattr(self.state, "nav_follow_enabled", False)
+            and getattr(self.state, "service_active", False)
+        )
+        self._set_support_input_block(support_retarget_block_duration(moving_follow))
+        if not moving_follow:
+            self._stop_support_movement_inputs()
         if not self._prepare_direct_tab_heal_target():
             print("[Support] 자동사냥 초기 direct target prepare failed.")
             return True
@@ -1235,20 +1269,31 @@ class LogicSvc(threading.Thread):
             return False
         previous_busy = bool(getattr(self.state, "is_combat_busy", False))
         self._ntab_in_progress = True
-        self._set_support_input_block(0.9)
-        self._stop_support_movement_inputs()
+        moving_follow = bool(
+            getattr(self.state, "nav_follow_enabled", False)
+            and getattr(self.state, "service_active", False)
+        )
+        self._set_support_input_block(support_retarget_block_duration(moving_follow))
+        if not moving_follow:
+            self._stop_support_movement_inputs()
         self._support_lock_search_until = time.time() + 0.60
         self.state.red_tab_promotion_active = False
         self.state.red_tab_promotion_until = 0.0
+        self.state.support_targeting_active = True
         self._set_combat_busy(True)
         try:
             for key, delay in (("esc", 0.06), ("tab", 0.08), ("tab", 0.08)):
                 if not self._press_hw_key(key, variance=0.10):
                     return False
                 self._sleep_ui_gap(delay)
-            return True
+            if self._wait_for_red_tab_lock(timeout=0.28, min_hits=1):
+                self._party_direct_heal_target_prepared = True
+                return True
+            self._cancel_ntab_selection()
+            return False
         finally:
             self._ntab_in_progress = False
+            self.state.support_targeting_active = False
             self._support_lock_search_until = time.time() + 0.12
             self._set_combat_busy(previous_busy)
 
@@ -1257,60 +1302,87 @@ class LogicSvc(threading.Thread):
             return False
         if not self._is_hw_ready():
             return False
+        if not should_allow_party_support_cast(
+            bool(getattr(self.state, "red_tab_enabled", False)),
+            self._party_direct_heal_target_prepared,
+        ):
+            return False
         hp_val = int((snapshot or {}).get("hp", 0) or 0)
         now = time.time()
         if (now - float(getattr(self, "_last_party_direct_heal_log_time", 0.0) or 0.0)) >= 1.0:
             print(f"[Support] HP heal casting on warrior: key={self._party_direct_heal_key}, hp={hp_val}, direct_verified={self._party_direct_heal_verified}")
             self._last_party_direct_heal_log_time = now
-        if not self._press_hw_key(self._party_direct_heal_key, variance=0.10):
-            return False
-        self._last_party_hp_support_time = time.time()
-        self._sleep_ui_gap(random.uniform(0.012, 0.030))
-        return True
+        self.state.support_targeting_active = True
+        try:
+            if not self._press_hw_key(self._party_direct_heal_key, variance=0.10):
+                return False
+            self._last_party_hp_support_time = time.time()
+            self._sleep_ui_gap(random.uniform(0.012, 0.030))
+            return True
+        finally:
+            self.state.support_targeting_active = False
 
     def _cast_party_heewon(self, snapshot: dict | None = None) -> bool:
         if self._is_portal_support_paused():
             return False
         if not self._is_hw_ready():
             return False
+        if not should_allow_party_support_cast(
+            bool(getattr(self.state, "red_tab_enabled", False)),
+            self._party_direct_heal_target_prepared,
+        ):
+            return False
         spell = self._find_spell_by_name("희원")
         if spell is not None and hasattr(spell, "is_ready") and not spell.is_ready():
             return False
         hp_val = int((snapshot or {}).get("hp", 0) or 0)
         print(f"[Support] Heewon casting on warrior: key=1, hp={hp_val}")
-        if not self._press_hw_key("1", variance=0.10):
-            return False
-        now = time.time()
-        self._last_warrior_heewon_time = now
-        if spell is not None:
-            try:
-                spell.last_cast_time = now
-            except Exception:
-                pass
-        self._sleep_ui_gap(random.uniform(0.018, 0.036))
-        return True
+        self.state.support_targeting_active = True
+        try:
+            if not self._press_hw_key("1", variance=0.10):
+                return False
+            now = time.time()
+            self._last_warrior_heewon_time = now
+            if spell is not None:
+                try:
+                    spell.last_cast_time = now
+                except Exception:
+                    pass
+            self._sleep_ui_gap(random.uniform(0.018, 0.036))
+            return True
+        finally:
+            self.state.support_targeting_active = False
 
     def _cast_party_heewoncheom(self, snapshot: dict | None = None) -> bool:
         if self._is_portal_support_paused():
             return False
         if not self._is_hw_ready():
             return False
+        if not should_allow_party_support_cast(
+            bool(getattr(self.state, "red_tab_enabled", False)),
+            self._party_direct_heal_target_prepared,
+        ):
+            return False
         spell = self._find_spell_by_name("희원첨")
         if spell is not None and hasattr(spell, "is_ready") and not spell.is_ready():
             return False
         hp_val = int((snapshot or {}).get("hp", 0) or 0)
         print(f"[Support] Heewoncheom casting on warrior: key=4, hp={hp_val}")
-        if not self._press_hw_key("4", variance=0.10):
-            return False
-        now = time.time()
-        self._last_warrior_heewoncheom_time = now
-        if spell is not None:
-            try:
-                spell.last_cast_time = now
-            except Exception:
-                pass
-        self._sleep_ui_gap(random.uniform(0.018, 0.036))
-        return True
+        self.state.support_targeting_active = True
+        try:
+            if not self._press_hw_key("4", variance=0.10):
+                return False
+            now = time.time()
+            self._last_warrior_heewoncheom_time = now
+            if spell is not None:
+                try:
+                    spell.last_cast_time = now
+                except Exception:
+                    pass
+            self._sleep_ui_gap(random.uniform(0.018, 0.036))
+            return True
+        finally:
+            self.state.support_targeting_active = False
 
     def _cast_due_periodic_party_support(self, snapshot: dict | None, now_support: float | None = None) -> bool:
         if not snapshot:
@@ -4213,6 +4285,13 @@ class RouteSvc(threading.Thread):
             self._nav_attempt_started_at = 0.0
             self.stuck_count = 0
             return False
+        if bool(getattr(self.state, "support_targeting_active", False)) or bool(
+            getattr(self.state, "red_tab_promotion_active", False)
+        ):
+            self._nav_attempt_pos = None
+            self._nav_attempt_started_at = 0.0
+            self.stuck_count = 0
+            return False
 
         # Follow 紐⑤뱶?먯꽌??洹쇱젒 踰붿쐞 吏꾩엯 ??stuck ??대㉧瑜?利됱떆 ?댁젣?쒕떎.
         # (猷⑦봽 ?쒖꽌??check_stuck媛 follow 洹쇱젒 ?먯젙蹂대떎 癒쇱? ?ㅽ뻾?섍린 ?뚮Ц)
@@ -4283,7 +4362,14 @@ class RouteSvc(threading.Thread):
                     max_soft_stucks_before_retarget=2,
                 ):
                     self._support_follow_soft_stuck_count += 1
-                    self._quick_support_follow_escape(follow_target)
+                    if should_clear_target_box_after_support_stuck(
+                        True,
+                        bool(getattr(self.state, "red_tab_enabled", False)),
+                        False,
+                    ):
+                        self._trigger_box_collision_recover(force_retarget=True)
+                    else:
+                        self._quick_support_follow_escape(follow_target)
                     self._nav_attempt_pos = None
                     self._nav_attempt_started_at = 0.0
                     return False
@@ -4307,14 +4393,31 @@ class RouteSvc(threading.Thread):
             bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
             getattr(self.state, "nav_follow_enabled", False),
         ):
-            try:
-                hw.stop_all_inputs(repeat=1, delay=0.02)
-            except Exception:
-                pass
-            current_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
-            self.state.support_input_blocked_until = max(current_block, time.time() + 0.8)
-            self.state.box_collision_reprepare_requested = True
-            print("[Recover] support box collision: stop movement + request F2 reprepare.")
+            if bool(getattr(self.state, "support_targeting_active", False)) or bool(
+                getattr(self.state, "red_tab_promotion_active", False)
+            ):
+                print("[Recover] support target preparation active: defer target-box clear.")
+                return
+            if should_clear_target_box_after_support_stuck(
+                True,
+                bool(getattr(self.state, "red_tab_enabled", False)),
+                False,
+            ):
+                try:
+                    hw.stop_all_inputs(repeat=1, delay=0.005)
+                    for _ in range(2):
+                        hw.fast_press("esc", variance=0.04)
+                        humanized_sleep(0.025, variance=0.04)
+                    self.state.support_input_blocked_until = max(
+                        float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
+                        time.time() + 0.12,
+                    )
+                    print("[Recover] support follow stalled: clear suspected target box with ESC x2.")
+                except Exception as error:
+                    print(f"[Recover] support target-box clear failed: {error}")
+                return
+            self._quick_support_follow_escape(self._calc_follow_target())
+            print("[Recover] support follow stalled with confirmed red_tab: use detour, keep target.")
             return
         # 이동 키 입력 후 좌표 미변경 = box 충돌로 간주: ESC 1회 + F2 재준비 요청
         try:
@@ -6503,6 +6606,13 @@ class RouteSvc(threading.Thread):
             self._nav_attempt_started_at = 0.0
             self.stuck_count = 0
             return False
+        if bool(getattr(self.state, "support_targeting_active", False)) or bool(
+            getattr(self.state, "red_tab_promotion_active", False)
+        ):
+            self._nav_attempt_pos = None
+            self._nav_attempt_started_at = 0.0
+            self.stuck_count = 0
+            return False
 
         # Follow 紐⑤뱶?먯꽌??洹쇱젒 踰붿쐞 吏꾩엯 ??stuck ??대㉧瑜?利됱떆 ?댁젣?쒕떎.
         # (猷⑦봽 ?쒖꽌??check_stuck媛 follow 洹쇱젒 ?먯젙蹂대떎 癒쇱? ?ㅽ뻾?섍린 ?뚮Ц)
@@ -6573,7 +6683,14 @@ class RouteSvc(threading.Thread):
                     max_soft_stucks_before_retarget=2,
                 ):
                     self._support_follow_soft_stuck_count += 1
-                    self._quick_support_follow_escape(follow_target)
+                    if should_clear_target_box_after_support_stuck(
+                        True,
+                        bool(getattr(self.state, "red_tab_enabled", False)),
+                        False,
+                    ):
+                        self._trigger_box_collision_recover(force_retarget=True)
+                    else:
+                        self._quick_support_follow_escape(follow_target)
                     self._nav_attempt_pos = None
                     self._nav_attempt_started_at = 0.0
                     return False
@@ -6597,14 +6714,31 @@ class RouteSvc(threading.Thread):
             bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
             getattr(self.state, "nav_follow_enabled", False),
         ):
-            try:
-                hw.stop_all_inputs(repeat=1, delay=0.02)
-            except Exception:
-                pass
-            current_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
-            self.state.support_input_blocked_until = max(current_block, time.time() + 0.8)
-            self.state.box_collision_reprepare_requested = True
-            print("[Recover] support box collision: stop movement + request F2 reprepare.")
+            if bool(getattr(self.state, "support_targeting_active", False)) or bool(
+                getattr(self.state, "red_tab_promotion_active", False)
+            ):
+                print("[Recover] support target preparation active: defer target-box clear.")
+                return
+            if should_clear_target_box_after_support_stuck(
+                True,
+                bool(getattr(self.state, "red_tab_enabled", False)),
+                False,
+            ):
+                try:
+                    hw.stop_all_inputs(repeat=1, delay=0.005)
+                    for _ in range(2):
+                        hw.fast_press("esc", variance=0.04)
+                        humanized_sleep(0.025, variance=0.04)
+                    self.state.support_input_blocked_until = max(
+                        float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
+                        time.time() + 0.12,
+                    )
+                    print("[Recover] support follow stalled: clear suspected target box with ESC x2.")
+                except Exception as error:
+                    print(f"[Recover] support target-box clear failed: {error}")
+                return
+            self._quick_support_follow_escape(self._calc_follow_target())
+            print("[Recover] support follow stalled with confirmed red_tab: use detour, keep target.")
             return
         # 이동 키 입력 후 좌표 미변경 = box 충돌로 간주: ESC 1회 + F2 재준비 요청
         try:

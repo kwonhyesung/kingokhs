@@ -24,6 +24,7 @@ from support_runtime_rules import (
     should_attempt_portal_enter,
     should_block_party_heal,
     should_cast_periodic_heewon,
+    should_clear_target_box_after_support_stuck,
     should_continue_self_hp_recovery,
     should_defer_stuck_escape_for_support,
     should_hold_follow_gap,
@@ -33,6 +34,7 @@ from support_runtime_rules import (
     should_prioritize_self_mp_over_party_heal,
     should_retarget_after_support_follow_stuck,
     should_run_periodic_refresh,
+    support_retarget_block_duration,
     should_detect_warrior_transition,
     should_prioritize_follow_distance,
     should_trigger_self_hp_emergency,
@@ -431,6 +433,19 @@ def test_zero_hp_confirmation_requires_two_consecutive_reads():
 def test_party_support_requires_confirmed_red_tab():
     assert should_allow_party_support_cast(True) is True
     assert should_allow_party_support_cast(False) is False
+    assert should_allow_party_support_cast(True, target_prepared=False) is False
+
+
+def test_self_recovery_retarget_keeps_follow_block_short():
+    assert support_retarget_block_duration(True) == 0.18
+    assert support_retarget_block_duration(False) == 2.4
+
+
+def test_target_box_clear_waits_for_support_targeting_to_finish():
+    assert should_clear_target_box_after_support_stuck(True, False, False) is True
+    assert should_clear_target_box_after_support_stuck(True, True, False) is False
+    assert should_clear_target_box_after_support_stuck(True, False, True) is False
+    assert should_clear_target_box_after_support_stuck(False, False, False) is False
 
 
 def test_warrior_search_sequence_matches_real_input_flow():
