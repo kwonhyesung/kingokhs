@@ -39,6 +39,7 @@ from support_runtime_rules import (
     classify_map_sync,
     classify_peer_connection,
     is_hub_network_role,
+    is_peer_role_conflict,
     is_support_role,
     normalize_network_role,
     resolve_runtime_network_role,
@@ -62,6 +63,12 @@ def test_runtime_role_uses_one_resolved_value_for_gui_and_udp():
         explicit_role="도사2",
         explicit_network_role="도사1",
     ) == "도사1"
+
+
+def test_peer_role_conflict_requires_same_pc_with_live_different_session_and_role():
+    assert is_peer_role_conflict("old", "도사2", "new", "격수") is True
+    assert is_peer_role_conflict("old", "도사2", "new", "도사2") is False
+    assert is_peer_role_conflict("old", "도사2", "old", "격수") is False
 
 
 def test_both_priests_are_support_roles_for_warrior_follow_and_service():

@@ -2415,6 +2415,7 @@ class MonitorSvc(threading.Thread):
         from svc_map_ocr import MapNameRecognizer
         self.map_ocr = MapNameRecognizer(digit_patterns=self.matcher.AHK_PATTERNS)
         self._map_ocr_last_log_time = 0.0
+        self._map_ocr_debug_enabled = False
         self._map_fail_count = 0
         self._map_info_last_signature = ""
         self._map_info_change_seq = 0
@@ -4392,32 +4393,6 @@ class MonitorSvc(threading.Thread):
                         if matched_map:
                             map_text = str(matched_map).strip()
 
-                    # 2초마다 상태 출력 + 실패 시 crop 덤프
-                    if (now_map - float(getattr(self, "_map_ocr_last_log_time", 0.0) or 0.0)) >= 2.0:
-                        self._map_ocr_last_log_time = now_map
-                        h, w = crop.shape[:2]
-                        print(
-                            f"[MapOCR] crop={w}x{h} result='{map_text or '-'}' "
-                            f"score={score:.3f} prefix={float(dbg.get('prefix_score', 0.0)):.3f} "
-                            f"mean={float(dbg.get('mean', 0.0)):.1f} fg={int(dbg.get('fg', 0) or 0)} "
-                            f"current='{getattr(self.state, 'current_map', '')}'"
-                        )
-                        if not map_text:
-                            try:
-                                dump_dir = os.path.join(
-                                    os.path.dirname(os.path.abspath(__file__)),
-                                    "temple", "maps", "debug",
-                                )
-                                os.makedirs(dump_dir, exist_ok=True)
-                                # RGB frame -> BGR for imwrite
-                                dump_bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
-                                dump_path = os.path.join(dump_dir, "map_info_last_fail.png")
-                                cv2.imwrite(dump_path, dump_bgr)
-                                bin160 = ((crop.mean(axis=2) >= 160) * 255).astype(np.uint8)
-                                cv2.imwrite(os.path.join(dump_dir, "map_info_last_fail_bin.png"), bin160)
-                            except Exception as e:
-                                print(f"[MapOCR] debug dump failed: {e}")
-
                     if map_text:
                         from bis_core import split_map_name_floor
                         map_name, map_floor = split_map_name_floor(map_text)
@@ -4443,7 +4418,9 @@ class MonitorSvc(threading.Thread):
                         self._map_fail_count = 0
                     else:
                         self._map_fail_count = int(getattr(self, "_map_fail_count", 0) or 0) + 1
-                        if self._map_fail_count <= 5 or (self._map_fail_count % 20) == 0:
+                        if getattr(self, "_map_ocr_debug_enabled", False) and (
+                            self._map_fail_count <= 5 or (self._map_fail_count % 20) == 0
+                        ):
                             h, w = crop.shape[:2]
                             print(
                                 f"[MapOCR] 인식 실패 #{self._map_fail_count} crop={w}x{h} "

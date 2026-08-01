@@ -35,6 +35,20 @@ def resolve_runtime_network_role(
     return normalize_network_role(None)
 
 
+def is_peer_role_conflict(
+    existing_session_id: object,
+    existing_role: object,
+    incoming_session_id: object,
+    incoming_role: object,
+) -> bool:
+    """Detect concurrent role disagreement from one PC name."""
+    previous_session = str(existing_session_id or "").strip()
+    next_session = str(incoming_session_id or "").strip()
+    if not previous_session or not next_session or previous_session == next_session:
+        return False
+    return normalize_network_role(existing_role) != normalize_network_role(incoming_role)
+
+
 def is_hub_network_role(role: object) -> bool:
     return normalize_network_role(role) == "도사1"
 

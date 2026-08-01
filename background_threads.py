@@ -63,7 +63,7 @@ from enum import Enum, auto
 # 而ㅻ꼸 ?대옒???꾪룷??
 from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
 from config_utils import choose_preferred_local_ipv4, get_local_ipv4_candidates, load_network_config
-from support_runtime_rules import is_hub_network_role, normalize_network_role
+from support_runtime_rules import is_hub_network_role, is_peer_role_conflict, normalize_network_role
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
@@ -163,6 +163,7 @@ class NetworkThread(threading.Thread):
         self._warned_connreset = False
         self._warned_server_ip = False
         self._seen_rx_senders: set[str] = set()
+        self._reported_role_conflicts: set[tuple[str, str, str]] = set()
         self._reconfigure_requested = threading.Event()
         self.send_interval = 0.05
         self.broadcast_interval = 0.05
@@ -196,6 +197,7 @@ class NetworkThread(threading.Thread):
         self.sock = self._make_socket()
         self._peers.clear()
         self._seen_rx_senders.clear()
+        self._reported_role_conflicts.clear()
         if self.is_server:
             self.sock.bind((self.bind_host, self.telemetry_port))
             print(f'[Net] UDP hub connected: {self.bind_host}:{self.telemetry_port} (role={self.role})')
@@ -214,11 +216,16 @@ class NetworkThread(threading.Thread):
 
     def _make_socket(self) -> pysocket.socket:
         sock = pysocket.socket(pysocket.AF_INET, pysocket.SOCK_DGRAM)
-        sock.setsockopt(pysocket.SOL_SOCKET, pysocket.SO_REUSEADDR, 1)
-        try:
-            sock.setsockopt(pysocket.SOL_SOCKET, pysocket.SO_REUSEPORT, 1)
-        except Exception:
-            pass
+        if self.is_server:
+            sock.setsockopt(pysocket.SOL_SOCKET, pysocket.SO_REUSEADDR, 1)
+            try:
+                sock.setsockopt(pysocket.SOL_SOCKET, pysocket.SO_REUSEPORT, 1)
+            except Exception:
+                pass
+        else:
+            exclusive_addr_use = getattr(pysocket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive_addr_use is not None:
+                sock.setsockopt(pysocket.SOL_SOCKET, exclusive_addr_use, 1)
         udp_connreset = getattr(pysocket, "SIO_UDP_CONNRESET", 0x9800000C)
         try:
             sock.ioctl(udp_connreset, False)
@@ -248,13 +255,26 @@ class NetworkThread(threading.Thread):
         except Exception:
             return None
 
-    def _register_peer(self, addr: tuple[str, int], payload: dict, sender: str) -> None:
+    def _register_peer(self, addr: tuple[str, int], payload: dict, sender: str) -> tuple[str, str] | None:
         status = payload.get('status', {}) if isinstance(payload, dict) else {}
+        session_id = str(payload.get('session_id') or status.get('session_id') or '').strip()
+        role = str(status.get('network_role') or status.get('role') or '').strip()
+        conflict: tuple[str, str] | None = None
+        for meta in self._peers.values():
+            if str(meta.get('sender') or '') != sender:
+                continue
+            if time.time() - float(meta.get('seen_at') or 0.0) > 3.0:
+                continue
+            if is_peer_role_conflict(meta.get('session_id'), meta.get('role'), session_id, role):
+                conflict = (str(meta.get('role') or ''), str(meta.get('session_id') or ''))
+                break
         self._peers[addr] = {
             'sender': sender,
-            'role': str(status.get('network_role') or status.get('role') or '').strip(),
+            'role': role,
+            'session_id': session_id,
             'seen_at': time.time(),
         }
+        return conflict
 
     def _broadcast_snapshot(self) -> None:
         if not self.sock or not self._peers:
@@ -396,15 +416,29 @@ class NetworkThread(threading.Thread):
                     accept_relayed_peers=not self.is_server,
                 )
                 if self.is_server:
-                    self._register_peer(addr, payload, sender)
-                    if sender not in self._seen_rx_senders:
+                    conflict = self._register_peer(addr, payload, sender)
+                    session_id = str(payload.get("session_id") or "").strip()
+                    session_short = session_id[:8] or "legacy"
+                    sender_key = f"{sender}:{session_short}"
+                    if sender_key not in self._seen_rx_senders:
                         seq = int(payload.get("seq", 0) or 0)
                         kind = str(payload.get("kind", "") or "")
                         role = str(payload.get("role") or payload.get("sender_role") or "")
                         print(
-                            f"[Net][RX] sender={sender} role={role} kind={kind} seq={seq} addr={addr[0]}:{addr[1]}"
+                            f"[Net][RX] sender={sender} session={session_short} role={role} "
+                            f"kind={kind} seq={seq} addr={addr[0]}:{addr[1]}"
                         )
-                        self._seen_rx_senders.add(sender)
+                        self._seen_rx_senders.add(sender_key)
+                    if conflict:
+                        old_role, old_session = conflict
+                        conflict_key = (sender, old_session, session_id)
+                        if conflict_key not in self._reported_role_conflicts:
+                            print(
+                                f"[Net][ROLE CONFLICT] sender={sender} "
+                                f"old_role={old_role} old_session={old_session[:8] or 'legacy'} "
+                                f"new_role={role} new_session={session_short}"
+                            )
+                            self._reported_role_conflicts.add(conflict_key)
                     self._last_broadcast = 0.0
                 else:
                     # Keep remote telemetry in other_pc_data only; local nav toggles stay local.
