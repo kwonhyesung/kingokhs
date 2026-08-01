@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -62,6 +63,34 @@ def test_peer_connection_status_is_fixed_by_last_received_time():
     assert classify_peer_connection(9.4, now=10.0) == "CONNECTED"
     assert classify_peer_connection(7.0, now=10.0) == "STALE"
     assert classify_peer_connection(4.0, now=10.0) == "DISCONNECTED"
+
+
+def test_client_relay_refreshes_peer_received_time_without_echoing_stale_cache():
+    state = GameState()
+    payload = {
+        "sender": "DOSA1-HUB",
+        "seq": 1,
+        "status": {"role": "도사1", "network_role": "도사1"},
+        "peers": {
+            "WARRIOR-PC": {
+                "role": "격수",
+                "network_role": "격수",
+                "x": 27,
+                "y": 3,
+                "_received_at": 1.0,
+            },
+        },
+    }
+
+    before = time.time()
+    state.apply_remote_payload(payload, accept_relayed_peers=True)
+    relayed = state.other_pc_data["WARRIOR-PC"]
+    assert relayed["_source_received_at"] == 1.0
+    assert relayed["_received_at"] >= before
+
+    hub_state = GameState()
+    hub_state.apply_remote_payload(payload, accept_relayed_peers=False)
+    assert "WARRIOR-PC" not in hub_state.other_pc_data
 
 
 def test_follow_hold_position_allows_one_tile_axis_error():

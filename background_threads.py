@@ -383,7 +383,10 @@ class NetworkThread(threading.Thread):
                 if not isinstance(payload, dict):
                     continue
 
-                sender, remote_data = self.state.apply_remote_payload(payload)
+                sender, remote_data = self.state.apply_remote_payload(
+                    payload,
+                    accept_relayed_peers=not self.is_server,
+                )
                 if self.is_server:
                     self._register_peer(addr, payload, sender)
                     if sender not in self._seen_rx_senders:

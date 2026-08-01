@@ -739,7 +739,11 @@ class GameState:
                 pass
         return None
 
-    def apply_remote_payload(self, payload: dict) -> tuple[str, dict]:
+    def apply_remote_payload(
+        self,
+        payload: dict,
+        accept_relayed_peers: bool = True,
+    ) -> tuple[str, dict]:
         """
         UDP payload를 정규화해서 저장한다.
         """
@@ -754,10 +758,17 @@ class GameState:
             snapshot["_seq"] = payload.get("seq", 0)
             snapshot["_sender"] = sender
             peers = payload.get("peers")
-            if isinstance(peers, dict):
+            if accept_relayed_peers and isinstance(peers, dict):
+                received_at = time.time()
                 for peer_name, peer_data in peers.items():
                     if isinstance(peer_data, dict):
-                        self.update_other(str(peer_name), dict(peer_data))
+                        relayed = dict(peer_data)
+                        source_received_at = relayed.get("_received_at")
+                        if source_received_at is not None:
+                            relayed["_source_received_at"] = source_received_at
+                        relayed["_received_at"] = received_at
+                        relayed["_relayed_by"] = sender
+                        self.update_other(str(peer_name), relayed)
         elif isinstance(payload, dict):
             snapshot = dict(payload)
 

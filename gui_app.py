@@ -327,6 +327,8 @@ class AppView:
             coord_lbl.pack(fill="x", padx=6, pady=(0, 1))
             hpmp_lbl = ctk.CTkLabel(card, text="HP/MP: -", font=("Inter", 9, "bold"), text_color="#A7F3D0", anchor="w", justify="left")
             hpmp_lbl.pack(fill="x", padx=6, pady=(0, 5))
+            rx_lbl = ctk.CTkLabel(card, text="RX: -", font=("Inter", 8), text_color="#94A3B8", anchor="w")
+            rx_lbl.pack(fill="x", padx=6, pady=(0, 5))
 
             self.net_role_cards[role_name] = {
                 "frame": card,
@@ -335,6 +337,7 @@ class AppView:
                 "map": map_lbl,
                 "coord": coord_lbl,
                 "hpmp": hpmp_lbl,
+                "rx": rx_lbl,
             }
 
         # Navigation & Control Tab
@@ -2892,18 +2895,26 @@ class AppView:
             map_text = "-"
             coord_text = "-"
             hpmp_text = "-"
+            rx_text = "RX: -"
         else:
             map_text = self._format_map_text(snapshot)
             x_text, y_text = self._format_coord_text(snapshot)
             hp_text, mp_text = self._format_hp_mp_text(snapshot)
             coord_text = f"{x_text} / {y_text}"
             hpmp_text = f"{hp_text} / {mp_text}"
+            if str(snapshot.get("_role_kind") or "") == "LOCAL":
+                rx_text = "RX: LOCAL"
+            else:
+                connection_status, age = self._peer_connection_state(snapshot)
+                source = str(snapshot.get("_relayed_by") or "DIRECT")
+                rx_text = f"RX: {connection_status} {age:.1f}s via {source}"
 
         card["status"].configure(text=status_text, text_color=status_color)
         card["title"].configure(text=self._display_role_name(role_name), text_color=status_color)
         card["map"].configure(text=f"MAP: {map_text}")
         card["coord"].configure(text=f"X/Y: {coord_text}")
         card["hpmp"].configure(text=f"HP/MP: {hpmp_text}")
+        card["rx"].configure(text=rx_text)
 
     def _refresh_dosa_network_panel(self):
         active_role = self._effective_role_name(self.state.role)
