@@ -53,6 +53,7 @@ from support_runtime_rules import (
     dir_between_coords,
     follow_manhattan_gap,
     infer_dir_from_trail,
+    is_support_role,
     is_confirmed_zero_hp_state,
     is_plausible_map_coord,
     next_zero_hp_count,
@@ -2546,7 +2547,9 @@ class LogicSvc(threading.Thread):
                 self.state.sentinel_enabled = True
 
             # ?? 0?쒖쐞: Emergency (鍮꾩긽 ?곹솴) ?????????????????????
-            is_dosa_role = self.state.role in ("도사", "도사1")
+            is_dosa_role = is_support_role(
+                getattr(self.state, "network_role", "") or getattr(self.state, "role", "")
+            )
             support_target = self._get_support_target_data() if is_dosa_role else None
             if is_dosa_role and self._run_dosa_service_cycle(support_target):
                 continue

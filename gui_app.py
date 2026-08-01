@@ -2584,6 +2584,25 @@ class AppView:
         normalized = self._normalize_role_name(role)
         self.state.role = normalized
         self.state.network_role = normalized
+        network_thread = getattr(self, "network_thread", None)
+        if network_thread is not None:
+            try:
+                network_thread.request_reconfigure(
+                    role=normalized,
+                    server_ip=getattr(self.state, "network_server_ip", ""),
+                )
+            except Exception as exc:
+                print(f"[Net] role reconfigure failed: {exc}")
+        try:
+            save_network_config({
+                "role": normalized,
+                "server_ip": getattr(self.state, "network_server_ip", ""),
+                "bind_host": getattr(self.state, "network_bind_host", "0.0.0.0"),
+                "telemetry_port": int(getattr(self.state, "network_telemetry_port", 5555) or 5555),
+                "local_port": int(getattr(self.state, "network_local_port", 5556) or 5556),
+            })
+        except Exception as exc:
+            print(f"[Net] role save failed: {exc}")
         if hasattr(self, "cb_role") and self.cb_role.winfo_exists():
             try:
                 self.cb_role.set(self._display_role_name(normalized))
@@ -2633,9 +2652,12 @@ class AppView:
         network_thread = getattr(self, "network_thread", None)
         if network_thread is not None:
             try:
-                network_thread.server_ip = server_ip
-            except Exception:
-                pass
+                network_thread.request_reconfigure(
+                    role=getattr(self.state, "network_role", self.state.role),
+                    server_ip=server_ip,
+                )
+            except Exception as exc:
+                print(f"[Net] server_ip reconfigure failed: {exc}")
         try:
             save_network_config({
                 "role": getattr(self.state, "network_role", self.state.role),

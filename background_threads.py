@@ -63,6 +63,7 @@ from enum import Enum, auto
 # 而ㅻ꼸 ?대옒???꾪룷??
 from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
 from config_utils import choose_preferred_local_ipv4, get_local_ipv4_candidates, load_network_config
+from support_runtime_rules import is_hub_network_role, normalize_network_role
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
@@ -149,12 +150,12 @@ class NetworkThread(threading.Thread):
         super().__init__(daemon=True)
         self.state = state
         self.cfg = dict(network_cfg or load_network_config())
-        self.role = str(self.cfg.get('role', getattr(state, 'network_role', '도사')) or '도사').strip()
+        self.role = normalize_network_role(self.cfg.get('role', getattr(state, 'network_role', '도사1')))
         self.server_ip = str(self.cfg.get('server_ip', getattr(state, 'network_server_ip', '192.168.137.1')) or '192.168.137.1')
         self.bind_host = str(self.cfg.get('bind_host', getattr(state, 'network_bind_host', '0.0.0.0')) or '0.0.0.0')
         self.telemetry_port = int(self.cfg.get('telemetry_port', getattr(state, 'network_telemetry_port', 5555)) or 5555)
         self.local_port = int(self.cfg.get('local_port', getattr(state, 'network_local_port', 5556)) or 5556)
-        self.is_server = self.role in {'도사', '도사1', 'Priest', 'Priest1 (Hub)'}
+        self.is_server = is_hub_network_role(self.role)
         self.sock: Optional[pysocket.socket] = None
         self._peers: dict[tuple[str, int], dict] = {}
         self._last_send = 0.0
@@ -162,6 +163,7 @@ class NetworkThread(threading.Thread):
         self._warned_connreset = False
         self._warned_server_ip = False
         self._seen_rx_senders: set[str] = set()
+        self._reconfigure_requested = threading.Event()
         self.send_interval = 0.05
         self.broadcast_interval = 0.05
         self.on_connection_change = on_connection_change  # 연결 상태 변경 시 호출할 콜백
@@ -171,6 +173,44 @@ class NetworkThread(threading.Thread):
         self.state.network_bind_host = self.bind_host
         self.state.network_telemetry_port = self.telemetry_port
         self.state.network_local_port = self.local_port
+
+    def request_reconfigure(self, role: Optional[str] = None, server_ip: Optional[str] = None) -> None:
+        """Apply GUI network settings on the network thread's next loop iteration."""
+        next_role = normalize_network_role(role or self.role)
+        next_server_ip = str(server_ip or self.server_ip).strip() or self.server_ip
+        changed = next_role != self.role or next_server_ip != self.server_ip
+        self.role = next_role
+        self.server_ip = next_server_ip
+        self.is_server = is_hub_network_role(next_role)
+        self.state.network_role = next_role
+        self.state.network_server_ip = next_server_ip
+        if changed:
+            self._reconfigure_requested.set()
+
+    def _bind_socket(self) -> None:
+        if self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+        self.sock = self._make_socket()
+        self._peers.clear()
+        self._seen_rx_senders.clear()
+        if self.is_server:
+            self.sock.bind((self.bind_host, self.telemetry_port))
+            print(f'[Net] UDP hub connected: {self.bind_host}:{self.telemetry_port} (role={self.role})')
+            preferred_ip = choose_preferred_local_ipv4()
+            candidates = get_local_ipv4_candidates()
+            if preferred_ip:
+                print(f"[Net] Dosa PC recommended server_ip: {preferred_ip}")
+            if candidates:
+                print(f"[Net] Dosa PC IPv4 candidates: {', '.join(candidates)}")
+        else:
+            self.sock.bind((self.bind_host, self.local_port))
+            print(f'[Net] UDP client connected: {self.bind_host}:{self.local_port} -> {self.server_ip}:{self.telemetry_port} (role={self.role})')
+            if not self._is_reachable_host_ip(self.server_ip) and not self._warned_server_ip:
+                print(f"[Net] WARNING: server_ip={self.server_ip} looks unusable.")
+                self._warned_server_ip = True
 
     def _make_socket(self) -> pysocket.socket:
         sock = pysocket.socket(pysocket.AF_INET, pysocket.SOCK_DGRAM)
@@ -285,33 +325,15 @@ class NetworkThread(threading.Thread):
 
     def run(self):
         try:
-            self.sock = self._make_socket()
-            if self.is_server:
-                self.sock.bind((self.bind_host, self.telemetry_port))
-                print(f'[Net] UDP hub connected: {self.bind_host}:{self.telemetry_port} (role={self.role})')
-                preferred_ip = choose_preferred_local_ipv4()
-                candidates = get_local_ipv4_candidates()
-                if preferred_ip:
-                    print(f"[Net] Dosa PC recommended server_ip: {preferred_ip}")
-                    print("[Net] Set warrior/sulsa PC network.server_ip to this value.")
-                if candidates:
-                    print(f"[Net] Dosa PC IPv4 candidates: {', '.join(candidates)}")
-                else:
-                    print("[Net] WARNING: no usable local IPv4 found. Run ipconfig and check the active adapter.")
-            else:
-                self.sock.bind((self.bind_host, self.local_port))
-                print(f'[Net] UDP client connected: {self.bind_host}:{self.local_port} -> {self.server_ip}:{self.telemetry_port} (role={self.role})')
-                if not self._is_reachable_host_ip(self.server_ip) and not self._warned_server_ip:
-                    print(
-                        f"[Net] WARNING: server_ip={self.server_ip} looks unusable. "
-                        "Set it to the dosa PC's active IPv4 address on the network you are actually using."
-                    )
-                    self._warned_server_ip = True
+            self._bind_socket()
             self.state.is_connected = True
             if self.on_connection_change:
                 self.on_connection_change(True)
 
             while self.state.running:
+                if self._reconfigure_requested.is_set():
+                    self._reconfigure_requested.clear()
+                    self._bind_socket()
                 now = time.time()
                 try:
                     self._drain_event_outbox()

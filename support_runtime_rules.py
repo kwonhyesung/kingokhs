@@ -3,6 +3,34 @@ SELF_MP_PRIORITY_THRESHOLD = 50000
 ZERO_HP_CONFIRMATIONS_REQUIRED = 2
 
 
+NETWORK_ROLE_ALIASES = {
+    "priest": "도사1",
+    "priest1 (hub)": "도사1",
+    "priest1": "도사1",
+    "priest2": "도사2",
+    "warrior": "격수",
+    "shaman": "술사",
+    "도사": "도사1",
+    "도사1": "도사1",
+    "도사2": "도사2",
+    "격수": "격수",
+    "술사": "술사",
+}
+
+
+def normalize_network_role(role: object, default: str = "도사1") -> str:
+    value = str(role or "").strip()
+    return NETWORK_ROLE_ALIASES.get(value.lower(), value or default)
+
+
+def is_hub_network_role(role: object) -> bool:
+    return normalize_network_role(role) == "도사1"
+
+
+def is_support_role(role: object) -> bool:
+    return normalize_network_role(role) in {"도사1", "도사2"}
+
+
 def should_accept_hotkey_press(last_pressed_at: float, now: float, debounce_sec: float = 0.20) -> bool:
     return float(now) - float(last_pressed_at or 0.0) >= max(0.0, float(debounce_sec))
 

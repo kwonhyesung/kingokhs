@@ -35,9 +35,25 @@ from support_runtime_rules import (
     should_trigger_self_hp_emergency,
     should_accept_hotkey_press,
     classify_map_sync,
+    is_hub_network_role,
+    is_support_role,
+    normalize_network_role,
     speed_up_delay,
 )
 from bis_core import GameState
+
+
+def test_network_role_normalization_keeps_priest2_as_udp_client():
+    assert normalize_network_role("Priest1 (Hub)") == "도사1"
+    assert normalize_network_role("Priest2") == "도사2"
+    assert is_hub_network_role("도사1") is True
+    assert is_hub_network_role("도사2") is False
+
+
+def test_both_priests_are_support_roles_for_warrior_follow_and_service():
+    assert is_support_role("도사1") is True
+    assert is_support_role("도사2") is True
+    assert is_support_role("격수") is False
 
 
 def test_follow_hold_position_allows_one_tile_axis_error():
