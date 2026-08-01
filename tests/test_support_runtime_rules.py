@@ -31,6 +31,7 @@ from support_runtime_rules import (
     should_prioritize_self_mp,
     should_prioritize_self_mp_over_party_heal,
     should_retarget_after_support_follow_stuck,
+    should_run_periodic_refresh,
     should_detect_warrior_transition,
     should_prioritize_follow_distance,
     should_trigger_self_hp_emergency,
@@ -63,6 +64,12 @@ def test_peer_connection_status_is_fixed_by_last_received_time():
     assert classify_peer_connection(9.4, now=10.0) == "CONNECTED"
     assert classify_peer_connection(7.0, now=10.0) == "STALE"
     assert classify_peer_connection(4.0, now=10.0) == "DISCONNECTED"
+
+
+def test_network_panel_refresh_runs_independently_on_its_interval():
+    assert should_run_periodic_refresh(0.0, now=1.0, interval_sec=0.25) is True
+    assert should_run_periodic_refresh(1.0, now=1.10, interval_sec=0.25) is False
+    assert should_run_periodic_refresh(1.0, now=1.25, interval_sec=0.25) is True
 
 
 def test_client_relay_refreshes_peer_received_time_without_echoing_stale_cache():

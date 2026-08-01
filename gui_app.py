@@ -67,7 +67,11 @@ from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
 from patrol_routes import inject_patrol_points, load_patrol_points_csv, parse_route_point
-from support_runtime_rules import classify_peer_connection, should_accept_hotkey_press
+from support_runtime_rules import (
+    classify_peer_connection,
+    should_accept_hotkey_press,
+    should_run_periodic_refresh,
+)
 
 # 怨좏빐?곷룄(65?몄튂 ?? 紐⑤땲???명솚?깆쓣 ?꾪븳 DPI ?몄떇 ?쒖꽦??
 try:
@@ -112,6 +116,8 @@ class AppView:
         self.frame_count = 0  # ???? ??????????????????
         self._paused_control_mode = "NONE"
         self._last_pause_toggle_at = 0.0
+        self._last_network_panel_refresh_at = 0.0
+        self._last_network_panel_error_at = 0.0
         self.tab_enabled = {
             "dash": True,
             "nav": True,
@@ -136,6 +142,7 @@ class AppView:
         self.create_widgets()
         self.bind_global_zoom_controls()
         self.update_fast_labels()
+        self.update_network_panel()
         self.update_slow_ui()
         self.auto_connect_hardware()
 
@@ -2970,6 +2977,27 @@ class AppView:
 
         for role_name in ("도사1", "도사2", "격수", "술사"):
             self._refresh_role_card(role_name)
+
+    def update_network_panel(self):
+        """Keep network cards updating even if another dashboard label fails."""
+        try:
+            if not self.root.winfo_exists():
+                return
+            now = time.monotonic()
+            if should_run_periodic_refresh(self._last_network_panel_refresh_at, now, interval_sec=0.25):
+                self._last_network_panel_refresh_at = now
+                self._refresh_dosa_network_panel()
+        except Exception as exc:
+            now = time.monotonic()
+            if now - float(self._last_network_panel_error_at or 0.0) >= 2.0:
+                print(f"[NetGUI] card refresh error: {exc}")
+                self._last_network_panel_error_at = now
+        finally:
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(250, self.update_network_panel)
+            except tk.TclError:
+                pass
 
     def _current_control_mode_label(self) -> str:
         if getattr(self.state, "automation_paused", False):

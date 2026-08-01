@@ -47,6 +47,10 @@ def classify_peer_connection(
     return "DISCONNECTED"
 
 
+def should_run_periodic_refresh(last_run_at: float, now: float, interval_sec: float = 0.25) -> bool:
+    return float(now) - float(last_run_at or 0.0) >= max(0.0, float(interval_sec))
+
+
 def should_accept_hotkey_press(last_pressed_at: float, now: float, debounce_sec: float = 0.20) -> bool:
     return float(now) - float(last_pressed_at or 0.0) >= max(0.0, float(debounce_sec))
 
