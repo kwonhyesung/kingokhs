@@ -328,6 +328,7 @@ class GameState:
     
     # GUI 업데이트 큐 (비동기 통신용)
     gui_update_queue: 'queue.Queue' = field(default_factory=lambda: queue.Queue(maxsize=1), init=False, repr=False)
+    hotkey_event_queue: 'queue.Queue' = field(default_factory=lambda: queue.Queue(maxsize=32), init=False, repr=False)
     
     # 스킬 관리
     spells: List['Skill'] = field(default_factory=list)

@@ -40,6 +40,7 @@ from support_runtime_rules import (
     classify_map_sync,
     classify_peer_connection,
     is_hub_network_role,
+    enqueue_hotkey_callback,
     is_peer_role_conflict,
     is_support_role,
     normalize_network_role,
@@ -111,6 +112,17 @@ def test_priest2_f2_watchdog_restores_follow_service_mode():
 
     assert logic._restore_dosa_service_if_follow_autohunt() is True
     assert state.service_active is True
+
+
+def test_global_hotkey_queues_callback_without_calling_tk_from_hook_thread():
+    state = GameState()
+    callback = lambda: None
+
+    assert enqueue_hotkey_callback(state.hotkey_event_queue, "TEST", callback) is True
+
+    hotkey_name, queued_callback = state.hotkey_event_queue.get_nowait()
+    assert hotkey_name == "TEST"
+    assert queued_callback is callback
 
 
 def test_both_priests_are_support_roles_for_warrior_follow_and_service():

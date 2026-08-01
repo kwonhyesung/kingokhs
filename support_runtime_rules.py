@@ -1,3 +1,14 @@
+import queue
+
+
+def enqueue_hotkey_callback(event_queue: object, hotkey_name: str, callback: object) -> bool:
+    try:
+        event_queue.put_nowait((str(hotkey_name or ""), callback))
+        return True
+    except (AttributeError, queue.Full):
+        return False
+
+
 SELF_HP_EMERGENCY_THRESHOLD = 50000
 SELF_MP_PRIORITY_THRESHOLD = 50000
 ZERO_HP_CONFIRMATIONS_REQUIRED = 2

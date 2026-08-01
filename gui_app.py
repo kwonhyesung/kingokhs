@@ -143,6 +143,7 @@ class AppView:
         self.create_widgets()
         self.bind_global_zoom_controls()
         self.update_fast_labels()
+        self.process_hotkey_events()
         self.update_network_panel()
         self.update_slow_ui()
         self.auto_connect_hardware()
@@ -3006,6 +3007,26 @@ class AppView:
             try:
                 if self.root.winfo_exists():
                     self.root.after(250, self.update_network_panel)
+            except tk.TclError:
+                pass
+
+    def process_hotkey_events(self):
+        try:
+            event_queue = getattr(self.state, "hotkey_event_queue", None)
+            while event_queue is not None:
+                try:
+                    hotkey_name, callback = event_queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    callback()
+                except Exception as exc:
+                    print(f"[Hotkey] {hotkey_name} callback error: {exc}")
+                    traceback.print_exc()
+        finally:
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(20, self.process_hotkey_events)
             except tk.TclError:
                 pass
 

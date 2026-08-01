@@ -67,7 +67,7 @@ from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_slee
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
-from support_runtime_rules import resolve_runtime_network_role
+from support_runtime_rules import enqueue_hotkey_callback, resolve_runtime_network_role
 
 # ?⑥쥚鍮?怨룸즲(65?紐꾪뒄 ?? 筌뤴뫀????紐낆넎?源놁뱽 ?袁る립 DPI ?紐꾨뻼 ??뽮쉐??
 try:
@@ -123,18 +123,9 @@ def _dispatch_gui_hotkey(gui_instance, hotkey_name: str, callback):
     HOTKEY_LAST_TRIGGER[hotkey_name] = now
     print(f"[Hotkey] {hotkey_name} pressed")
 
-    def _run_on_ui():
-        try:
-            callback()
-        except Exception as exc:
-            print(f"[Hotkey] {hotkey_name} callback error: {exc}")
-            traceback.print_exc()
-
-    try:
-        gui_instance.root.after(0, _run_on_ui)
-    except Exception as exc:
-        print(f"[Hotkey] {hotkey_name} schedule failed: {exc}")
-        traceback.print_exc()
+    event_queue = getattr(getattr(gui_instance, "state", None), "hotkey_event_queue", None)
+    if not enqueue_hotkey_callback(event_queue, hotkey_name, callback):
+        print(f"[Hotkey] {hotkey_name} queue full or unavailable")
 
 
 def _is_game_window_active(state) -> bool:
