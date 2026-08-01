@@ -2798,6 +2798,14 @@ class AppView:
     def _format_rx_summary(self) -> str:
         active_role = self._effective_role_name(self.state.role)
         summary = []
+        if active_role != "도사1":
+            ack_status = classify_peer_connection(
+                float(getattr(self.state, "network_hub_ack_at", 0.0) or 0.0),
+                now=time.time(),
+            )
+            ack_age = max(0.0, time.time() - float(getattr(self.state, "network_hub_ack_at", 0.0) or 0.0))
+            ack_age_text = f" {ack_age:.1f}s" if ack_status != "DISCONNECTED" else ""
+            summary.append(f"HUB_ACK:{ack_status}{ack_age_text}")
         for role_name in ("도사1", "도사2", "격수", "술사"):
             if self._normalize_role_name(role_name) == active_role:
                 summary.append(f"{self._display_role_name(role_name)}:LOCAL")
@@ -2903,7 +2911,15 @@ class AppView:
             coord_text = f"{x_text} / {y_text}"
             hpmp_text = f"{hp_text} / {mp_text}"
             if str(snapshot.get("_role_kind") or "") == "LOCAL":
-                rx_text = "RX: LOCAL"
+                active_role = self._effective_role_name(self.state.role)
+                if active_role == "도사1":
+                    rx_text = "RX: LOCAL HUB"
+                else:
+                    ack_status = classify_peer_connection(
+                        float(getattr(self.state, "network_hub_ack_at", 0.0) or 0.0),
+                        now=time.time(),
+                    )
+                    rx_text = f"RX: LOCAL | HUB_ACK {ack_status}"
             else:
                 connection_status, age = self._peer_connection_state(snapshot)
                 source = str(snapshot.get("_relayed_by") or "DIRECT")

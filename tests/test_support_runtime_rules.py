@@ -93,6 +93,28 @@ def test_client_relay_refreshes_peer_received_time_without_echoing_stale_cache()
     assert "WARRIOR-PC" not in hub_state.other_pc_data
 
 
+def test_new_network_session_accepts_sequence_reset_after_client_restart():
+    state = GameState()
+    first = {
+        "sender": "DOSA2-PC",
+        "session_id": "session-before-restart",
+        "seq": 1780,
+        "status": {"role": "도사2", "network_role": "도사2", "x": 10, "y": 10},
+    }
+    restarted = {
+        "sender": "DOSA2-PC",
+        "session_id": "session-after-restart",
+        "seq": 1,
+        "status": {"role": "도사2", "network_role": "도사2", "x": 20, "y": 20},
+    }
+
+    state.apply_remote_payload(first)
+    state.apply_remote_payload(restarted)
+
+    assert state.other_pc_data["DOSA2-PC"]["x"] == 20
+    assert state.remote_sequences["DOSA2-PC"] == 1
+
+
 def test_follow_hold_position_allows_one_tile_axis_error():
     assert should_hold_follow_position(10, 10, 10, 10) is True
     assert should_hold_follow_position(10, 10, 11, 10) is True

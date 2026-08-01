@@ -7,6 +7,7 @@ import json
 import csv
 import queue
 import re
+import uuid
 
 VERBOSE_STATE_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
 VERBOSE_HW_LOGS = os.environ.get("SVC_HW_LOGS", "0") == "1"
@@ -284,7 +285,11 @@ class GameState:
     network_telemetry_port: int = 5555
     network_local_port: int = 5556
     network_sequence: int = 0
+    network_session_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     remote_sequences: Dict[str, int] = field(default_factory=dict)
+    remote_sessions: Dict[str, str] = field(default_factory=dict)
+    network_hub_ack_at: float = 0.0
+    network_hub_ack_role: str = ""
     last_network_rx_ts: float = 0.0
     last_network_rx_sender: str = ""
     last_network_rx_role: str = ""
@@ -631,6 +636,7 @@ class GameState:
             self.network_sequence += 1
             status = {
                 "pc_id": self.pc_id,
+                "session_id": self.network_session_id,
                 "role": self.role or self.network_role,
                 "network_role": self.network_role or self.role,
                 "hp": self.hp,
@@ -682,6 +688,7 @@ class GameState:
             return {
                 "schema": "bis-state-v2",
                 "sender": self.network_peer_name,
+                "session_id": self.network_session_id,
                 "seq": self.network_sequence,
                 "sent_at": time.time(),
                 "status": status,
@@ -753,6 +760,7 @@ class GameState:
         if isinstance(payload, dict) and isinstance(payload.get("status"), dict):
             sender = str(payload.get("sender") or sender)
             snapshot = dict(payload.get("status") or {})
+            session_id = str(payload.get("session_id") or snapshot.get("session_id") or "").strip()
             snapshot["_sent_at"] = payload.get("sent_at")
             snapshot["_schema"] = payload.get("schema", "bis-state-v2")
             snapshot["_seq"] = payload.get("seq", 0)
@@ -769,8 +777,17 @@ class GameState:
                         relayed["_received_at"] = received_at
                         relayed["_relayed_by"] = sender
                         self.update_other(str(peer_name), relayed)
+            hub_ack = payload.get("hub_ack")
+            if isinstance(hub_ack, dict):
+                local_ack = hub_ack.get(self.network_peer_name)
+                if isinstance(local_ack, dict):
+                    self.network_hub_ack_at = time.time()
+                    self.network_hub_ack_role = str(local_ack.get("role") or "")
         elif isinstance(payload, dict):
             snapshot = dict(payload)
+            session_id = str(payload.get("session_id") or snapshot.get("session_id") or "").strip()
+        else:
+            session_id = ""
 
         seq = int(snapshot.get("_seq", payload.get("seq", 0) if isinstance(payload, dict) else 0) or 0)
         snapshot["_received_at"] = time.time()
@@ -781,9 +798,13 @@ class GameState:
         self.last_network_rx_seq = seq
         if seq:
             last_seq = int(self.remote_sequences.get(sender, 0) or 0)
-            if seq <= last_seq:
+            last_session_id = str(self.remote_sessions.get(sender) or "")
+            session_changed = bool(session_id and last_session_id and session_id != last_session_id)
+            if seq <= last_seq and not session_changed:
                 return sender, snapshot
             self.remote_sequences[sender] = seq
+            if session_id:
+                self.remote_sessions[sender] = session_id
         self.update_other(sender, snapshot)
         return sender, snapshot
 

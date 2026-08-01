@@ -264,6 +264,14 @@ class NetworkThread(threading.Thread):
         payload['role'] = self.role
         payload['sender_role'] = self.role
         payload['peer_count'] = len(self._peers)
+        payload['hub_ack'] = {
+            str(meta.get('sender') or ''): {
+                'role': str(meta.get('role') or ''),
+                'seen_at': float(meta.get('seen_at') or 0.0),
+            }
+            for meta in self._peers.values()
+            if str(meta.get('sender') or '')
+        }
         raw = self._encode_payload(payload)
         stale = []
         for addr in list(self._peers.keys()):
