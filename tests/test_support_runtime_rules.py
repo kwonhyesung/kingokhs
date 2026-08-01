@@ -47,6 +47,7 @@ from support_runtime_rules import (
     speed_up_delay,
 )
 from bis_core import BisHardware, GameState
+from bis_logic import LogicSvc
 
 
 def test_network_role_normalization_keeps_priest2_as_udp_client():
@@ -95,6 +96,20 @@ def test_software_input_backend_translates_force_key_command(monkeypatch):
     controller.send_force("K,3")
 
     assert events == [("press", "3"), ("release", "3")]
+
+
+def test_priest2_f2_watchdog_restores_follow_service_mode():
+    state = GameState()
+    state.role = "도사2"
+    state.network_role = "도사2"
+    state.auto_hunt = True
+    state.nav_follow_enabled = True
+    state.service_active = False
+
+    logic = LogicSvc(state)
+
+    assert logic._restore_dosa_service_if_follow_autohunt() is True
+    assert state.service_active is True
 
 
 def test_both_priests_are_support_roles_for_warrior_follow_and_service():

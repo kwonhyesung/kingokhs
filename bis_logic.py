@@ -2639,7 +2639,7 @@ class LogicSvc(threading.Thread):
         return not should_hold_follow_position(follow_x, follow_y, current_x, current_y)
 
     def _repair_dosa_f2_runtime_state(self):
-        if self.state.role not in ("도사", "도사1") or not bool(getattr(self.state, "service_active", False)):
+        if not is_support_role(getattr(self.state, "network_role", "") or self.state.role) or not bool(getattr(self.state, "service_active", False)):
             return
 
         changed = []
@@ -2672,7 +2672,7 @@ class LogicSvc(threading.Thread):
                 self._last_dosa_f2_watchdog_log_time = now
 
     def _restore_dosa_service_if_follow_autohunt(self) -> bool:
-        if self.state.role not in ("도사", "도사1"):
+        if not is_support_role(getattr(self.state, "network_role", "") or self.state.role):
             return False
         if bool(getattr(self.state, "service_active", False)):
             return True
@@ -4941,7 +4941,7 @@ class RouteSvc(threading.Thread):
         return not should_hold_follow_position(follow_x, follow_y, current_x, current_y)
 
     def _repair_dosa_f2_runtime_state(self):
-        if self.state.role not in ("도사", "도사1") or not bool(getattr(self.state, "service_active", False)):
+        if not is_support_role(getattr(self.state, "network_role", "") or self.state.role) or not bool(getattr(self.state, "service_active", False)):
             return
 
         changed = []
@@ -4974,7 +4974,7 @@ class RouteSvc(threading.Thread):
                 self._last_dosa_f2_watchdog_log_time = now
 
     def _restore_dosa_service_if_follow_autohunt(self) -> bool:
-        if self.state.role not in ("도사", "도사1"):
+        if not is_support_role(getattr(self.state, "network_role", "") or self.state.role):
             return False
         if bool(getattr(self.state, "service_active", False)):
             return True

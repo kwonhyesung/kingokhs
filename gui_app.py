@@ -3608,10 +3608,11 @@ class AppView:
             # [HARDWARE] ?꾨몢?대끂 ?곌껐 ?곹깭 ?쒖떆 (?곕???異쒕젰?쇰줈 ?泥?
             try:
                 global hw
-                if hw.ser and hw.ser.is_open:
-                    hw_status = "READY"
-                else:
-                    hw_status = "DISCONNECTED"
+                hw_status = hw.get_input_backend()
+                if hasattr(self, "lbl_hw_status") and self.lbl_hw_status.winfo_exists():
+                    status_text = "[Input] HW ESP32" if hw_status == "HW" else "[Input] SW"
+                    status_color = "#10B981" if hw_status == "HW" else "#F59E0B"
+                    self.lbl_hw_status.configure(text=status_text, text_color=status_color)
                 
                 if hw_status != self.last_values.get('hw_status'):
                     print(f"[Hardware] Status: {hw_status}")

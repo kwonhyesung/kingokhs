@@ -950,12 +950,16 @@ class BisHardware:
         self._auto_reconnect_enabled = True
         self._last_connect_attempt = 0
         self._preferred_port = None
+        self._last_announced_input_backend = None
+        self._software_input_event_logged = False
+        self._software_input_failure_logged = False
 
     def set_state(self, state: GameState):
         """게임 상태 설정"""
         self.state = state
         if not (self.ser and self.ser.is_open):
             self.auto_reconnect()
+        self.announce_input_backend()
 
     def is_hardware_ready(self) -> bool:
         return bool(self.ser and self.ser.is_open)
@@ -965,6 +969,14 @@ class BisHardware:
 
     def is_input_ready(self) -> bool:
         return self.is_hardware_ready() or software_keyboard is not None
+
+    def announce_input_backend(self) -> str:
+        backend = self.get_input_backend()
+        if backend != self._last_announced_input_backend:
+            detail = "ESP32" if backend == "HW" else "keyboard"
+            print(f"[Input] backend={backend} ({detail})")
+            self._last_announced_input_backend = backend
+        return backend
 
     @staticmethod
     def _software_release_all() -> None:
@@ -977,6 +989,7 @@ class BisHardware:
                 pass
 
     def _send_software(self, cmd: str) -> None:
+        self.announce_input_backend()
         if software_keyboard is None:
             _hw_log(f"[Software] input unavailable: {cmd}")
             return
@@ -995,7 +1008,14 @@ class BisHardware:
                 software_keyboard.release(key)
             else:
                 _hw_log(f"[Software] unsupported command: {command}")
+                return
+            if not self._software_input_event_logged:
+                print(f"[Input] SW first command sent: {command}")
+                self._software_input_event_logged = True
         except Exception as exc:
+            if not self._software_input_failure_logged:
+                print(f"[Input] SW command failed: {command} - {exc}")
+                self._software_input_failure_logged = True
             _hw_log(f"[Software] input failed: {command} - {exc}")
 
     def _list_candidate_ports(self):
