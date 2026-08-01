@@ -85,7 +85,7 @@ LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
 LOG_FILE_STR = os.path.join(SCRIPT_DIR, "game_log_str.csv")
 
 DEFAULT_NETWORK_CONFIG = {
-    "role": "?꾩궗",
+    "role": "도사1",
     "server_ip": "192.168.137.1",
     "bind_host": "0.0.0.0",
     "telemetry_port": 5555,
@@ -93,25 +93,96 @@ DEFAULT_NETWORK_CONFIG = {
 }
 
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+LOCAL_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".system_parallel_sota.local.json")
+LEGACY_LOCAL_CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.local.json")
 GUI_STATE_FILE = os.path.join(SCRIPT_DIR, "gui_state.json")
 TEMPLATE_DIGIT_DIR = os.path.join(SCRIPT_DIR, "temple", "digits")
+
+def _load_json_file(path: str) -> dict:
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _save_json_file(path: str, data: dict) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 def load_network_config() -> dict:
     cfg = dict(DEFAULT_NETWORK_CONFIG)
     try:
-        if os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+        base_data = _load_json_file(CONFIG_FILE)
+        legacy_data = _load_json_file(LEGACY_LOCAL_CONFIG_FILE)
+        user_data = _load_json_file(LOCAL_CONFIG_FILE)
+        merged_network = {}
+        for data in (base_data, legacy_data, user_data):
             net = data.get("network", {})
             if isinstance(net, dict):
-                cfg["role"] = str(net.get("role", cfg["role"]) or cfg["role"])
-                cfg["server_ip"] = str(net.get("server_ip", cfg["server_ip"]) or cfg["server_ip"])
-                cfg["bind_host"] = str(net.get("bind_host", cfg["bind_host"]) or cfg["bind_host"])
-                cfg["telemetry_port"] = int(net.get("telemetry_port", cfg["telemetry_port"]) or cfg["telemetry_port"])
-                cfg["local_port"] = int(net.get("local_port", cfg["local_port"]) or cfg["local_port"])
+                merged_network.update(net)
+        cfg["role"] = str(merged_network.get("role", cfg["role"]) or cfg["role"])
+        cfg["server_ip"] = str(merged_network.get("server_ip", cfg["server_ip"]) or cfg["server_ip"])
+        cfg["bind_host"] = str(merged_network.get("bind_host", cfg["bind_host"]) or cfg["bind_host"])
+        cfg["telemetry_port"] = int(merged_network.get("telemetry_port", cfg["telemetry_port"]) or cfg["telemetry_port"])
+        cfg["local_port"] = int(merged_network.get("local_port", cfg["local_port"]) or cfg["local_port"])
     except Exception as e:
         print(f"[Net] config load failed: {e}")
     return cfg
+
+def save_network_config(network_updates: dict) -> None:
+    try:
+        data = _load_json_file(LOCAL_CONFIG_FILE) or _load_json_file(CONFIG_FILE)
+        network = data.get("network", {})
+        if not isinstance(network, dict):
+            network = {}
+        for key, value in dict(network_updates or {}).items():
+            if value is not None:
+                network[key] = value
+        data["network"] = network
+        _save_json_file(LOCAL_CONFIG_FILE, data)
+    except Exception as e:
+        print(f"[Net] config save failed: {e}")
+
+def get_local_ipv4_candidates() -> list[str]:
+    """Return usable local IPv4 candidates for other PCs to connect to."""
+    candidates: list[str] = []
+
+    def add_ip(value: str) -> None:
+        try:
+            ip = ipaddress.ip_address(str(value).strip())
+        except ValueError:
+            return
+        if ip.version != 4:
+            return
+        if ip.is_loopback or ip.is_unspecified or ip.is_link_local:
+            return
+        text = str(ip)
+        if text not in candidates:
+            candidates.append(text)
+
+    # First entry: the address Windows would use for the default route.
+    try:
+        with pysocket.socket(pysocket.AF_INET, pysocket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            add_ip(sock.getsockname()[0])
+    except Exception:
+        pass
+
+    try:
+        hostname = pysocket.gethostname()
+        for info in pysocket.getaddrinfo(hostname, None, pysocket.AF_INET):
+            add_ip(info[4][0])
+    except Exception:
+        pass
+
+    return candidates
+
+def choose_preferred_local_ipv4() -> str:
+    candidates = get_local_ipv4_candidates()
+    return candidates[0] if candidates else ""
 
 def dict_to_region(data: dict) -> Region:
     """Docstring."""

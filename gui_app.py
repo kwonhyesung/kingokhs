@@ -67,6 +67,7 @@ from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
 from patrol_routes import inject_patrol_points, load_patrol_points_csv, parse_route_point
+from support_runtime_rules import should_accept_hotkey_press
 
 # 怨좏빐?곷룄(65?몄튂 ?? 紐⑤땲???명솚?깆쓣 ?꾪븳 DPI ?몄떇 ?쒖꽦??
 try:
@@ -99,6 +100,7 @@ class AppView:
     def __init__(self, state: GameState, hwnd=None):
         self.state = state
         self.hwnd = hwnd
+        self.network_thread = None
         self.root = ctk.CTk()
         # GameState??gui_update_queue ?ъ슜 (以묐났 ???쒓굅)
         self.waypoint_index = 0  # ?쒖감???대룞???몃뜳??
@@ -106,6 +108,15 @@ class AppView:
         self.ui_scale_step = 0.05
         self.ui_scale_min = 0.5
         self.ui_scale_max = 2.0
+        self.last_values = {}  # Dirty Checking???????
+        self.frame_count = 0  # ???? ??????????????????
+        self._paused_control_mode = "NONE"
+        self._last_pause_toggle_at = 0.0
+        self.tab_enabled = {
+            "dash": True,
+            "nav": True,
+            "spells": True
+        }
         self.root.title("SYSTEM PARALLEL SOTA v2.0")
         
         # ?고듃 癒쇱? ?좎뼵 (Ultra-Compact ?붿옄?? 9pt)
@@ -124,24 +135,8 @@ class AppView:
         
         self.create_widgets()
         self.bind_global_zoom_controls()
-        self.last_values = {}  # Dirty Checking??罹먯떆
-        self.frame_count = 0  # ?깅뒫 痢≪젙???꾨젅??移댁슫??
-        self._paused_control_mode = "NONE"
-        
-        # Tab蹂??뚮뜑留??ㅼ쐞移?(由ъ냼??愿由?
-        self.tab_enabled = {
-            "dash": True,   # ?レ옄 ?쇰꺼 ?낅뜲?댄듃
-            "nav": True,    # ?ㅻ퉬寃뚯씠???곹깭
-            "spells": True # 스킬 설정
-        }
-        
-        # 스킬 설정 관련 변수
-        self.spell_entries = []
-        self.spell_vars = {}
         self.update_fast_labels()
         self.update_slow_ui()
-        
-        # ?꾨몢?대끂 ?먮룞 ?곌껐 ?쒕룄
         self.auto_connect_hardware()
 
     def restore_gui_state(self):
@@ -225,11 +220,22 @@ class AppView:
         self.lbl_gui_res = ctk.CTkLabel(row2, text="UI:-", font=("Inter", 8), text_color="#A855F7", width=50)
         self.lbl_gui_res.pack(side="left", padx=1)
         ctk.CTkLabel(row2, text="R", font=("Inter", 9), width=15).pack(side="left", padx=1)
-        self.cb_role = ctk.CTkComboBox(row2, values=["Warrior", "Priest", "Shaman"], height=22, width=82, font=("Inter", 9), command=self.set_role)
+        self.cb_role = ctk.CTkComboBox(row2, values=["Priest1 (Hub)", "Priest2", "Warrior", "Shaman"], height=22, width=105, font=("Inter", 9), command=self.set_role)
         self.cb_role.pack(side="left", padx=1)
-        self.cb_role.set(self._display_role_name(self.state.role))
+        self.cb_role.set(self._display_role_name(self._effective_role_name(self.state.role)))
         self.btn_sentinel = ctk.CTkButton(row2, text="SNT", height=22, width=40, font=("Inter", 9), command=self.toggle_sentinel)
         self.btn_sentinel.pack(side="left", padx=1)
+
+        row_net = ctk.CTkFrame(top_actions, fg_color="transparent")
+        row_net.pack(fill="x", pady=1)
+        ctk.CTkLabel(row_net, text="HUB IPv4", font=("Inter", 8, "bold"), width=60).pack(side="left", padx=1)
+        self.lbl_local_ipv4 = ctk.CTkLabel(row_net, text="-", font=("Inter", 8), text_color="#93C5FD", width=160, anchor="w")
+        self.lbl_local_ipv4.pack(side="left", padx=1)
+        ctk.CTkLabel(row_net, text="SERVER", font=("Inter", 8, "bold"), width=50).pack(side="left", padx=(8, 1))
+        self.ent_server_ip = ctk.CTkEntry(row_net, width=110, font=("Inter", 9))
+        self.ent_server_ip.pack(side="left", padx=1)
+        self.btn_server_ip_apply = ctk.CTkButton(row_net, text="APPLY", height=22, width=50, font=("Inter", 9), command=self.apply_server_ip)
+        self.btn_server_ip_apply.pack(side="left", padx=1)
         
         # ??踰덉㎏ 以? OFFSET, ALPHA, GRID
         row3 = ctk.CTkFrame(top_actions, fg_color="transparent")
@@ -248,6 +254,8 @@ class AppView:
         self.slider_alpha.pack(side="left", padx=1)
         self.lbl_char_grid = ctk.CTkLabel(row3, text="G:-", font=("Inter", 8), text_color="#00D4FF", width=80)
         self.lbl_char_grid.pack(side="left", padx=1)
+
+        self.refresh_network_ip_widgets(force=True)
         
         # OCR Threshold ?щ씪?대뜑 ?쒓굅 (媛쒕퀎 ?꾧퀎媛?濡쒖쭅?쇰줈 ?泥?
         
@@ -278,57 +286,56 @@ class AppView:
         self.lbl_xy = ctk.CTkLabel(g, text="-", font=("Inter", 9), width=220, anchor="w")
         self.lbl_xy.grid(row=2, column=1, columnspan=3, sticky="w", padx=1)
 
-        if self.state.role == "도사":
-            self.net_box = ctk.CTkFrame(self.c_dash, fg_color="#0B1220", corner_radius=6, border_width=1, border_color="#2563EB")
-            self.net_box.pack(fill="x", padx=1, pady=1)
+        self.net_box = ctk.CTkFrame(self.c_dash, fg_color="#0B1220", corner_radius=6, border_width=1, border_color="#2563EB")
+        self.net_box.pack(fill="x", padx=1, pady=1)
 
-            ctk.CTkLabel(self.net_box, text="NETWORK MONITOR", font=("Inter", 10, "bold"), text_color="#60A5FA").pack(pady=(3, 1))
-            self.lbl_rx_summary = ctk.CTkLabel(
-                self.net_box,
-                text="RX: -",
-                font=("Inter", 8, "bold"),
-                text_color="#93C5FD",
-                anchor="w",
-                justify="left"
-            )
-            self.lbl_rx_summary.pack(fill="x", padx=6, pady=(0, 3))
+        ctk.CTkLabel(self.net_box, text="NETWORK MONITOR", font=("Inter", 10, "bold"), text_color="#60A5FA").pack(pady=(3, 1))
+        self.lbl_rx_summary = ctk.CTkLabel(
+            self.net_box,
+            text="RX: -",
+            font=("Inter", 8, "bold"),
+            text_color="#93C5FD",
+            anchor="w",
+            justify="left"
+        )
+        self.lbl_rx_summary.pack(fill="x", padx=6, pady=(0, 3))
 
-            self.net_local_strip = ctk.CTkFrame(self.net_box, fg_color="#111827", corner_radius=4, border_width=1, border_color="#38BDF8")
-            self.net_local_strip.pack(fill="x", padx=6, pady=(0, 4))
-            ctk.CTkLabel(self.net_local_strip, text=f"[{self._display_role_name(self.state.role)}] LOCAL", font=("Inter", 8, "bold"), text_color="#38BDF8").pack(side="left", padx=(6, 4), pady=4)
-            self.lbl_local_status = ctk.CTkLabel(self.net_local_strip, text="-", font=("Inter", 8), anchor="w", justify="left")
-            self.lbl_local_status.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=4)
+        self.net_local_strip = ctk.CTkFrame(self.net_box, fg_color="#111827", corner_radius=4, border_width=1, border_color="#38BDF8")
+        self.net_local_strip.pack(fill="x", padx=6, pady=(0, 4))
+        ctk.CTkLabel(self.net_local_strip, text=f"[{self._display_role_name(self.state.role)}] LOCAL", font=("Inter", 8, "bold"), text_color="#38BDF8").pack(side="left", padx=(6, 4), pady=4)
+        self.lbl_local_status = ctk.CTkLabel(self.net_local_strip, text="-", font=("Inter", 8), anchor="w", justify="left")
+        self.lbl_local_status.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=4)
 
-            self.net_role_cards = {}
-            cards_row = ctk.CTkFrame(self.net_box, fg_color="transparent")
-            cards_row.pack(fill="x", padx=4, pady=(0, 4))
+        self.net_role_cards = {}
+        cards_row = ctk.CTkFrame(self.net_box, fg_color="transparent")
+        cards_row.pack(fill="x", padx=4, pady=(0, 4))
 
-            for role_name in ("격수", "술사"):
-                card = ctk.CTkFrame(cards_row, fg_color="#111827", corner_radius=8, border_width=2, border_color="#374151")
-                card.pack(side="left", fill="both", expand=True, padx=3)
+        for role_name in ("도사1", "도사2", "격수", "술사"):
+            card = ctk.CTkFrame(cards_row, fg_color="#111827", corner_radius=8, border_width=2, border_color="#374151")
+            card.pack(side="left", fill="both", expand=True, padx=3)
 
-                title_row = ctk.CTkFrame(card, fg_color="transparent")
-                title_row.pack(fill="x", padx=6, pady=(5, 2))
-                title_lbl = ctk.CTkLabel(title_row, text=self._display_role_name(role_name), font=("Inter", 10, "bold"), text_color="#E5E7EB")
-                title_lbl.pack(side="left")
-                status_lbl = ctk.CTkLabel(title_row, text="DISCONNECTED", font=("Inter", 8, "bold"), text_color="#F87171")
-                status_lbl.pack(side="right")
+            title_row = ctk.CTkFrame(card, fg_color="transparent")
+            title_row.pack(fill="x", padx=6, pady=(5, 2))
+            title_lbl = ctk.CTkLabel(title_row, text=self._display_role_name(role_name), font=("Inter", 10, "bold"), text_color="#E5E7EB")
+            title_lbl.pack(side="left")
+            status_lbl = ctk.CTkLabel(title_row, text="DISCONNECTED", font=("Inter", 8, "bold"), text_color="#F87171")
+            status_lbl.pack(side="right")
 
-                map_lbl = ctk.CTkLabel(card, text="MAP: -", font=("Inter", 10, "bold"), text_color="#93C5FD", anchor="w", justify="left")
-                map_lbl.pack(fill="x", padx=6, pady=(1, 1))
-                coord_lbl = ctk.CTkLabel(card, text="X/Y: -", font=("Inter", 11, "bold"), text_color="#FDE68A", anchor="w", justify="left")
-                coord_lbl.pack(fill="x", padx=6, pady=(0, 1))
-                hpmp_lbl = ctk.CTkLabel(card, text="HP/MP: -", font=("Inter", 9, "bold"), text_color="#A7F3D0", anchor="w", justify="left")
-                hpmp_lbl.pack(fill="x", padx=6, pady=(0, 5))
+            map_lbl = ctk.CTkLabel(card, text="MAP: -", font=("Inter", 10, "bold"), text_color="#93C5FD", anchor="w", justify="left")
+            map_lbl.pack(fill="x", padx=6, pady=(1, 1))
+            coord_lbl = ctk.CTkLabel(card, text="X/Y: -", font=("Inter", 11, "bold"), text_color="#FDE68A", anchor="w", justify="left")
+            coord_lbl.pack(fill="x", padx=6, pady=(0, 1))
+            hpmp_lbl = ctk.CTkLabel(card, text="HP/MP: -", font=("Inter", 9, "bold"), text_color="#A7F3D0", anchor="w", justify="left")
+            hpmp_lbl.pack(fill="x", padx=6, pady=(0, 5))
 
-                self.net_role_cards[role_name] = {
-                    "frame": card,
-                    "title": title_lbl,
-                    "status": status_lbl,
-                    "map": map_lbl,
-                    "coord": coord_lbl,
-                    "hpmp": hpmp_lbl,
-                }
+            self.net_role_cards[role_name] = {
+                "frame": card,
+                "title": title_lbl,
+                "status": status_lbl,
+                "map": map_lbl,
+                "coord": coord_lbl,
+                "hpmp": hpmp_lbl,
+            }
 
         # Navigation & Control Tab
         self.build_navigation_control()
@@ -2584,6 +2591,63 @@ class AppView:
                 pass
         self.show_toast(f"Role set to: {self._display_role_name(normalized)}")
 
+    def _get_local_ipv4_text(self) -> str:
+        try:
+            candidates = get_local_ipv4_candidates()
+            if not candidates:
+                return "-"
+            return ", ".join(candidates[:3])
+        except Exception:
+            return "-"
+
+    def refresh_network_ip_widgets(self, force: bool = False):
+        local_text = self._get_local_ipv4_text()
+        if hasattr(self, "lbl_local_ipv4") and self.lbl_local_ipv4.winfo_exists():
+            if force or local_text != self.last_values.get("local_ipv4_text"):
+                self.lbl_local_ipv4.configure(text=local_text)
+                self.last_values["local_ipv4_text"] = local_text
+
+        server_ip = str(getattr(self.state, "network_server_ip", "") or "").strip()
+        if hasattr(self, "ent_server_ip") and self.ent_server_ip.winfo_exists():
+            if force or server_ip != self.last_values.get("server_ip_text"):
+                try:
+                    self.ent_server_ip.delete(0, "end")
+                    self.ent_server_ip.insert(0, server_ip)
+                except Exception:
+                    pass
+                self.last_values["server_ip_text"] = server_ip
+
+    def apply_server_ip(self):
+        if not hasattr(self, "ent_server_ip") or not self.ent_server_ip.winfo_exists():
+            return
+        server_ip = str(self.ent_server_ip.get() or "").strip()
+        try:
+            ip_obj = ipaddress.ip_address(server_ip)
+            if ip_obj.version != 4 or ip_obj.is_unspecified:
+                raise ValueError("invalid ipv4")
+        except Exception:
+            self.show_toast("IPv4 형식이 올바르지 않습니다", "#FF5555")
+            return
+
+        self.state.network_server_ip = server_ip
+        network_thread = getattr(self, "network_thread", None)
+        if network_thread is not None:
+            try:
+                network_thread.server_ip = server_ip
+            except Exception:
+                pass
+        try:
+            save_network_config({
+                "role": getattr(self.state, "network_role", self.state.role),
+                "server_ip": server_ip,
+                "bind_host": getattr(self.state, "network_bind_host", "0.0.0.0"),
+                "telemetry_port": int(getattr(self.state, "network_telemetry_port", 5555) or 5555),
+                "local_port": int(getattr(self.state, "network_local_port", 5556) or 5556),
+            })
+        except Exception as exc:
+            print(f"[Net] failed to save server_ip: {exc}")
+        self.show_toast(f"SERVER IP: {server_ip}")
+
     def toggle_sentinel(self):
         """Docstring."""
         self.state.sentinel_enabled = not self.state.sentinel_enabled
@@ -2687,13 +2751,16 @@ class AppView:
     def _get_peer_snapshot_by_role(self, role_name: str) -> Optional[dict]:
         best = None
         best_ts = -1.0
+        target_role = self._normalize_role_name(role_name)
         for _sender, data in getattr(self.state, "other_pc_data", {}).items():
             if not isinstance(data, dict):
                 continue
-            remote_role = str(data.get("role") or data.get("network_role") or "").strip()
-            if remote_role != role_name:
+            remote_role = self._normalize_role_name(str(data.get("role") or data.get("network_role") or "").strip())
+            if remote_role != target_role:
                 continue
             rx_ts = float(data.get("_received_at") or 0.0)
+            if rx_ts and (time.time() - rx_ts) > 1.5:
+                continue
             if rx_ts >= best_ts:
                 best = dict(data)
                 best_ts = rx_ts
@@ -2716,7 +2783,7 @@ class AppView:
         return f"RX sender={sender} seq={seq} role={role} kind={kind} map=- x=- y=-"
 
     def _get_role_snapshot(self, role_name: str) -> Optional[dict]:
-        if role_name == self.state.role:
+        if self._normalize_role_name(role_name) == self._normalize_role_name(str(getattr(self.state, "role", "") or "")):
             data = self.state.get_all()
             data["_role_kind"] = "LOCAL"
             data["_fresh"] = True
@@ -2746,9 +2813,13 @@ class AppView:
 
     def _display_role_name(self, role_name: str) -> str:
         role_map = {
-            "도사": "Priest",
+            "도사": "Priest1 (Hub)",
+            "도사1": "Priest1 (Hub)",
+            "도사2": "Priest2",
             "격수": "Warrior",
             "술사": "Shaman",
+            "Priest1 (Hub)": "Priest1 (Hub)",
+            "Priest2": "Priest2",
             "Priest": "Priest",
             "Warrior": "Warrior",
             "Shaman": "Shaman",
@@ -2757,14 +2828,27 @@ class AppView:
 
     def _normalize_role_name(self, role_name: str) -> str:
         role_map = {
-            "Priest": "도사",
+            "Priest": "도사1",
+            "Priest1 (Hub)": "도사1",
+            "Priest2": "도사2",
             "Warrior": "격수",
             "Shaman": "술사",
-            "도사": "도사",
+            "도사": "도사1",
+            "도사1": "도사1",
+            "도사2": "도사2",
             "격수": "격수",
             "술사": "술사",
         }
-        return role_map.get(str(role_name).strip(), str(role_name).strip() or "도사")
+        return role_map.get(str(role_name).strip(), str(role_name).strip() or "도사1")
+
+    def _effective_role_name(self, role_name: Optional[str] = None) -> str:
+        candidate = str(role_name or "").strip()
+        if not candidate or candidate == "기본":
+            candidate = str(getattr(self.state, "network_role", "") or "").strip()
+        if not candidate or candidate == "기본":
+            candidate = str(getattr(self.state, "role", "") or "").strip()
+        normalized = self._normalize_role_name(candidate)
+        return normalized if normalized and normalized != "기본" else "도사1"
 
     def _refresh_role_card(self, role_name: str):
         card = getattr(self, "net_role_cards", {}).get(role_name)
@@ -2796,8 +2880,7 @@ class AppView:
         card["hpmp"].configure(text=f"HP/MP: {hpmp_text}")
 
     def _refresh_dosa_network_panel(self):
-        if self.state.role != "도사":
-            return
+        active_role = self._effective_role_name(self.state.role)
         if not hasattr(self, "net_box") or not self.net_box.winfo_exists():
             return
 
@@ -2806,8 +2889,8 @@ class AppView:
             self.lbl_rx_summary.configure(text=rx_text)
             self.last_values["net_rx_text"] = rx_text
 
-        local_snapshot = self._get_role_snapshot(self.state.role)
-        local_border, local_color, local_status = self._role_style(self.state.role, local_snapshot)
+        local_snapshot = self._get_role_snapshot(active_role)
+        local_border, local_color, local_status = self._role_style(active_role, local_snapshot)
         if hasattr(self, "net_local_strip") and self.net_local_strip.winfo_exists():
             try:
                 self.net_local_strip.configure(border_color=local_border)
@@ -2818,12 +2901,21 @@ class AppView:
             map_text = self._format_map_text(local_snapshot)
             x_text, y_text = self._format_coord_text(local_snapshot)
             hp_text, mp_text = self._format_hp_mp_text(local_snapshot)
-            local_text = f"{local_status} | map={map_text} | x={x_text} y={y_text} | hp={hp_text} mp={mp_text}"
+            remote_maps = []
+            for role_name in ("도사1", "도사2", "격수", "술사"):
+                peer = self._get_role_snapshot(role_name)
+                if peer is None:
+                    continue
+                peer_map = self._format_map_text(peer)
+                if peer_map and peer_map != map_text:
+                    remote_maps.append(f"{self._display_role_name(role_name)}:{peer_map}")
+            map_sync_text = "ALL SAME" if not remote_maps else "DIFF " + ", ".join(remote_maps)
+            local_text = f"{local_status} | map={map_text} | sync={map_sync_text} | x={x_text} y={y_text} | hp={hp_text} mp={mp_text}"
         if local_text != self.last_values.get("net_local_text"):
             self.lbl_local_status.configure(text=local_text, text_color=local_color)
             self.last_values["net_local_text"] = local_text
 
-        for role_name in ("격수", "술사"):
+        for role_name in ("도사1", "도사2", "격수", "술사"):
             self._refresh_role_card(role_name)
 
     def _current_control_mode_label(self) -> str:
@@ -2870,7 +2962,7 @@ class AppView:
                 if hasattr(self, "lbl_nav_status") and self.lbl_nav_status.winfo_exists():
                     self.lbl_nav_status.configure(text=f"MODE: {mode_label}")
 
-                if getattr(self.state, "role", "") == "도사":
+                if getattr(self.state, "role", "") in ("도사", "도사1"):
                     self._refresh_dosa_network_panel()
             except Exception as exc:
                 print(f"[GUI] control mode sync error: {exc}")
@@ -2932,7 +3024,7 @@ class AppView:
         self.state.combat_start_time = 0.0
         # F2(FOLLOW+SERVICE)에서만 도사 혼(디버프) 루프를 활성화한다.
         self.state.f2_service_debuff_enabled = bool(
-            control_mode == "FOLLOW+SERVICE" and role == "도사"
+            control_mode == "FOLLOW+SERVICE" and role in ("도사", "도사1")
         )
         if role == "술사":
             if control_mode == "FOLLOW+SERVICE":
@@ -2954,7 +3046,7 @@ class AppView:
         action_thread = getattr(self, 'action_thread', None)
         if action_thread is not None:
             action_thread.task_active = service_enabled
-            if service_enabled and getattr(self.state, "role", "") == "도사":
+            if service_enabled and getattr(self.state, "role", "") in ("도사", "도사1"):
                 prepare = getattr(action_thread, "request_initial_direct_heal_target_prepare", None)
                 if callable(prepare):
                     prepare()
@@ -2991,6 +3083,15 @@ class AppView:
         self._toggle_control_mode("SERVICE", "Service Only")
 
     def toggle_pause_resume(self):
+        now = time.monotonic()
+        if not should_accept_hotkey_press(
+            getattr(self, "_last_pause_toggle_at", 0.0),
+            now,
+            debounce_sec=0.20,
+        ):
+            print("[Hotkey] F3 duplicate ignored")
+            return
+        self._last_pause_toggle_at = now
         if getattr(self.state, "automation_paused", False):
             resume_mode = getattr(self, "_paused_control_mode", "NONE") or "NONE"
             self._paused_control_mode = "NONE"
@@ -3347,8 +3448,9 @@ class AppView:
             # 네트워크 상태 표시
             is_connected = getattr(state, "is_connected", False)
             net_status = "연결됨" if is_connected else "연결 끊김"
-            
-            if self.state.role == "도사" and getattr(state, "last_network_rx_sender", ""):
+
+            if self._effective_role_name(self.state.role) in ("도사", "도사1") and getattr(state, "last_network_rx_sender", ""):
+
                 net_status = f"연결됨 (격수PC: {state.last_network_rx_sender})"
             
             # 연결 상태 변경 시 즉시 UI 업데이트
@@ -3403,6 +3505,7 @@ class AppView:
 
         try:
             # [NAV] ?ㅻ퉬寃뚯씠???곹깭 ?쒖떆
+            self.refresh_network_ip_widgets()
             if self.tab_enabled.get("nav", True):
                 try:
                     nav_status = self._current_control_mode_label()

@@ -23,6 +23,7 @@ from typing import Optional
 
 import win32gui
 from svc_stealth import HumanBehaviorSimulator
+from support_runtime_rules import dir_between_coords, is_plausible_transition_coord, normalize_move_dir
 
 # ============================================================
 # ① TIMING_CONFIG  ─  시스템 딜레이 제어 테이블 (config.json에서 로드)
@@ -239,9 +240,16 @@ class GameState:
     money_str: str = ""
     x_str: str = ""
     y_str: str = ""
+    map_info_text: str = ""
     map_name: str = ""
     map_floor: str = ""
     current_floor: str = ""
+    map_info_signature: str = ""
+    map_info_fingerprint: str = ""
+    map_info_change_seq: int = 0
+    map_info_changed_at: float = 0.0
+    map_info_changed: bool = False
+    map_sync_status: str = "pending"
     red_tab_enabled: bool = False
     red_tab_promotion_active: bool = False
     red_tab_promotion_until: float = 0.0
@@ -250,7 +258,9 @@ class GameState:
     portal_follow_started_at: float = 0.0
     portal_follow_finished_at: float = 0.0
     portal_follow_coord: Optional[Tuple[int, int]] = None
+    portal_follow_approach: Optional[Tuple[int, int]] = None
     portal_follow_dir: Optional[str] = None
+    portal_session_cache: Dict[Tuple[str, str, str, str], Dict[str, Any]] = field(default_factory=dict, repr=False)
     sulsa_attack_enabled: bool = False
     sulsa_debuff_enabled: bool = False
     sulsa_debuff_standalone: bool = False
@@ -373,6 +383,7 @@ class GameState:
     f1_route_active: bool = False
     
     # 네트워크 관리
+    pc_id: str = field(default_factory=lambda: os.environ.get("COMPUTERNAME", "LOCAL"))
     is_connected: bool = False
     other_pc_data: Dict[str, Any] = field(default_factory=dict)
     network_peer_name: str = field(default_factory=lambda: os.environ.get("COMPUTERNAME", "LOCAL"))
@@ -417,6 +428,10 @@ class GameState:
     safe_zone_detected: bool = False
     sentinel_enabled: bool = False
     last_move_dir: Optional[str] = None
+    last_coord_transition_seq: int = 0
+    last_coord_transition: Optional[Dict[str, Any]] = None
+    _share_last_coord: Optional[Tuple[int, int]] = field(default=None, init=False, repr=False)
+    _share_last_map_sig: Optional[Tuple[str, str, str]] = field(default=None, init=False, repr=False)
     is_stuck: bool = False
     char_grid: Tuple[int, int] = (0, 0)
     maps_db: Dict[str, Any] = field(default_factory=dict)
@@ -559,7 +574,10 @@ class GameState:
     def get_all(self) -> dict:
         with self._lock:
             self._refresh_support_request_flags_unlocked()
+            coord_transition = self._update_coord_transition_unlocked()
             return {
+                "pc_id": self.pc_id,
+                "role": self.role,
                 "hp": self.hp, "mp": self.mp,
                 "exp": self.exp, "money": self.money,
                 "x": self.x, "y": self.y,
@@ -567,10 +585,17 @@ class GameState:
                 "hp_str": self.hp_str, "mp_str": self.mp_str,
                 "exp_str": self.exp_str, "money_str": self.money_str,
                 "x_str": self.x_str, "y_str": self.y_str,
+                "map_info_text": self.map_info_text,
                 "map_name": self.map_name,
                 "map_floor": self.map_floor,
                 "current_map": self.current_map,
                 "current_floor": self.current_floor,
+                "map_info_signature": self.map_info_signature,
+                "map_info_fingerprint": self.map_info_fingerprint,
+                "map_info_change_seq": self.map_info_change_seq,
+                "map_info_changed_at": self.map_info_changed_at,
+                "map_info_changed": self.map_info_changed,
+                "map_sync_status": self.map_sync_status,
                 "red_tab_enabled": self.red_tab_enabled,
                 "target_info_text": self.target_info_text,
                 "user_info_text": self.user_info_text,
@@ -585,6 +610,8 @@ class GameState:
                 "network_role": self.network_role,
                 "target_locked": self.target_locked,
                 "last_move_dir": self.last_move_dir,
+                "coord_transition": coord_transition,
+                "coord_transition_seq": self.last_coord_transition_seq,
                 "nav_follow_enabled": self.nav_follow_enabled,
                 "nav_route_enabled": self.nav_route_enabled,
                 "nav_avoid_enabled": self.nav_avoid_enabled,
@@ -600,8 +627,12 @@ class GameState:
         """
         with self._lock:
             self._refresh_support_request_flags_unlocked()
+            coord_transition = self._update_coord_transition_unlocked()
             self.network_sequence += 1
             status = {
+                "pc_id": self.pc_id,
+                "role": self.role or self.network_role,
+                "network_role": self.network_role or self.role,
                 "hp": self.hp,
                 "mp": self.mp,
                 "exp": self.exp,
@@ -614,10 +645,17 @@ class GameState:
                 "exp_str": self.exp_str,
                 "x_str": self.x_str,
                 "y_str": self.y_str,
+                "map_info_text": self.map_info_text,
                 "map_name": self.map_name,
                 "map_floor": self.map_floor,
                 "current_map": self.current_map,
                 "current_floor": self.current_floor,
+                "map_info_signature": self.map_info_signature,
+                "map_info_fingerprint": self.map_info_fingerprint,
+                "map_info_change_seq": self.map_info_change_seq,
+                "map_info_changed_at": self.map_info_changed_at,
+                "map_info_changed": self.map_info_changed,
+                "map_sync_status": self.map_sync_status,
                 "red_tab_enabled": self.red_tab_enabled,
                 "target_info_text": self.target_info_text,
                 "user_info_text": self.user_info_text,
@@ -629,9 +667,9 @@ class GameState:
                 "follow_anchor_offset": self.follow_anchor_offset,
                 "safe_spot": self.safe_spot,
                 "battle_spot": self.battle_spot,
-                "network_role": self.network_role,
-                # Existing follow logic still needs these fields.
                 "last_move_dir": self.last_move_dir,
+                "coord_transition": coord_transition,
+                "coord_transition_seq": self.last_coord_transition_seq,
                 "nav_follow_enabled": self.nav_follow_enabled,
                 "nav_route_enabled": self.nav_route_enabled,
                 "nav_avoid_enabled": self.nav_avoid_enabled,
@@ -639,6 +677,7 @@ class GameState:
                 "automation_paused": self.automation_paused,
                 "control_mode": self.control_mode,
                 "target_locked": self.target_locked,
+                "ts": time.time(),
             }
             return {
                 "schema": "bis-state-v2",
@@ -652,6 +691,53 @@ class GameState:
                     if isinstance(data, dict)
                 },
             }
+
+    def _update_coord_transition_unlocked(self) -> Optional[Dict[str, Any]]:
+        """좌표 급변 기반 맵 이동 신호를 만든다. 맵명 OCR 성공 여부에 의존하지 않는다."""
+        try:
+            cur = (int(self.x), int(self.y))
+        except Exception:
+            return self.last_coord_transition
+
+        map_sig = (
+            str(self.map_name or ""),
+            str(self.map_floor or ""),
+            str(self.current_map or ""),
+        )
+        prev = self._share_last_coord
+        prev_map_sig = self._share_last_map_sig
+        cur_ok = is_plausible_transition_coord(cur[0], cur[1])
+        prev_ok = bool(prev and is_plausible_transition_coord(prev[0], prev[1]))
+        if cur_ok:
+            if prev_ok:
+                gap = abs(cur[0] - prev[0]) + abs(cur[1] - prev[1])
+                map_changed = bool(prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+                edge_shift = gap == 1 and ((cur[0] == 0) ^ (cur[1] == 0))
+                if gap >= 4 or map_changed or edge_shift:
+                    input_dir = normalize_move_dir(self.last_move_dir)
+                    delta_dir = dir_between_coords(prev[0], prev[1], cur[0], cur[1])
+                    self.last_coord_transition_seq += 1
+                    self.last_coord_transition = {
+                        "seq": self.last_coord_transition_seq,
+                        "from": [prev[0], prev[1]],
+                        "to": [cur[0], cur[1]],
+                        "gap": gap,
+                        "dir": input_dir or delta_dir,
+                        "input_dir": input_dir,
+                        "delta_dir": delta_dir,
+                        "map_changed": map_changed,
+                        "map_sig": list(map_sig),
+                        "ts": time.time(),
+                    }
+            self._share_last_coord = cur
+            self._share_last_map_sig = map_sig
+        if isinstance(self.last_coord_transition, dict):
+            try:
+                if time.time() - float(self.last_coord_transition.get("ts", 0.0) or 0.0) <= 5.0:
+                    return self.last_coord_transition
+            except Exception:
+                pass
+        return None
 
     def apply_remote_payload(self, payload: dict) -> tuple[str, dict]:
         """
@@ -690,24 +776,70 @@ class GameState:
         self.update_other(sender, snapshot)
         return sender, snapshot
 
-    def get_remote_data(self, preferred_name: str = "LAPTOP") -> Optional[dict]:
-        """원격 상태 조회. preferred가 없으면 첫 peer를 반환한다."""
+    def get_remote_data(self, preferred_name: str = "LAPTOP", max_age_sec: float = 1.25) -> Optional[dict]:
+        """최신 원격 수신 데이터를 가져온다."""
         with self._lock:
+            now = time.time()
+            freshness_limit = max(0.0, float(max_age_sec or 0.0))
             if preferred_name and preferred_name in self.other_pc_data:
-                return dict(self.other_pc_data[preferred_name])
+                candidate = self.other_pc_data[preferred_name]
+                if isinstance(candidate, dict) and (now - float(candidate.get("_received_at") or 0.0)) <= freshness_limit:
+                    return dict(candidate)
+            best = None
+            best_ts = -1.0
             for _name, data in self.other_pc_data.items():
-                return dict(data)
+                if not isinstance(data, dict):
+                    continue
+                received_at = float(data.get("_received_at") or 0.0)
+                if (now - received_at) > freshness_limit:
+                    continue
+                if received_at >= best_ts:
+                    best = dict(data)
+                    best_ts = received_at
+            if best is not None:
+                return best
         return None
 
-    def get_remote_data_by_role(self, role: str) -> Optional[dict]:
+    def get_remote_data_by_role(self, role: str, max_age_sec: float = 1.25) -> Optional[dict]:
         with self._lock:
+            now = time.time()
+            freshness_limit = max(0.0, float(max_age_sec or 0.0))
+            target_role = str(role or "").strip()
+            role_map = {
+                "Priest": "도사1",
+                "Priest1 (Hub)": "도사1",
+                "Priest2": "도사2",
+                "Warrior": "격수",
+                "Shaman": "술사",
+                "도사": "도사1",
+                "도사1": "도사1",
+                "도사2": "도사2",
+                "격수": "격수",
+                "술사": "술사",
+            }
+            target_role = role_map.get(target_role, target_role)
+            best = None
+            best_ts = -1.0
             for _name, data in self.other_pc_data.items():
                 if not isinstance(data, dict):
                     continue
                 remote_role = str(data.get("role") or data.get("network_role") or "").strip()
-                if remote_role == role:
-                    return dict(data)
-        return self.get_remote_data()
+                remote_role = role_map.get(remote_role, remote_role)
+                remote_role = role_map.get(remote_role, remote_role)
+                if remote_role == target_role or (target_role == "도사1" and remote_role in ("도사", "도사1")):
+                    received_at = float(data.get("_received_at") or 0.0)
+                    if (now - received_at) > freshness_limit:
+                        continue
+                    if received_at >= best_ts:
+                        best = dict(data)
+                        best_ts = received_at
+            if best is not None:
+                return best
+        return None
+
+    def get_fresh_remote_data_by_role(self, role: str, max_age_sec: float = 1.25) -> Optional[dict]:
+        """????? ??? ???? ???? role ??."""
+        return self.get_remote_data_by_role(role, max_age_sec=max_age_sec)
 
     def queue_network_event(self, event_type: str, payload: Optional[dict] = None, repeat: int = 1) -> bool:
         """UDP ??? ?? ???? ???."""
@@ -1009,17 +1141,18 @@ class BisHardware:
         self.send("U:all")
 
     def hold_move(self, direction: str, hold_key: str = "move_hold",
-                  variance: float = 0.15, duration: float = None):
+                  variance: float = 0.15, duration: float = None, force: bool = False):
         # HumanBehaviorSimulator로 이동 동작 간 휴식 시간 시뮬레이션
-        pause = HumanBehaviorSimulator.simulate_pause('move')
-        time.sleep(pause)
+        if not force:
+            pause = HumanBehaviorSimulator.simulate_pause('move')
+            time.sleep(pause)
 
-        if self.state is not None:
+        if self.state is not None and not force:
             support_blocked = time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
             if support_blocked or bool(getattr(self.state, "is_combat_busy", False)):
                 return
         
-        _hw_log(f"[Move] 방향키: {direction}")
+        _hw_log(f"[Move] 방향키: {direction}{' (force)' if force else ''}")
         try:
             self.send_force(f"D:{direction}")
             if duration is not None:

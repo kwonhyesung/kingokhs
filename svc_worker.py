@@ -258,10 +258,12 @@ def main(
 
     global action_thread, reader_thread
     state = GameState()
-    if preset_role:
-        state.role = preset_role
-    if preset_network_role is None:
-        preset_network_role = preset_role
+    role_arg = os.environ.get("ROLE", "").strip() or preset_role
+    net_role_arg = os.environ.get("NETWORK_ROLE", "").strip() or preset_network_role or role_arg
+    if role_arg:
+        state.role = role_arg
+    if net_role_arg:
+        state.network_role = net_role_arg
     if preset_auto_hunt is not None:
         state.auto_hunt = bool(preset_auto_hunt)
         state.service_active = bool(preset_auto_hunt)
@@ -286,6 +288,8 @@ def main(
     state.network_bind_host = network_cfg.get("bind_host", state.network_bind_host)
     state.network_telemetry_port = int(network_cfg.get("telemetry_port", state.network_telemetry_port))
     state.network_local_port = int(network_cfg.get("local_port", state.network_local_port))
+    if not role_arg and (not state.role or str(state.role).strip() == "기본"):
+        state.role = state.network_role or state.role
 
     spell_db_file = os.path.join(SCRIPT_DIR, "spells_config.json")
 
@@ -531,6 +535,7 @@ def main(
     # GUI ??쎈뻬
     gui.action_thread = action_thread
     gui.reader_thread = reader_thread
+    gui.network_thread = network
     gui.run()
 
     print("[Stop] System closed.")

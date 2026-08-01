@@ -50,13 +50,23 @@ from support_runtime_rules import (
     SELF_MP_PRIORITY_THRESHOLD,
     ZERO_HP_CONFIRMATIONS_REQUIRED,
     build_warrior_search_sequence,
+    dir_between_coords,
     follow_manhattan_gap,
+    infer_dir_from_trail,
     is_confirmed_zero_hp_state,
+    is_plausible_map_coord,
     next_zero_hp_count,
+    normalize_move_dir,
+    opposite_move_dir,
+    offset_coord_by_dir,
+    pick_portal_enter_dir,
+    resolve_portal_follow_cells,
     should_allow_follow_navigation,
     should_allow_party_support_cast,
+    should_attempt_portal_enter,
     should_block_party_heal,
     should_cast_periodic_heewon,
+    classify_map_sync,
     should_continue_self_hp_recovery,
     should_defer_stuck_escape_for_support,
     should_hold_follow_gap,
@@ -69,6 +79,8 @@ from support_runtime_rules import (
     should_prioritize_follow_distance,
     should_trigger_self_hp_emergency,
     speed_up_delay,
+    WARRIOR_TRANSITION_JUMP_DISTANCE,
+    is_plausible_transition_coord,
 )
 
 
@@ -235,7 +247,12 @@ class LogicSvc(threading.Thread):
         self._periodic_support_min_mp = 50000
         self._service_last_warrior_coord: tuple[int, int] | None = None
         self._service_last_warrior_dir: str | None = None
+        self._service_last_warrior_step_dir: str | None = None
         self._service_last_warrior_map_sig: tuple[str, str, str, str] | None = None
+        self._service_warrior_trail: list[tuple[int, int, str | None]] = []
+        self._service_last_map_info_change_seq = 0
+        self._service_last_coord_transition_seq = 0
+        self._service_portal_session_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
         self._last_portal_immediate_clear_time = 0.0
         self._portal_support_pause_until = 0.0
         self._sulsa_hellfire_interval = 10.5
@@ -448,12 +465,11 @@ class LogicSvc(threading.Thread):
         return bool(getattr(self.state, "mp_trig_active", False))
 
     def _get_support_target_data(self) -> dict | None:
-        """도사가 지원해야 할 대상(아군)의 스냅샷 정보 반환 (가능하면)"""
-        # 1순위: role='격수'로 명시된 원격 데이터 사용
-        remote = self.state.get_remote_data_by_role("격수")
-        # 2순위: role 무관, other_pc_data에서 첫 번째 정보 사용
+        """도사가 지원해야 할 대상(아군)의 스냅샷 정보 반환 (격수 데이터 최우선)"""
+        # role='격수'로 명시되고 freshness 조건(1.5초 이내)을 만족하는 원격 데이터만 사용
+        remote = self.state.get_fresh_remote_data_by_role("격수")
         if not remote:
-            remote = self.state.get_remote_data()
+            return None
         
         # 격수 데이터 수신 여부 확인 및 로깅
         if remote and isinstance(remote, dict):
@@ -865,8 +881,13 @@ class LogicSvc(threading.Thread):
                     return True
                 if after_hp > 0 and after_hp <= good_hp:
                     self._mp_follow_self_heal_until = time.time() + 3.0
-                    self._cast_self_hp_micro_follow_tick()
-                    print("[Recovery] post-MP self HP micro recovery requested. Follow remains active.")
+                    self._set_support_input_block(0.65)
+                    self._release_movement_keys_only()
+                    red_tab_reacquired = self._reacquire_warrior_red_tab_after_emergency()
+                    if not red_tab_reacquired:
+                        self._cast_self_hp_micro_follow_tick()
+                        self.request_initial_direct_heal_target_prepare()
+                    print("[Recovery] post-MP self HP recovery re-synced. Follow remains active.")
                     return True
             if self.state.role != "도사" or not bool(getattr(self.state, "service_active", False)):
                 return True
@@ -1351,7 +1372,7 @@ class LogicSvc(threading.Thread):
             self._restore_follow_after_action(previous_follow)
 
     def _get_latest_warrior_snapshot(self) -> dict | None:
-        remote = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
+        remote = self.state.get_fresh_remote_data_by_role("격수")
         return remote if isinstance(remote, dict) and remote else None
 
     def _confirm_party_heal_by_hp_gain(self, before_hp: int, timeout: float = 0.65) -> tuple[bool, int]:
@@ -1397,7 +1418,7 @@ class LogicSvc(threading.Thread):
 
     def _is_dosa_f2_follow_service(self) -> bool:
         return (
-            self.state.role == "도사"
+            self.state.role in ("도사", "도사1")
             and bool(getattr(self.state, "service_active", False))
             and bool(getattr(self.state, "nav_follow_enabled", False))
             and bool(getattr(self.state, "auto_hunt", False))
@@ -2525,8 +2546,9 @@ class LogicSvc(threading.Thread):
                 self.state.sentinel_enabled = True
 
             # ?? 0?쒖쐞: Emergency (鍮꾩긽 ?곹솴) ?????????????????????
-            support_target = self._get_support_target_data() if self.state.role == "도사" else None
-            if self.state.role == "도사" and self._run_dosa_service_cycle(support_target):
+            is_dosa_role = self.state.role in ("도사", "도사1")
+            support_target = self._get_support_target_data() if is_dosa_role else None
+            if is_dosa_role and self._run_dosa_service_cycle(support_target):
                 continue
             if self.state.role == "술사" and self._run_sulsa_service_cycle():
                 continue
@@ -2589,7 +2611,7 @@ class LogicSvc(threading.Thread):
         if not bool(getattr(self.state, "nav_follow_enabled", False)):
             return False
 
-        remote_data = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
+        remote_data = self.state.get_fresh_remote_data_by_role("격수")
         if not isinstance(remote_data, dict):
             return False
 
@@ -2598,16 +2620,8 @@ class LogicSvc(threading.Thread):
         if abs(target_x) > 300 or abs(target_y) > 300:
             return False
 
-        dps_dir = str(remote_data.get("last_move_dir", "") or "").strip().lower()
-        behind_offset = {
-            "up": (0, 1),
-            "down": (0, -1),
-            "left": (1, 0),
-            "right": (-1, 0),
-        }.get(dps_dir, (0, 0))
-
-        follow_x = target_x + behind_offset[0]
-        follow_y = target_y + behind_offset[1]
+        follow_x = target_x
+        follow_y = target_y
         current_x = int(getattr(self.state, "x", 0) or 0)
         current_y = int(getattr(self.state, "y", 0) or 0)
         follow_x, follow_y = adjust_follow_target_by_axis_gap(
@@ -2619,11 +2633,10 @@ class LogicSvc(threading.Thread):
             target_y,
             min_axis_gap=1,
         )
-        gap = follow_manhattan_gap(follow_x, follow_y, current_x, current_y)
-        return not self._should_hold_follow_at_gap(gap)
+        return not should_hold_follow_position(follow_x, follow_y, current_x, current_y)
 
     def _repair_dosa_f2_runtime_state(self):
-        if self.state.role != "도사" or not bool(getattr(self.state, "service_active", False)):
+        if self.state.role not in ("도사", "도사1") or not bool(getattr(self.state, "service_active", False)):
             return
 
         changed = []
@@ -2656,7 +2669,7 @@ class LogicSvc(threading.Thread):
                 self._last_dosa_f2_watchdog_log_time = now
 
     def _restore_dosa_service_if_follow_autohunt(self) -> bool:
-        if self.state.role != "도사":
+        if self.state.role not in ("도사", "도사1"):
             return False
         if bool(getattr(self.state, "service_active", False)):
             return True
@@ -2713,28 +2726,103 @@ class LogicSvc(threading.Thread):
             cur_y = int(support_target.get("y", support_target.get("pos_y", 0)) or 0)
         except Exception:
             return False
-        if abs(cur_x) > 300 or abs(cur_y) > 300:
-            return False
 
         prev = self._service_last_warrior_coord
-        dps_dir = str(support_target.get("last_move_dir", "") or "").strip().lower()
+        prev_dir = normalize_move_dir(self._service_last_warrior_dir)
+        prev_step = normalize_move_dir(self._service_last_warrior_step_dir)
+        dps_dir = normalize_move_dir(support_target.get("last_move_dir", ""))
         map_sig = (
             str(support_target.get("map_name", "") or ""),
             str(support_target.get("map_floor", "") or ""),
             str(support_target.get("current_map", "") or ""),
             str(support_target.get("current_floor", "") or ""),
         )
+        map_info_change_seq = int(support_target.get("map_info_change_seq", 0) or 0)
+        map_info_changed = map_info_change_seq > int(self._service_last_map_info_change_seq or 0)
+        if map_info_changed:
+            self._service_last_map_info_change_seq = map_info_change_seq
         prev_map_sig = self._service_last_warrior_map_sig
-        self._service_last_warrior_coord = (cur_x, cur_y)
-        self._service_last_warrior_map_sig = map_sig
-        if dps_dir in ("up", "down", "left", "right"):
-            self._service_last_warrior_dir = dps_dir
+        cur_ok = is_plausible_map_coord(cur_x, cur_y)
+        event_prev = None
+        event_dir = None
+        event_seq = 0
+        event_age = None
+        event_data = support_target.get("coord_transition")
+        if isinstance(event_data, dict):
+            try:
+                event_seq = int(event_data.get("seq", 0) or support_target.get("coord_transition_seq", 0) or 0)
+                event_ts = float(event_data.get("ts", 0.0) or 0.0)
+                if event_ts > 0.0:
+                    event_age = max(0.0, time.time() - event_ts)
+                event_from = event_data.get("from") or []
+                event_x = int(event_from[0])
+                event_y = int(event_from[1])
+                if (
+                    event_seq > int(self._service_last_coord_transition_seq or 0)
+                    and is_plausible_transition_coord(event_x, event_y)
+                    and (event_age is None or event_age <= 0.75)
+                ):
+                    event_prev = (event_x, event_y)
+                    event_dir = normalize_move_dir(event_data.get("dir") or event_data.get("input_dir"))
+                    self._service_last_coord_transition_seq = event_seq
+            except Exception:
+                event_prev = None
+                event_dir = None
+                event_age = None
 
-        if not prev:
+        # Already following a portal: keep tracking only, never overwrite target mid-run.
+        if bool(getattr(self.state, "portal_follow_active", False)):
+            if cur_ok:
+                if prev and (prev[0], prev[1]) != (cur_x, cur_y):
+                    step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
+                    if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1 and step:
+                        self._service_last_warrior_step_dir = step
+                    self._service_warrior_trail.append((prev[0], prev[1], prev_step or prev_dir))
+                    if len(self._service_warrior_trail) > 12:
+                        self._service_warrior_trail = self._service_warrior_trail[-12:]
+                self._service_last_warrior_coord = (cur_x, cur_y)
+                self._service_last_warrior_map_sig = map_sig
+                if dps_dir:
+                    self._service_last_warrior_dir = dps_dir
             return False
-        map_changed = bool(prev_map_sig and map_sig != prev_map_sig)
-        coord_jumped = should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=12)
-        if not (coord_jumped or map_changed):
+
+        map_changed = bool(prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+        cur_ok = (
+            is_plausible_map_coord(cur_x, cur_y)
+            or (event_prev is not None and is_plausible_transition_coord(cur_x, cur_y))
+            or (map_changed and is_plausible_transition_coord(cur_x, cur_y))
+        )
+        coord_jumped = bool(
+            prev
+            and is_plausible_map_coord(prev[0], prev[1])
+            and cur_ok
+            and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
+        )
+        transition_prev = event_prev or prev
+        transition = bool(event_prev) or (
+            bool(prev)
+            and is_plausible_map_coord(prev[0], prev[1])
+            and (coord_jumped or map_changed or map_info_changed)
+        )
+
+        if prev and cur_ok and (prev[0], prev[1]) != (cur_x, cur_y):
+            step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
+            if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1 and step:
+                self._service_last_warrior_step_dir = step
+            self._service_warrior_trail.append((prev[0], prev[1], prev_step or prev_dir))
+            if len(self._service_warrior_trail) > 12:
+                self._service_warrior_trail = self._service_warrior_trail[-12:]
+
+        if cur_ok:
+            self._service_last_warrior_coord = (cur_x, cur_y)
+            self._service_last_warrior_map_sig = map_sig
+            if dps_dir:
+                self._service_last_warrior_dir = dps_dir
+        elif map_changed and prev:
+            # Map changed but new coords are junk — still allow transition using prev.
+            self._service_last_warrior_map_sig = map_sig
+
+        if not transition:
             return False
 
         now = time.time()
@@ -2743,17 +2831,36 @@ class LogicSvc(threading.Thread):
         self._last_portal_immediate_clear_time = now
         self._portal_support_pause_until = now + 3.0
 
-        self.state.support_input_blocked_until = max(
-            float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
-            time.time() + 0.80,
-        )
-        self.state.red_tab_enabled = False
+        # Do NOT block movement keys — only pause party heal via portal_follow_active.
+        source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
+        cached_hint = {}
+        if isinstance(getattr(self.state, "portal_session_cache", None), dict):
+            cached_hint = dict(self.state.portal_session_cache.get(source_map_sig, {}) or {})
+        cached_dir = normalize_move_dir(cached_hint.get("enter_dir"))
+        enter_dir = event_dir or prev_step or getattr(self, "_service_last_warrior_step_dir", None) or cached_dir
+        if not enter_dir:
+            if cur_ok:
+                self._service_last_warrior_coord = (cur_x, cur_y)
+                self._service_last_warrior_map_sig = map_sig
+            print(
+                f"[PortalFollow] transition waiting for stable step dir: "
+                f"now=({cur_x}, {cur_y}) event_age={event_age if event_age is not None else '-'} "
+                f"map={prev_map_sig}->{map_sig}"
+            )
+            return False
+        warrior_last = (int(transition_prev[0]), int(transition_prev[1]))
+        portal_xy = offset_coord_by_dir(warrior_last[0], warrior_last[1], enter_dir)
         self.state.portal_follow_active = True
         self.state.portal_follow_retarget_requested = True
         self.state.portal_follow_started_at = time.time()
         self.state.portal_follow_finished_at = 0.0
-        self.state.portal_follow_coord = prev
-        self.state.portal_follow_dir = self._service_last_warrior_dir if self._service_last_warrior_dir in ("up", "down", "left", "right") else None
+        self.state.portal_follow_coord = warrior_last
+        self.state.portal_follow_approach = warrior_last
+        self.state.portal_follow_dir = enter_dir
+        try:
+            self.state.red_tab_enabled = False
+        except Exception:
+            pass
         self._party_direct_heal_target_prepared = False
         self._party_direct_heal_verified = False
         self._warrior_redtab_verified = False
@@ -2761,8 +2868,2312 @@ class LogicSvc(threading.Thread):
         self._force_portal_esc_clear()
         print(
             "[PortalFollow] immediate clear on warrior transition: "
-            f"prev={prev}, now=({cur_x}, {cur_y}), dir={self._service_last_warrior_dir or '-'}, "
-            f"coord_jump={coord_jumped}, map_changed={map_changed}, map={prev_map_sig}->{map_sig}"
+            f"warrior_last={warrior_last}, portal={portal_xy}, now=({cur_x}, {cur_y}), "
+            f"dir={enter_dir or '-'}, step_dir={prev_step or '-'}, "
+            f"coord_jump={coord_jumped}, map_changed={map_changed}, "
+            f"event_seq={event_seq or '-'}, map={prev_map_sig}->{map_sig}"
+        )
+        return True
+
+    def _run_dosa_service_cycle(self, support_target: dict | None) -> bool:
+        """
+        ?? ??? ?? ??.
+        ?? ??/?? ??? ?? ????, ?? ?? red_tab ?? ???? ????.
+        """
+        if not self._restore_dosa_service_if_follow_autohunt():
+            return False
+
+        self._repair_dosa_f2_runtime_state()
+
+        if not self._is_hw_ready():
+            try:
+                hw.auto_reconnect()
+            except Exception:
+                pass
+            now = time.time()
+            if now - self._last_hw_skip_log_time >= 2.0:
+                print("[Support] hardware not ready. Skip service loop.")
+                self._last_hw_skip_log_time = now
+            self._log_dosa_f2_idle_reason("hardware_not_ready")
+            self._pace_service_loop("idle")
+            return True
+
+        if self._handle_warrior_transition_immediate_clear(support_target):
+            self._pace_service_loop("active")
+            return True
+
+        if bool(getattr(self.state, "portal_follow_active", False)):
+            self._portal_support_pause_until = max(
+                float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0),
+                time.time() + 0.4,
+            )
+            self._invalidate_warrior_redtab_verification()
+            self._log_dosa_f2_idle_reason("portal_follow_active stop_party_heal", interval=0.4)
+            self._pace_service_loop("active")
+            return True
+
+        if isinstance(support_target, dict):
+            map_sync_status = classify_map_sync(self.state.get_all(), support_target, now=time.time())
+            self.state.map_sync_status = map_sync_status
+            if map_sync_status != "same":
+                self._invalidate_warrior_redtab_verification()
+                self._log_dosa_f2_idle_reason(
+                    f"map_sync_{map_sync_status}: defer_party_heal",
+                    interval=0.5,
+                )
+                self._pace_service_loop("active")
+                return True
+
+        if not self._restore_game_window_focus_for_support():
+            now = time.time()
+            if now - self._last_focus_skip_log_time >= 2.0:
+                print("[Support] game window inactive. Continue F2 with force hardware input.")
+                self._last_focus_skip_log_time = now
+            self._log_dosa_f2_idle_reason("game_window_inactive_force_input")
+
+        if self._handle_initial_direct_heal_prepare_request():
+            self._pace_service_loop("active")
+            return True
+
+        if self._handle_box_collision_reprepare_request():
+            self._pace_service_loop("active")
+            return True
+
+        if bool(getattr(self, "_warrior_debuff_active", False)):
+            self._pace_service_loop("active")
+            return True
+
+        if time.time() < float(getattr(self, "_post_debuff_follow_until", 0.0) or 0.0):
+            self._pace_service_loop("active")
+            return True
+        if bool(getattr(self, "_post_debuff_recover_prepare_pending", False)):
+            self._post_debuff_recover_prepare_pending = False
+            self.request_initial_direct_heal_target_prepare()
+            self._pace_service_loop("active")
+            return True
+
+        if self._update_zero_hp_state():
+            self._handle_zero_hp_recovery()
+            self._pace_service_loop("active")
+            return True
+
+        if int(getattr(self.state, "hp", 0) or 0) <= 0:
+            self.state.last_self_buff_time = 0.0
+            self.state.last_self_gg_cast_time = 0.0
+
+        # 1) ?먭? ?앹〈? ??긽 ?곗꽑
+        good_hp = self._get_good_hp_threshold()
+        current_self_hp = int(getattr(self.state, "hp", 0) or 0)
+        if current_self_hp >= good_hp or current_self_hp <= int(getattr(self, "_mp_stationary_self_heal_threshold", 50000) or 50000):
+            self._mp_follow_self_heal_until = 0.0
+        party_hp_needed_before_self_recover = bool(
+            support_target and self._needs_hp_recovery_for(support_target)
+        )
+        if support_target and should_prioritize_self_mp_over_party_heal(
+            int(getattr(self.state, "mp", 0) or 0),
+            int(support_target.get("hp", 0) or 0),
+            self._self_mp_priority_threshold,
+            warrior_critical_hp=30000,
+        ):
+            if self._handle_self_mp_priority(support_target):
+                self._pace_service_loop("active")
+                return True
+
+        if (
+            current_self_hp > 0
+            and current_self_hp < good_hp
+            and current_self_hp > int(getattr(self, "_mp_stationary_self_heal_threshold", 50000) or 50000)
+            and time.time() < float(getattr(self, "_mp_follow_self_heal_until", 0.0) or 0.0)
+        ):
+            self._cast_self_hp_micro_follow_tick()
+            self._log_dosa_f2_idle_reason(
+                f"post_mp_micro_self_heal self_hp={current_self_hp}/{good_hp}",
+                interval=0.5,
+            )
+            self._pace_service_loop("active")
+            return True
+
+        if (
+            party_hp_needed_before_self_recover
+            and current_self_hp > self._self_hp_emergency_threshold
+            and not self._is_party_heal_blocked()
+        ):
+            self._cast_due_periodic_party_support(support_target)
+            if self._recover_party_hp(support_target):
+                self._party_hp_next_tick_interval = self._roll_party_hp_tick_interval(True)
+                self._log_dosa_f2_idle_reason(
+                    f"party_heal_prioritized_over_self_recover self_hp={current_self_hp}/{good_hp}",
+                    interval=1.0,
+                )
+                self._pace_service_loop("active")
+                return True
+
+        if current_self_hp > 0 and current_self_hp < good_hp:
+            if party_hp_needed_before_self_recover and current_self_hp > self._self_hp_emergency_threshold:
+                self._log_dosa_f2_idle_reason(
+                    f"self_recover_deferred_for_party_heal self_hp={current_self_hp}/{good_hp}",
+                    interval=1.0,
+                )
+                self._pace_service_loop("active")
+                return True
+            recovered = self._recover_self_hp_until_good_hp(
+                reason_log="[Recovery] self low HP sustain recovery.",
+                support_block_duration=1.8,
+                max_attempts=6,
+            )
+            if recovered:
+                self._complete_self_hp_recovery_reengage(
+                    source_log="[Recovery] self low-HP recovery complete."
+                )
+            elif self.state.role == "도사" and self.state.service_active:
+                self.request_initial_direct_heal_target_prepare()
+            self._pace_service_loop("active")
+            return True
+
+        # 2) 寃⑹닔 ?곗씠?곌? ?놁쑝硫?吏??猷⑦봽 ????湲?(遺덊븘?뷀븳 gg/bm ?고? 諛⑹?)
+        if not support_target:
+            self._log_dosa_f2_idle_reason("no_warrior_telemetry")
+            if self._handle_self_mp_priority(None):
+                self._pace_service_loop("active")
+                return True
+            if self._needs_mp_recovery():
+                self._execute_self_mp_recovery_and_retarget(
+                    None,
+                    source_log="[Recovery] self MP recovery without warrior telemetry complete.",
+                )
+                self._pace_service_loop("active")
+                return True
+            self._pace_service_loop("no_target")
+            return True
+
+        # 3) 寃⑹닔 吏???곗꽑
+        if int(support_target.get("hp", 0) or 0) <= 0:
+            self.state.last_warrior_bomu_time = 0.0
+
+        now_dbg = time.time()
+        last_dbg = getattr(self, '_last_cycle_debug_time', 0)
+        if now_dbg - last_dbg > 3.0:
+            self._last_cycle_debug_time = now_dbg
+            needs_hp_dbg = self._needs_hp_recovery_for(support_target)
+            hp_dbg = int(support_target.get('hp', 0) or 0)
+            good_hp_dbg = self._get_party_good_hp_threshold(support_target)
+            follow_dbg = bool(getattr(self.state, "nav_follow_enabled", False))
+            busy_dbg = bool(getattr(self.state, "is_combat_busy", False))
+            print(
+                f"[CycleDBG] 서비스루프=True, 따라가기={follow_dbg}, busy={busy_dbg}, "
+                f"힐필요={needs_hp_dbg}, HP={hp_dbg}/{good_hp_dbg}"
+            )
+
+        needs_hp = self._needs_hp_recovery_for(support_target)
+        needs_mp = self._needs_mp_recovery_for(support_target)
+        warrior_hp_for_mp_priority = int(support_target.get("hp", 0) or 0)
+        try:
+            warrior_x = int(support_target.get("x", support_target.get("pos_x", 0)) or 0)
+            warrior_y = int(support_target.get("y", support_target.get("pos_y", 0)) or 0)
+            warrior_distance = follow_manhattan_gap(
+                warrior_x,
+                warrior_y,
+                int(getattr(self.state, "x", 0) or 0),
+                int(getattr(self.state, "y", 0) or 0),
+            )
+        except Exception:
+            warrior_distance = 0
+        follow_distance_risk = (
+            bool(getattr(self.state, "nav_follow_enabled", False))
+            and should_prioritize_follow_distance(warrior_distance, risk_distance=7)
+        )
+        portal_follow_active = bool(getattr(self.state, "portal_follow_active", False))
+        portal_retarget_requested = bool(getattr(self.state, "portal_follow_retarget_requested", False))
+
+        if portal_follow_active:
+            self._invalidate_warrior_redtab_verification()
+            self._log_dosa_f2_idle_reason(
+                f"portal_follow_active defer_warrior_support distance={warrior_distance}",
+                interval=0.5,
+            )
+            self._pace_service_loop("active")
+            return True
+
+        if portal_retarget_requested:
+            if warrior_distance > 4:
+                self._invalidate_warrior_redtab_verification()
+                self._log_dosa_f2_idle_reason(
+                    f"portal_retarget_wait distance={warrior_distance}",
+                    interval=0.5,
+                )
+                self._pace_service_loop("active")
+                return True
+            self._invalidate_warrior_redtab_verification()
+            if not self._prepare_direct_tab_heal_target():
+                self._log_dosa_f2_idle_reason("portal_retarget_prepare_failed", interval=0.6)
+                self._pace_service_loop("active")
+                return True
+            self._party_direct_heal_target_prepared = True
+            self._last_party_hp_support_time = 0.0
+            self.state.portal_follow_retarget_requested = False
+            print(f"[PortalFollow] warrior red_tab restored after portal: distance={warrior_distance}")
+
+        if needs_hp:
+            if follow_distance_risk and int(support_target.get("hp", 0) or 0) > 30000:
+                self._invalidate_warrior_redtab_verification()
+                self._log_dosa_f2_idle_reason(
+                    f"follow_distance_priority distance={warrior_distance} defer_warrior_heal",
+                    interval=0.7,
+                )
+                self._pace_service_loop("active")
+                return True
+            if self._is_party_heal_blocked():
+                now_blocked = time.time()
+                if now_blocked - float(getattr(self, "_last_party_heal_blocked_log_time", 0.0) or 0.0) >= 1.0:
+                    self._last_party_heal_blocked_log_time = now_blocked
+                    print(
+                        "[Support] warrior HP heal blocked: "
+                        f"phase={getattr(self, '_support_phase', 'idle')} "
+                        f"party_block_left={max(0.0, float(getattr(self, '_party_heal_blocked_until', 0.0) or 0.0) - now_blocked):.2f}s"
+                    )
+                self._pace_service_loop("active")
+                return True
+            hp_val = int(support_target.get('hp', 0) or 0)
+            good_hp_remote = self._get_party_good_hp_threshold(support_target)
+            remote_heal_request = bool(support_target.get("heal_request", False))
+            now_support = time.time()
+            self._mark_support_party_heal_follow_guard(duration=0.90)
+            rapid_heal = remote_heal_request or (good_hp_remote > 0 and hp_val <= int(good_hp_remote * 0.55))
+            hp_tick_interval = float(getattr(self, "_party_hp_next_tick_interval", 0.24) or 0.24)
+            if rapid_heal:
+                hp_tick_interval = min(hp_tick_interval, float(self._party_hp_tick_fast_interval_max))
+            if (now_support - self._last_party_hp_support_time) < hp_tick_interval:
+                self._pace_service_loop("active")
+                return True
+            if (now_support - self._last_party_hp_check_log_time) >= 1.0:
+                self._last_party_hp_check_log_time = now_support
+                cast_mode = "direct 3 verified" if self._party_direct_heal_verified else "esc>tab>tab acquire"
+                print(f"[Support] HP check: {hp_val} / {good_hp_remote} -> {cast_mode}")
+            self._cast_due_periodic_party_support(support_target, now_support=now_support)
+            casted_hp = self._recover_party_hp(support_target)
+            if casted_hp:
+                self._party_hp_next_tick_interval = self._roll_party_hp_tick_interval(rapid_heal)
+                self._last_party_hp_value = hp_val
+            if (not rapid_heal) and self._handle_self_mp_priority(support_target):
+                self._pace_service_loop("active")
+                return True
+            self._pace_service_loop("active")
+            return True
+
+        if needs_mp:
+            self._recover_party_mp(support_target)
+            self._pace_service_loop("active")
+            return True
+
+        # 4) 吏???ъ쑀 援ш컙?먯꽌留??먭? ?곹깭/踰꾪봽 ?먭?
+        remote_hp = int(support_target.get("hp", 0) or 0)
+        remote_good_hp = self._get_party_good_hp_threshold(support_target)
+        support_safe = remote_hp > max(1, remote_good_hp + 30000)
+        follow_repositioning = self._is_follow_reposition_needed()
+        self._log_dosa_f2_idle_reason(
+            f"warrior_heal_not_needed hp={remote_hp}/{remote_good_hp} follow_repositioning={follow_repositioning}",
+            interval=2.0,
+        )
+
+        if not follow_repositioning and self._handle_self_mp_priority(support_target):
+            self._pace_service_loop("active")
+            return True
+
+        if support_safe and not follow_repositioning:
+            if self._execute_warrior_debuff_cycle(support_target):
+                self._pace_service_loop("active")
+                return True
+            self._refresh_self_status_if_needed()
+            if self._execute_self_support_buffs_cycle():
+                self._pace_service_loop("active")
+                return True
+            if self._needs_mp_recovery():
+                self._execute_self_mp_recovery_and_retarget(
+                    support_target,
+                    source_log="[Recovery] self MP recovery during safe support complete.",
+                )
+                self._pace_service_loop("active")
+                return True
+
+        # 5) 蹂대Т 二쇨린 ?좎?
+        if self._execute_warrior_bomu_cycle(support_target):
+            self._pace_service_loop("active")
+            return True
+
+        self._log_dosa_f2_idle_reason(
+            f"safe_idle hp={remote_hp}/{remote_good_hp} follow_needed={follow_repositioning}",
+            interval=1.5,
+        )
+        self._pace_service_loop("idle")
+        return True
+
+    def _self_buff_cycle(self):
+        """?? ??? ???: ?? ?? ???."""
+        return self._execute_self_support_buffs_cycle()
+
+
+    
+    def _cast_spell_by_name(self, spell_name: str):
+        """스킬 이름으로 스킬 캐스팅."""
+        print(f"[DEBUG] _cast_spell_by_name ?몄텧: {spell_name}")
+        try:
+            from bis_spell import spell_caster, target_mapper
+            import json
+            
+            # spells_config.json?먯꽌 ?ㅽ궗 ?뺣낫 李얘린
+            with open('spells_config.json', 'r', encoding='utf-8') as f:
+                spells = json.load(f)
+            
+            for spell in spells:
+                if spell.get('name') == spell_name and spell.get('use'):
+                    spell_char = spell.get('spell_char', '')
+                    cast_function = spell.get('cast_function', 'SpellEnter')
+                    
+                    print(f"[DEBUG] ?ㅽ궗 ?뺣낫 李얠쓬: {spell_name}, char='{spell_char}', func={cast_function}")
+                    
+                    if spell_char:
+                        print(f"[DEBUG] ?ㅽ궗 ?쒖쟾 ?쒖옉: {spell_name}")
+                        caster = spell_caster
+                        # 罹먯뒪???⑥닔 ?몄텧
+                        if cast_function == 'SpellEnter':
+                            caster.spell_enter(spell_char)
+                        elif cast_function == 'SpellHomeEnter':
+                            caster.spell_home_enter(spell_char)
+                        elif cast_function == 'SpellArrowEnter':
+                            caster.spell_arrow_enter(spell_char)
+                        elif cast_function == 'SpellClickEnter':
+                            caster.spell_click_enter(spell_char)
+                        print(f"[Logic] Casted spell: {spell_name} ({cast_function})")
+                    else:
+                        print(f"[ERROR] ?ㅽ궗 臾몄옄 ?놁쓬: {spell_name}")
+                    break
+            else:
+                print(f"[ERROR] ?ㅽ궗 李얠? 紐삵븿 ?먮뒗 use=false: {spell_name}")
+        except Exception as e:
+            print(f"[ERROR] Failed to cast spell {spell_name}: {e}")
+
+    def _handle_combat(self):
+        """?꾪닾 泥섎━ (?곗꽑?쒖쐞 1)"""
+        # ?꾪닾 以묒뿉??is_combat_busy ?뚮옒洹??ㅼ젙
+        self._set_combat_busy(True)
+
+        role_name = str(getattr(self.state, "role", "") or "").strip()
+        network_role = str(getattr(self.state, "network_role", "") or "").strip()
+        is_warrior = (
+            role_name in {"격수", "Warrior", "寃⑹닔"}
+            or network_role in {"격수", "Warrior", "寃⑹닔"}
+        )
+
+        # ??븷蹂??꾪닾 濡쒖쭅
+        if is_warrior:
+            self._run_dps_server_mode()
+        elif self.state.role in ("도사", "도사1"):
+            self._run_support_mode()
+        elif self.state.role == "술사":
+            self._run_priest_mode()
+        else:
+            self._run_default_mode()
+
+        if not self._should_handle_combat():
+            self._set_combat_busy(False)
+
+    def _handle_moving(self):
+        """?대룞/?ㅻ퉬寃뚯씠??泥섎━ (?곗꽑?쒖쐞 2)"""
+        # ?꾪닾 以묒씠 ?꾨땺 ?뚮쭔 ?대룞
+        if not self.state.is_combat_busy:
+            # Route mode on F2 should always keep warrior attack/loot loop alive.
+            if getattr(self.state, "service_active", False) and getattr(self.state, "nav_route_enabled", False):
+                self._run_warrior_attack_loot_cycle()
+                return
+            # ?대룞 濡쒖쭅? RouteSvc?먯꽌 泥섎━
+            role_name = str(getattr(self.state, "role", "") or "").strip()
+            network_role = str(getattr(self.state, "network_role", "") or "").strip()
+            if (
+                role_name in {"격수", "Warrior", "寃⑹닔"}
+                or network_role in {"격수", "Warrior", "寃⑹닔"}
+            ):
+                self._run_warrior_attack_loot_cycle()
+
+    # ----------------------------------------------------------
+    # ?? 寃⑹닔 紐⑤뱶: ?곗씠??怨듭쑀 ?쒕쾭 ??븷留??????????????????????
+    # ----------------------------------------------------------
+    def _run_dps_server_mode(self):
+        """격수 모드: 데이터 송신 + 이동 중 3/0 교대 자동사냥."""
+        # Keep warrior loop alive while F2 service mode is active.
+        if not bool(getattr(self.state, "service_active", False)):
+            self.state.last_bomu_time    = 0
+            self.state.combat_start_time = 0.0
+            humanized_sleep(TIMING_CONFIG["idle_sleep"])
+            return
+
+        # Keep network/status sharing and add warrior-specific attack/loot cycle.
+        
+        # ?앹〈 理쒖슦??(HP/MP ?뚮났) - 寃⑹닔???먭? ?뚮났 ?꾩슂
+        if self._needs_hp_recovery():
+            self._recover_hp()
+            self.state.combat_start_time = 0.0
+
+        if self._needs_mp_recovery():
+            self._recover_mp()
+            if self._needs_hp_recovery():
+                self._recover_hp()
+
+        # 蹂대Т 踰꾪봽 ?좎? (185s 二쇨린)
+        if time.time() - self.state.last_bomu_time > TIMING_CONFIG["bomu_interval"]:
+            self._execute_bomu_buff_v3()
+
+        # ?붾쾭???ㅼ틪 (寃⑹닔???꾩슂)
+        dist_change = (abs(self.state.x - self.state.last_debuff_x) +
+                       abs(self.state.y - self.state.last_debuff_y))
+        if self.state.auto_debuff_enabled and dist_change > 15:
+            self._execute_debuff_scan_v3()
+
+        self._run_warrior_attack_loot_cycle()
+        humanized_sleep(TIMING_CONFIG["action_loop"])
+
+    def _run_warrior_attack_loot_cycle(self):
+        """격수 전용: 3은 짧게 반복, 0은 긴 랜덤 쿨타임으로 독립 관리."""
+        # Route thread may keep moving even if auto_hunt flips false transiently.
+        # For warrior F2 mode, run loop based on service_active.
+        if not bool(getattr(self.state, "service_active", False)):
+            return
+        now = time.time()
+        attack_due = now >= float(getattr(self, "_warrior_next_attack_at", 0.0) or 0.0)
+        loot_due = now >= float(getattr(self, "_warrior_next_loot_at", 0.0) or 0.0)
+        if not attack_due and not loot_due:
+            return
+
+        # Loot has lower frequency but should not starve behind the attack loop.
+        if loot_due:
+            if not self._is_hw_ready():
+                self._warrior_next_loot_at = now + 0.10
+                return
+            try:
+                hw.force_press("0", variance=0.08)
+                pressed = True
+            except Exception:
+                pressed = False
+            if not pressed:
+                self._warrior_next_loot_at = now + 0.10
+                return
+            self._warrior_next_loot_at = now + random.uniform(2.0, 14.0)
+            if now - self._last_warrior_cycle_log_time >= 1.0:
+                print(f"[WarriorLoop] cast=0 next_loot={max(0.0, self._warrior_next_loot_at - now):.2f}s")
+                self._last_warrior_cycle_log_time = now
+            return
+
+        pressed = self._press_hw_key("3", variance=0.08, skip_focus_guard=True)
+        if not pressed:
+            self._warrior_next_attack_at = now + 0.10
+            return
+        self._warrior_next_attack_at = now + random.uniform(0.3, 0.5)
+        if now - self._last_warrior_cycle_log_time >= 1.0:
+            print(f"[WarriorLoop] cast=3 next_attack={max(0.0, self._warrior_next_attack_at - now):.2f}s")
+            self._last_warrior_cycle_log_time = now
+
+    def _is_sulsa_role(self) -> bool:
+        return str(getattr(self.state, "role", "") or "").strip() == "술사"
+
+    def _set_sulsa_input_busy(self, duration: float = 0.35) -> bool:
+        if not self._is_hw_ready():
+            now = time.time()
+            if now - self._last_hw_skip_log_time >= 2.0:
+                print("[Sulsa] hardware not ready.")
+                self._last_hw_skip_log_time = now
+            return False
+        self._set_combat_busy(True)
+        self._set_support_input_block(duration)
+        self._release_movement_keys_only()
+        return True
+
+    def _cast_sulsa_target_spell(self, key: str, label: str) -> bool:
+        if not self._set_sulsa_input_busy(0.42):
+            return False
+        try:
+            for press_key, delay in ((key, 0.035), ("up", 0.035), ("enter", 0.045)):
+                if not self._press_hw_key(press_key, variance=0.08, skip_focus_guard=True):
+                    return False
+                humanized_sleep(delay, variance=0.08)
+            print(f"[Sulsa] cast {label}: {key}>up>enter")
+            return True
+        finally:
+            self._set_combat_busy(False)
+
+    def _cast_sulsa_power_boost_once(self) -> bool:
+        if not self._set_sulsa_input_busy(0.18):
+            return False
+        try:
+            ok = self._press_hw_key("2", variance=0.08, skip_focus_guard=True)
+            if ok:
+                print("[Sulsa] cast 공력증강: 2")
+            return ok
+        finally:
+            self._set_combat_busy(False)
+
+    def _cast_sulsa_self_heal_once(self) -> bool:
+        if not self._set_sulsa_input_busy(0.42):
+            return False
+        try:
+            for key, delay in (("3", 0.035), ("home", 0.035), ("enter", 0.045)):
+                if not self._press_hw_key(key, variance=0.08, skip_focus_guard=True):
+                    return False
+                humanized_sleep(delay, variance=0.08)
+            print("[Sulsa] self heal: 3>home>enter")
+            return True
+        finally:
+            self._set_combat_busy(False)
+
+    def _use_sulsa_mp_item(self) -> bool:
+        slots = list(getattr(self.state, "sulsa_item_slots", []) or [])
+        if not slots:
+            return False
+        index = max(0, int(getattr(self.state, "sulsa_item_slot_index", 0) or 0))
+        if index >= len(slots):
+            print("[Sulsa] MP item slots exhausted.")
+            return False
+        slot = str(slots[index] or "").strip().lower()
+        if not slot:
+            return False
+        if not self._set_sulsa_input_busy(0.24):
+            return False
+        try:
+            for key, delay in (("u", 0.025), (slot, 0.040)):
+                if not self._press_hw_key(key, variance=0.08, skip_focus_guard=True):
+                    return False
+                humanized_sleep(delay, variance=0.08)
+            uses = int(getattr(self.state, "sulsa_item_slot_uses", 0) or 0) + 1
+            max_uses = max(1, int(getattr(self.state, "sulsa_item_uses_per_slot", 100) or 100))
+            if uses >= max_uses:
+                self.state.sulsa_item_slot_index = index + 1
+                self.state.sulsa_item_slot_uses = 0
+                print(f"[Sulsa] MP item used: u>{slot} ({uses}/{max_uses}), next slot index={index + 1}")
+            else:
+                self.state.sulsa_item_slot_uses = uses
+                print(f"[Sulsa] MP item used: u>{slot} ({uses}/{max_uses})")
+            return True
+        finally:
+            self._set_combat_busy(False)
+
+    def _run_sulsa_debuff_once_if_due(self, force: bool = False) -> bool:
+        now = time.time()
+        acted = False
+        if force or (now - float(self._sulsa_last_paralyze_time or 0.0)) >= self._sulsa_paralyze_interval:
+            if self._cast_sulsa_target_spell("5", "마비"):
+                self._sulsa_last_paralyze_time = time.time()
+                acted = True
+        now = time.time()
+        if force or (now - float(self._sulsa_last_curse_time or 0.0)) >= self._sulsa_curse_interval:
+            if self._cast_sulsa_target_spell("6", "저주"):
+                self._sulsa_last_curse_time = time.time()
+                acted = True
+        return acted
+
+    def _run_sulsa_hellfire_cycle_if_due(self) -> bool:
+        now = time.time()
+        if (now - float(self._sulsa_last_hellfire_time or 0.0)) < self._sulsa_hellfire_interval:
+            return False
+        if not bool(getattr(self.state, "sulsa_attack_enabled", False)):
+            return False
+        if not self._cast_sulsa_target_spell("1", "헬파이어"):
+            return False
+        self._sulsa_last_hellfire_time = time.time()
+        humanized_sleep(0.05, variance=0.08)
+        self._use_sulsa_mp_item()
+        humanized_sleep(0.05, variance=0.08)
+        self._cast_sulsa_power_boost_once()
+        if int(getattr(self.state, "hp", 0) or 0) < self._get_good_hp_threshold():
+            humanized_sleep(0.05, variance=0.08)
+            self._cast_sulsa_self_heal_once()
+        return True
+
+    def _run_sulsa_self_sustain(self) -> bool:
+        current_hp = int(getattr(self.state, "hp", 0) or 0)
+        current_mp = int(getattr(self.state, "mp", 0) or 0)
+        if 0 < current_hp < self._get_good_hp_threshold():
+            return self._cast_sulsa_self_heal_once()
+        if 0 < current_mp <= self._self_mp_priority_threshold:
+            if self._cast_sulsa_power_boost_once():
+                if int(getattr(self.state, "hp", 0) or 0) < self._get_good_hp_threshold():
+                    self._cast_sulsa_self_heal_once()
+                return True
+        return False
+
+    def _run_sulsa_service_cycle(self) -> bool:
+        if not self._is_sulsa_role():
+            return False
+        active = bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "sulsa_debuff_standalone", False))
+        if not active:
+            return False
+        if self._run_sulsa_self_sustain():
+            self._pace_service_loop("active")
+            return True
+        if bool(getattr(self.state, "sulsa_debuff_enabled", False)):
+            if self._run_sulsa_debuff_once_if_due(force=False):
+                self._pace_service_loop("active")
+                return True
+        if bool(getattr(self.state, "auto_hunt", False)):
+            if self._run_sulsa_hellfire_cycle_if_due():
+                self._pace_service_loop("active")
+                return True
+        now = time.time()
+        if now - float(getattr(self, "_sulsa_last_action_log_time", 0.0) or 0.0) >= 2.0:
+            print(
+                "[Sulsa] idle "
+                f"attack={bool(getattr(self.state, 'sulsa_attack_enabled', False))} "
+                f"debuff={bool(getattr(self.state, 'sulsa_debuff_enabled', False))} "
+                f"follow={bool(getattr(self.state, 'nav_follow_enabled', False))}"
+            )
+            self._sulsa_last_action_log_time = now
+        self._pace_service_loop("idle")
+        return True
+
+    # ----------------------------------------------------------
+    # ?? 吏??紐⑤뱶: ?꾩궗 - 寃⑹닔 ?곗씠???섏떊 諛?吏??????????????????
+    # ----------------------------------------------------------
+    def _run_support_mode(self):
+        """?꾩궗 紐⑤뱶: 寃⑹닔???곗씠???섏떊諛쏆븘 吏??濡쒖쭅 ?섑뻾"""
+        # ?? ?먮룞?щ깷 鍮꾪솢???????????????????????????????
+        if not self.state.auto_hunt:
+            self.state.last_bomu_time    = 0
+            self.state.combat_start_time = 0.0
+            humanized_sleep(TIMING_CONFIG["idle_sleep"])
+            return
+
+        # ?? 吏??濡쒖쭅 ?섑뻾 ???????????????????????????????
+        # ?꾩궗??寃⑹닔???寃잛쓣 ?곕씪媛硫?吏??
+        
+        # ?앹〈 理쒖슦??(HP/MP ?뚮났)
+        if self._needs_hp_recovery():
+            self._recover_hp()
+            self.state.combat_start_time = 0.0
+
+        if self._needs_mp_recovery():
+            self._recover_mp()
+            if self._needs_hp_recovery():
+                self._recover_hp()
+
+        # 蹂대Т 踰꾪봽 ?좎? (185s 二쇨린)
+        if time.time() - self.state.last_bomu_time > TIMING_CONFIG["bomu_interval"]:
+            self._execute_bomu_buff_v3()
+
+        # ?붾쾭???ㅼ틪
+        dist_change = (abs(self.state.x - self.state.last_debuff_x) +
+                       abs(self.state.y - self.state.last_debuff_y))
+        if self.state.auto_debuff_enabled and dist_change > 15:
+            self._execute_debuff_scan_v3()
+
+        # ?좎? ?먯? ???+ ?뷀떚???곗꽑?쒖쐞 ?됰룞 ?쒖뼱
+        if self._handle_entity_priorities():
+            humanized_sleep(TIMING_CONFIG["action_loop"])
+            return
+
+        # SentinelThread 寃곌낵 蹂닿퀬: 紐ъ뒪??議댁옱 ???쒗룷???ㅽ궗 ?쒖쟾
+        if self.state.monster_on_screen:
+            # 寃⑹닔媛 ?寃잛쓣 ?↔퀬 ?덉쑝硫?吏???ㅽ궗 ?쒖쟾
+            self._execute_support_skills()
+
+        humanized_sleep(TIMING_CONFIG["action_loop"])
+
+    def _get_priest_monsters(self) -> list[dict]:
+        monsters = self.state.entities.get("monsters", [])
+        return monsters if isinstance(monsters, list) else []
+
+    def _calc_monster_metrics(self):
+        me_pos = (int(getattr(self.state, "x", 0)), int(getattr(self.state, "y", 0)))
+        if me_pos[0] <= 0 and me_pos[1] <= 0:
+            return None, [], 0
+
+        valid_monsters = []
+        dense_count = 0
+        for m in self._get_priest_monsters():
+            if not isinstance(m, dict):
+                continue
+            monster_pos = m.get("world_pos") or m.get("pos")
+            if not monster_pos or len(monster_pos) != 2:
+                grid = m.get("grid")
+                if not grid or len(grid) != 2:
+                    continue
+                dx = int(grid[0]) - int(self.state.char_grid[0])
+                dy = int(grid[1]) - int(self.state.char_grid[1])
+            else:
+                dx = int(monster_pos[0]) - me_pos[0]
+                dy = int(monster_pos[1]) - me_pos[1]
+            dist = (dx * dx + dy * dy) ** 0.5
+            valid_monsters.append({"monster": m, "dist": dist, "dx": dx, "dy": dy})
+            if max(abs(dx), abs(dy)) <= 1:
+                dense_count += 1
+        return me_pos, valid_monsters, dense_count
+
+    def _get_priest_engage_metrics(self, engage_range: int | None = None):
+        """
+        ?좎궗 泥⑥궗?μ? 媛源뚯슫 紐ъ뒪?곕쭔 ?꾪닾 吏꾩엯 ??곸쑝濡?蹂몃떎.
+        engage_range??pos x/y 湲곗? 泥대퉬?쇳봽 嫄곕━??
+        """
+        if engage_range is None:
+            engage_range = max(0, int(getattr(self.state, "priest_engage_range", 2)))
+        me_grid, monster_infos, _dense_count = self._calc_monster_metrics()
+        if me_grid is None:
+            return None, [], 0
+
+        close_infos = [
+            info for info in monster_infos
+            if max(abs(info["dx"]), abs(info["dy"])) <= engage_range
+        ]
+        close_dense_count = sum(
+            1 for info in close_infos
+            if max(abs(info["dx"]), abs(info["dy"])) <= 1
+        )
+        return me_grid, close_infos, close_dense_count
+
+    def _find_ready_attack_skill(self, aoe_mode: bool):
+        attack_skills = [s for s in self.state.spells if s.category == "怨듦꺽" and s.is_ready()]
+        if not attack_skills:
+            return None
+
+        if aoe_mode:
+            for s in attack_skills:
+                if "천" in s.name:
+                    return s
+            return attack_skills[0]
+
+        for s in attack_skills:
+            if "격" in s.name or "단일" in s.name:
+                return s
+        for s in attack_skills:
+            if "천" not in s.name:
+                return s
+        return attack_skills[0]
+
+    def _cast_attack_skill(self, skill):
+        hw.humanized_press(skill.hotkey)
+        humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
+        skill.last_cast_time = time.time()
+
+    # ----------------------------------------------------------
+    # ?? ?좎궗 紐⑤뱶: 泥⑥궗??濡쒖쭅 ????????????????????????????????
+    # ----------------------------------------------------------
+    def _run_priest_mode(self):
+        """?좎궗 紐⑤뱶: 泥⑥궗??濡쒖쭅 ?섑뻾"""
+        # ?? ?먮룞?щ깷 鍮꾪솢???????????????????????????????
+        if not self.state.auto_hunt:
+            self.state.last_bomu_time    = 0
+            self.state.combat_start_time = 0.0
+            humanized_sleep(TIMING_CONFIG["idle_sleep"])
+            return
+
+        # ?? 泥⑥궗??濡쒖쭅 ?섑뻾 ????????????????????????????
+        # ?좎궗???낆옄?곸쑝濡??щ깷 ?섑뻾
+        
+        # 蹂대Т 踰꾪봽 ?좎? (185s 二쇨린)
+        if time.time() - self.state.last_bomu_time > TIMING_CONFIG["bomu_interval"]:
+            self._execute_bomu_buff_v3()
+
+        # ?앹〈 理쒖슦??(HP/MP ?뚮났)
+        if self._needs_hp_recovery():
+            self._recover_hp()
+            self.state.combat_start_time = 0.0
+
+        if self._needs_mp_recovery():
+            self._recover_mp()
+            if self._needs_hp_recovery():
+                self._recover_hp()
+
+        # ?좎? ?먯? ???+ ?뷀떚???곗꽑?쒖쐞 ?됰룞 ?쒖뼱
+        if self._handle_entity_priorities():
+            humanized_sleep(TIMING_CONFIG["action_loop"])
+            return
+
+        # ?꾩씠???띾뱷 (?좏쑕 ?곹깭???뚮쭔)
+        if not self.state.target_locked and self.state.detected_item_grid:
+            gx, gy = self.state.detected_item_grid
+            print(f"[Item] ?꾩씠???띾뱷 ?쒕룄: {self.state.detected_item_name} @ Grid({gx}, {gy})")
+
+            while self.state.running and self.state.auto_hunt and self.state.detected_item_grid:
+                if self.state.target_locked or self._needs_hp_recovery() or self._needs_mp_recovery():
+                    print("[Action] ?띾뱷 以??꾪닾/?꾧툒 ?곹솴 諛쒖깮 -> 猷⑦똿 以묐떒.")
+                    break
+
+                # ?? ?뚰뵾 ?대룞 (Stuck 媛먯?) ?듯빀 ??
+                if self._check_stuck():
+                    self._escape_stuck(rewind_waypoint=False)
+                    humanized_sleep(TIMING_CONFIG["move_hold"])
+                    continue
+
+                arrived = self._move_toward_grid(gx, gy)
+                if arrived:
+                    print(f"[Point] ?꾩씠?????꾩갑. ?띾뱷 ?쒕룄 (',')")
+                    hw.humanized_press(",") 
+                    humanized_sleep(TIMING_CONFIG["enter_wait"])
+                    self.state.detected_item_grid = None
+                    print("[OK] ?꾩씠???띾뱷 ?꾨즺.")
+                    break
+                
+                humanized_sleep(TIMING_CONFIG["nav_loop"])
+
+        # ?붾쾭???ㅼ틪
+        dist_change = (abs(self.state.x - self.state.last_debuff_x) +
+                       abs(self.state.y - self.state.last_debuff_y))
+        if self.state.auto_debuff_enabled and dist_change > 15:
+            self._execute_debuff_scan_v3()
+
+        me_grid, monster_infos, dense_count = self._get_priest_engage_metrics()
+        has_monsters = len(monster_infos) > 0
+        if has_monsters:
+            aoe_mode = dense_count >= 2
+            # ?⑥씪 ?寃??ㅽ궗? ?寃??쎌씠 ?꾩슂?섎?濡?湲곗〈 ?먯깋 ?쒗???좎?
+            if (not aoe_mode) and (not self.state.target_locked):
+                self.state.combat_start_time = 0.0
+                if self._search_target_v3():
+                    humanized_sleep(TIMING_CONFIG["ocr_fast"])
+                return
+
+            skill = self._find_ready_attack_skill(aoe_mode=aoe_mode)
+            if skill:
+                mode_label = "愿묒뿭(泥?" if aoe_mode else "?⑥씪"
+                print(f"[Priest] 怨듦꺽 遺꾧린: {mode_label} | 洹쇱젒諛吏?{dense_count} | ?덉씠?붾す={len(monster_infos)}")
+                self._cast_attack_skill(skill)
+            else:
+                self._execute_combat()
+        elif self.state.target_locked:
+            humanized_sleep(TIMING_CONFIG["ocr_fast"])
+            self._execute_combat()
+        else:
+            self._clear_target_state()
+            humanized_sleep(TIMING_CONFIG["nav_loop"])
+            return
+
+        humanized_sleep(TIMING_CONFIG["action_loop"])
+
+    # ----------------------------------------------------------
+    # ?? 湲곕낯 紐⑤뱶: 湲곗〈 濡쒖쭅 ?????????????????????????????????
+    # ----------------------------------------------------------
+    def _run_default_mode(self):
+        """湲곕낯 紐⑤뱶: 湲곗〈 濡쒖쭅 ?섑뻾"""
+        # ?? ?먮룞?щ깷 鍮꾪솢???????????????????????????????
+        if not self.state.auto_hunt:
+            self.state.last_bomu_time    = 0
+            self.state.combat_start_time = 0.0
+            humanized_sleep(TIMING_CONFIG["idle_sleep"])
+            return
+
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        # 0. 蹂대Т 踰꾪봽 ?좎? (185s 二쇨린)
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        if time.time() - self.state.last_bomu_time > TIMING_CONFIG["bomu_interval"]:
+            self._execute_bomu_buff_v3()
+
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        # 1. ?앹〈 理쒖슦??(HP / MP ?뚮났)
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        if self._needs_hp_recovery():
+            self._recover_hp()
+            self.state.combat_start_time = 0.0
+
+        if self._needs_mp_recovery():
+            self._recover_mp()
+            if self._needs_hp_recovery():
+                self._recover_hp()
+
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        # 2. ?좎? ?먯? ???+ ?뷀떚???곗꽑?쒖쐞 ?됰룞 ?쒖뼱
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        if self._handle_entity_priorities():
+            humanized_sleep(TIMING_CONFIG["action_loop"])
+            return
+
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        # 3. ?꾩씠???띾뱷 (?좏쑕 ?곹깭???뚮쭔)
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        if not self.state.target_locked and self.state.detected_item_grid:
+            gx, gy = self.state.detected_item_grid
+            print(f"[Item] ?꾩씠???띾뱷 ?쒕룄: {self.state.detected_item_name} @ Grid({gx}, {gy})")
+
+            while self.state.running and self.state.auto_hunt and self.state.detected_item_grid:
+                if self.state.target_locked or self._needs_hp_recovery() or self._needs_mp_recovery():
+                    print("[Action] ?띾뱷 以??꾪닾/?꾧툒 ?곹솴 諛쒖깮 -> 猷⑦똿 以묐떒.")
+                    break
+
+                arrived = self._move_toward_grid(gx, gy)
+                if arrived:
+                    print(f"[Point] ?꾩씠?????꾩갑. ?띾뱷 ?쒕룄 (',')")
+                    hw.humanized_press(",") 
+                    humanized_sleep(TIMING_CONFIG["enter_wait"])
+                    self.state.detected_item_grid = None
+                    print("[OK] ?꾩씠???띾뱷 ?꾨즺.")
+                    break
+                
+                humanized_sleep(TIMING_CONFIG["nav_loop"])
+
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        # 4. 醫뚰몴 湲곕컲 ?먮룞 ?붾쾭???ㅼ틪
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        dist_change = (abs(self.state.x - self.state.last_debuff_x) +
+                       abs(self.state.y - self.state.last_debuff_y))
+        if self.state.auto_debuff_enabled and dist_change > 15:
+            self._execute_debuff_scan_v3()
+
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        # 5. ?寃??먯깋 & ?꾪닾
+        # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
+        has_monsters = bool(self._get_visible_monsters())
+        if not self.state.target_locked:
+            if not has_monsters:
+                humanized_sleep(TIMING_CONFIG["nav_loop"])
+                return
+            self.state.combat_start_time = 0.0
+            if self._search_target_v3():
+                humanized_sleep(TIMING_CONFIG["ocr_fast"])
+            return
+
+        humanized_sleep(TIMING_CONFIG["ocr_fast"])
+        self._execute_combat()
+
+        humanized_sleep(TIMING_CONFIG["action_loop"])
+
+    # ----------------------------------------------------------
+    # ?? 吏???ㅽ궗 ?쒖쟾 (?꾩궗/?좎궗) ???????????????????????????
+    # ----------------------------------------------------------
+    def _execute_support_skills(self):
+        """?꾩궗/?좎궗: 寃⑹닔???寃잛뿉 吏???ㅽ궗 ?쒖쟾"""
+        # ?꾩궗/?좎궗 ?꾩슜 吏???ㅽ궗 ?쒖쟾 濡쒖쭅
+        # ?? 寃⑹닔???寃잛뿉 踰꾪봽 ?ㅽ궗 ?쒖쟾, ???ㅽ궗 ?쒖쟾 ??
+        # ??遺遺꾩? 媛???븷蹂??ㅽ궗 ?ㅼ젙???곕씪 ?숈옉
+        pass
+
+
+# ============================================================
+#  Grid 醫뚰몴 蹂???⑥닔 (GridManager ?ъ슜)
+# ============================================================
+def grid_name_to_coords(grid_name):
+    """Grid 이름(S3, A10)을 (col, row) 좌표로 변환."""
+    # GridManager??name_to_grid 硫붿꽌???ъ슜
+    gm = GridManager(None)
+    return gm.name_to_grid(grid_name)
+
+
+def _nav_step_from_dir(cx: int, cy: int, direction: str) -> tuple[int, int]:
+    if direction == "up":
+        return cx, cy - 1
+    if direction == "down":
+        return cx, cy + 1
+    if direction == "left":
+        return cx - 1, cy
+    if direction == "right":
+        return cx + 1, cy
+    return cx, cy
+
+
+def nav_cell_blockers(state: GameState, gx: int, gy: int, include_entities: bool = True) -> list[str]:
+    blockers: list[str] = []
+    try:
+        map_name = getattr(state, "current_map", None)
+        map_data = getattr(state, "maps_db", {}).get(map_name) if map_name else None
+        if map_data:
+            walls = map_data.get("walls", [])
+            if [gx, gy] in walls:
+                blockers.append("wall")
+    except Exception:
+        pass
+
+    if include_entities:
+        try:
+            entities = getattr(state, "entities", {}) or {}
+            for kind, label in (("monsters", "monster"), ("users", "user")):
+                for ent in entities.get(kind, []):
+                    if not isinstance(ent, dict):
+                        continue
+                    grid = ent.get("grid")
+                    if not grid or len(grid) != 2:
+                        continue
+                    if int(grid[0]) == gx and int(grid[1]) == gy:
+                        blockers.append(label)
+                        break
+        except Exception:
+            pass
+
+    return list(dict.fromkeys(blockers))
+
+
+def nav_pick_step_direction(
+    state: GameState,
+    current_grid: tuple[int, int],
+    dx: int,
+    dy: int,
+    include_entities: bool = True,
+    blocked_cells: set[tuple[int, int]] | None = None,
+    prefer_manhattan_reduction: bool = False,
+    aggressive_follow: bool = False,
+) -> tuple[str | None, tuple[int, int] | None, list[str]]:
+    if dx == 0 and dy == 0:
+        return None, None, []
+
+    ccx, ccy = current_grid
+
+    if abs(dx) > abs(dy):
+        axis_priority = ["x", "y"]
+    elif abs(dy) > abs(dx):
+        axis_priority = ["y", "x"]
+    else:
+        axis_priority = random.choice([["x", "y"], ["y", "x"]])
+
+    candidates: list[str] = []
+
+    def add_candidate(direction: str):
+        if direction not in candidates:
+            candidates.append(direction)
+
+    for axis in axis_priority:
+        if axis == "x" and dx != 0:
+            add_candidate("right" if dx > 0 else "left")
+        elif axis == "y" and dy != 0:
+            add_candidate("down" if dy > 0 else "up")
+
+    if aggressive_follow and dx != 0 and dy != 0:
+        primary_x = "right" if dx > 0 else "left"
+        primary_y = "down" if dy > 0 else "up"
+        if abs(dx) >= abs(dy):
+            aggressive_order = [primary_x, primary_y, "up" if dy > 0 else "down", "left" if dx > 0 else "right"]
+        else:
+            aggressive_order = [primary_y, primary_x, "left" if dx > 0 else "right", "up" if dy > 0 else "down"]
+        candidates = []
+        for direction in aggressive_order:
+            add_candidate(direction)
+
+    if abs(dx) >= abs(dy):
+        if dy > 0:
+            add_candidate("down")
+            add_candidate("up")
+        elif dy < 0:
+            add_candidate("up")
+            add_candidate("down")
+        else:
+            for direction in random.choice([["up", "down"], ["down", "up"]]):
+                add_candidate(direction)
+    else:
+        if dx > 0:
+            add_candidate("right")
+            add_candidate("left")
+        elif dx < 0:
+            add_candidate("left")
+            add_candidate("right")
+        else:
+            for direction in random.choice([["left", "right"], ["right", "left"]]):
+                add_candidate(direction)
+
+    if candidates:
+        opposite = {
+            "up": "down",
+            "down": "up",
+            "left": "right",
+            "right": "left",
+        }
+        add_candidate(opposite[candidates[0]])
+
+    if prefer_manhattan_reduction and candidates:
+        step_delta = {
+            "up": (0, -1),
+            "down": (0, 1),
+            "left": (-1, 0),
+            "right": (1, 0),
+        }
+        original_order = {direction: idx for idx, direction in enumerate(candidates)}
+        candidates = sorted(
+            candidates,
+            key=lambda direction: (
+                abs(dx - step_delta[direction][0]) + abs(dy - step_delta[direction][1]),
+                original_order[direction],
+            ),
+        )
+
+    blockers: list[str] = []
+    blocked_cells = blocked_cells or set()
+    for direction in candidates:
+        nx, ny = _nav_step_from_dir(ccx, ccy, direction)
+        if (nx, ny) in blocked_cells:
+            blockers.append("blocked_memory")
+            continue
+        cell_blockers = nav_cell_blockers(state, nx, ny, include_entities=include_entities)
+        if not cell_blockers:
+            return direction, (nx, ny), []
+        blockers.extend(cell_blockers)
+
+    return None, None, list(dict.fromkeys(blockers))
+
+# ============================================================
+#  NavigationThread  ?  吏?ν삎 ?대룞 + Stuck ?덉텧
+# ============================================================
+class RouteSvc(threading.Thread):
+    """?⑥씠?ъ씤???대룞 + 洹몃９??異붿쟻 + 吏?ν삎 Stuck ?덉텧."""
+
+    # 諛⑺뼢 ?뺤쓽
+    _ALL_DIRS  = ["up", "down", "left", "right"]
+    _HORIZ     = ["left", "right"]
+    _VERT      = ["up", "down"]
+
+    def __init__(self, state: GameState):
+        super().__init__(daemon=True)
+        self.state          = state
+        self.wp_idx         = 0
+        self.last_load_time = time.time()
+        self._last_coord_check_time = time.time()
+        self._last_checked_pos      = (0, 0)
+        # 吏?ν삎 ?뚰뵾 濡쒖쭅??蹂??
+        self.last_pos = None
+        self.stuck_timer = 0.0
+        self.stuck_count = 0
+        # ?쒗??湲곕컲 ?대룞??蹂??
+        self.seq_phase = "entry"  # entry, points, exit
+        self.seq_point_idx = 0
+        self.seq_last_action_time = 0
+        self._was_in_combat = False
+        self._current_nav_context = None
+        self._combat_resume_context = None
+        self._advance_waypoint_after_combat = False
+        self._nav_current_pos = None
+        self._nav_attempt_pos = None
+        self._nav_attempt_started_at = 0.0
+        self._last_follow_close_log_time = 0.0
+        self._last_nav_trace_time = 0.0
+        self._last_nav_trace_signature = None
+        self._last_nav_trace_target = None
+        self._last_nav_trace_pos = None
+        self._last_nav_trace_gap = None
+        self._last_ntab_success_direction = None
+        self._blocked_cells_until: dict[tuple[int, int], float] = {}
+        self._blocked_cell_hits: dict[tuple[int, int], int] = {}
+        self._blocked_cell_base_ttl = 6.0
+        self._blocked_cell_max_ttl = 18.0
+        self._last_box_collision_recover_request_time = 0.0
+        self._support_follow_hold_distance = 1
+        self._support_follow_soft_stuck_count = 0
+        self._last_support_quick_escape_time = 0.0
+        self._follow_blocked_memory_count = 0
+        self._last_support_quick_escape_dir = None
+        self._last_warrior_coord: tuple[int, int] | None = None
+        self._last_warrior_dir: str | None = None
+        self._last_warrior_step_dir: str | None = None
+        self._last_warrior_map_sig: tuple[str, str, str, str] | None = None
+        self._warrior_trail: list[tuple[int, int, str | None]] = []
+        self._last_follow_target_key: tuple | None = None
+        self._last_follow_target: tuple[int, int] | None = None
+        self._last_follow_target_ts = 0.0
+        self._last_map_info_change_seq = 0
+        self._last_coord_transition_seq = 0
+        self._portal_session_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
+        self._portal_follow_active = False
+        self._portal_follow_coord: tuple[int, int] | None = None
+        self._portal_follow_approach: tuple[int, int] | None = None
+        self._portal_follow_dir: str | None = None
+        self._portal_follow_source_map_sig: tuple[str, str, str, str] | None = None
+        self._portal_follow_started_at = 0.0
+        self._portal_follow_timeout = 25.0
+        self._last_portal_follow_log_time = 0.0
+        self._last_self_portal_coord: tuple[int, int] | None = None
+        self._portal_enter_fail_streak = 0
+        self.state.portal_follow_active = False
+        self.state.portal_follow_retarget_requested = False
+        self.state.portal_follow_coord = None
+        self.state.portal_follow_approach = None
+        self.state.portal_follow_dir = None
+
+    # ----------------------------------------------------------
+    def _should_hold_follow_at_gap(self, gap: int) -> bool:
+        return should_hold_follow_gap(
+            gap,
+            hold_distance=int(getattr(self, "_support_follow_hold_distance", 1) or 1),
+        )
+
+    def _get_nav_grid_pos(self) -> tuple[int, int]:
+        """char_grid가 초기값이면 실제 좌표를 blocked-memory 기준으로 사용한다."""
+        try:
+            gx, gy = tuple(getattr(self.state, "char_grid", (0, 0)) or (0, 0))
+            gx, gy = int(gx), int(gy)
+        except Exception:
+            gx, gy = 0, 0
+        sx = int(getattr(self.state, "x", 0) or 0)
+        sy = int(getattr(self.state, "y", 0) or 0)
+        if (gx, gy) == (0, 0) and (sx, sy) != (0, 0):
+            return sx, sy
+        return gx, gy
+
+    def _quick_support_follow_escape(self, follow_target: tuple[int, int] | None = None) -> bool:
+        """F2 follow stuck 1회차는 red_tab 재준비 대신 짧은 우회 이동만 수행한다."""
+        if bool(getattr(self, "_portal_follow_active", False)):
+            return False
+
+        now = time.time()
+        if (now - float(getattr(self, "_last_support_quick_escape_time", 0.0) or 0.0)) < 0.18:
+            return False
+        self._last_support_quick_escape_time = now
+
+        try:
+            hw.stop_all_inputs(repeat=1, delay=0.005)
+        except Exception:
+            pass
+
+        ccx, ccy = self._get_nav_grid_pos()
+        last_dir = str(getattr(self.state, "last_move_dir", "") or "")
+        if last_dir in ("left", "right"):
+            candidate_dirs = ["up", "down"]
+        elif last_dir in ("up", "down"):
+            candidate_dirs = ["left", "right"]
+        else:
+            candidate_dirs = ["left", "right", "up", "down"]
+
+        blocked_cells = self._get_blocked_cells()
+        candidate_dirs = [
+            direction for direction in candidate_dirs
+            if _nav_step_from_dir(int(ccx), int(ccy), direction) not in blocked_cells
+        ] or ["left", "right", "up", "down"]
+        last_escape_dir = str(getattr(self, "_last_support_quick_escape_dir", "") or "")
+        if len(candidate_dirs) > 1 and last_escape_dir in candidate_dirs:
+            candidate_dirs = [direction for direction in candidate_dirs if direction != last_escape_dir]
+
+        if follow_target:
+            tx, ty = follow_target
+            current_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
+            candidate_dirs = sorted(
+                candidate_dirs,
+                key=lambda direction: follow_manhattan_gap(
+                    int(tx),
+                    int(ty),
+                    *_nav_step_from_dir(int(ccx), int(ccy), direction),
+                ),
+            )
+            if bool(getattr(self, "_portal_follow_active", False)):
+                closer_dirs = [
+                    direction for direction in candidate_dirs
+                    if follow_manhattan_gap(
+                        int(tx),
+                        int(ty),
+                        *_nav_step_from_dir(int(ccx), int(ccy), direction),
+                    ) <= current_gap
+                ]
+                if closer_dirs:
+                    candidate_dirs = closer_dirs
+
+        escape_dir = candidate_dirs[0]
+        self._last_support_quick_escape_dir = escape_dir
+        print(f"[Recover] support follow quick escape: {escape_dir} (no retarget).")
+        hw.hold_move(escape_dir, "stuck_side_hold", duration=0.085)
+        self.state.last_move_dir = escape_dir
+        self._nav_attempt_pos = (self.state.x, self.state.y)
+        self._nav_attempt_started_at = time.time()
+        return True
+
+    # ----------------------------------------------------------
+    def _prune_blocked_cells(self):
+        now = time.time()
+        expired = [cell for cell, until in self._blocked_cells_until.items() if until <= now]
+        for cell in expired:
+            self._blocked_cells_until.pop(cell, None)
+            self._blocked_cell_hits.pop(cell, None)
+
+    def _get_blocked_cells(self) -> set[tuple[int, int]]:
+        self._prune_blocked_cells()
+        return set(self._blocked_cells_until.keys())
+
+    def _remember_blocked_cell(self, gx: int, gy: int, reason: str = "stuck"):
+        self._prune_blocked_cells()
+        cell = (int(gx), int(gy))
+        hits = int(self._blocked_cell_hits.get(cell, 0)) + 1
+        self._blocked_cell_hits[cell] = hits
+        ttl = min(self._blocked_cell_max_ttl, self._blocked_cell_base_ttl + (hits - 1) * 2.0)
+        until = time.time() + ttl
+        prev_until = float(self._blocked_cells_until.get(cell, 0.0) or 0.0)
+        self._blocked_cells_until[cell] = max(prev_until, until)
+        if hits <= 2:
+            print(f"[NavMem] blocked cell remember: {cell} ttl={ttl:.1f}s reason={reason}")
+
+    def _remember_last_move_blocked_cell(self, reason: str = "stuck"):
+        try:
+            direction = str(getattr(self.state, "last_move_dir", "") or "")
+            if direction not in self._ALL_DIRS:
+                return
+            ccx, ccy = self._get_nav_grid_pos()
+            nx, ny = _nav_step_from_dir(int(ccx), int(ccy), direction)
+            self._remember_blocked_cell(nx, ny, reason=reason)
+            if int(self._blocked_cell_hits.get((nx, ny), 0) or 0) >= 2:
+                if direction in ("left", "right"):
+                    shoulders = ((nx, ny - 1), (nx, ny + 1))
+                else:
+                    shoulders = ((nx - 1, ny), (nx + 1, ny))
+                for sx, sy in shoulders:
+                    self._remember_blocked_cell(sx, sy, reason=f"{reason}_cluster")
+        except Exception:
+            return
+
+    def _check_stuck(self) -> bool:
+        """Return True when a move key was sent and coordinates did not change for 1 second."""
+        if bool(getattr(self.state, "ntab_active", False)):
+            self._nav_attempt_pos = None
+            self._nav_attempt_started_at = 0.0
+            self.stuck_count = 0
+            return False
+
+        # Follow 紐⑤뱶?먯꽌??洹쇱젒 踰붿쐞 吏꾩엯 ??stuck ??대㉧瑜?利됱떆 ?댁젣?쒕떎.
+        # (猷⑦봽 ?쒖꽌??check_stuck媛 follow 洹쇱젒 ?먯젙蹂대떎 癒쇱? ?ㅽ뻾?섍린 ?뚮Ц)
+        follow_target = self._calc_follow_target() if bool(getattr(self.state, "nav_follow_enabled", False)) else None
+        follow_navigation_active = should_allow_follow_navigation(
+            getattr(self.state, "nav_follow_enabled", False),
+            follow_target is not None,
+            getattr(self.state, "is_connected", False),
+        )
+        if follow_navigation_active and follow_target:
+            tx, ty = follow_target
+            if should_hold_follow_position(int(tx), int(ty), int(self.state.x), int(self.state.y)):
+                self._nav_attempt_pos = None
+                self._nav_attempt_started_at = 0.0
+                self.stuck_count = 0
+                self._support_follow_soft_stuck_count = 0
+                return False
+
+        now = time.time()
+        current_pos = (self.state.x, self.state.y)
+
+        if self._nav_current_pos != current_pos:
+            self.last_pos = self._nav_current_pos
+            self._nav_current_pos = current_pos
+            self._nav_attempt_pos = None
+            self._nav_attempt_started_at = 0.0
+            self.stuck_count = 0
+            self._support_follow_soft_stuck_count = 0
+            return False
+
+        if self._nav_attempt_pos != current_pos:
+            return False
+
+        stuck_time_limit = float(TIMING_CONFIG.get("stuck_time", 4.0))
+        if follow_navigation_active and follow_target:
+            tx, ty = follow_target
+            follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
+            # 2D ?듬줈(??2移??먯꽌 留됲옒? 鍮⑤━ ??댁빞 ?섎?濡?follow 以묒뿉??湲곗????⑥텞.
+            if follow_gap >= 4:
+                stuck_time_limit = min(stuck_time_limit, 0.35)
+            elif follow_gap >= 2:
+                stuck_time_limit = min(stuck_time_limit, 0.55)
+            else:
+                stuck_time_limit = min(stuck_time_limit, 1.00)
+        if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= stuck_time_limit:
+            if bool(getattr(self, "_portal_follow_active", False)):
+                if (now - float(getattr(self, "_last_portal_follow_log_time", 0.0) or 0.0)) >= 0.8:
+                    print(f"[PortalFollow] stuck wait: keep exact portal path pos={current_pos}")
+                    self._last_portal_follow_log_time = now
+                self._blocked_cells_until.clear()
+                self._blocked_cell_hits.clear()
+                self._nav_attempt_pos = None
+                self._nav_attempt_started_at = 0.0
+                self.stuck_count = 0
+                self._support_follow_soft_stuck_count = 0
+                return False
+
+            self.stuck_count += 1
+            self._remember_last_move_blocked_cell(reason="stuck_timeout")
+            print(f"[Stuck] no coord change for {stuck_time_limit}s ({self.stuck_count} consecutive) pos={current_pos}")
+            if should_defer_stuck_escape_for_support(
+                f"{getattr(self.state, 'role', '')} {getattr(self.state, 'network_role', '')}",
+                bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
+                getattr(self.state, "nav_follow_enabled", False),
+            ):
+                if not should_retarget_after_support_follow_stuck(
+                    int(getattr(self, "_support_follow_soft_stuck_count", 0) or 0),
+                    max_soft_stucks_before_retarget=2,
+                ):
+                    self._support_follow_soft_stuck_count += 1
+                    self._quick_support_follow_escape(follow_target)
+                    self._nav_attempt_pos = None
+                    self._nav_attempt_started_at = 0.0
+                    return False
+                self._support_follow_soft_stuck_count = 0
+                self._trigger_box_collision_recover(force_retarget=True)
+                self._nav_attempt_pos = None
+                self._nav_attempt_started_at = 0.0
+                self.stuck_count = 0
+                return False
+            self._trigger_box_collision_recover()
+            return True
+        return False
+
+    def _trigger_box_collision_recover(self, force_retarget: bool = False):
+        now = time.time()
+        if (not force_retarget) and (now - float(self._last_box_collision_recover_request_time or 0.0)) < 1.2:
+            return
+        self._last_box_collision_recover_request_time = now
+        if should_defer_stuck_escape_for_support(
+            f"{getattr(self.state, 'role', '')} {getattr(self.state, 'network_role', '')}",
+            bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
+            getattr(self.state, "nav_follow_enabled", False),
+        ):
+            try:
+                hw.stop_all_inputs(repeat=1, delay=0.02)
+            except Exception:
+                pass
+            current_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+            self.state.support_input_blocked_until = max(current_block, time.time() + 0.8)
+            self.state.box_collision_reprepare_requested = True
+            print("[Recover] support box collision: stop movement + request F2 reprepare.")
+            return
+        # 이동 키 입력 후 좌표 미변경 = box 충돌로 간주: ESC 1회 + F2 재준비 요청
+        try:
+            hw.humanized_press("esc")
+            humanized_sleep(0.05)
+        except Exception:
+            pass
+        self.state.box_collision_reprepare_requested = True
+        print("[Recover] box collision suspected: esc once + request F2 reprepare.")
+
+    def _mark_nav_attempt(self):
+        current_pos = (self.state.x, self.state.y)
+        if self._nav_attempt_pos != current_pos:
+            self._nav_attempt_pos = current_pos
+            self._nav_attempt_started_at = time.time()
+
+    # ----------------------------------------------------------
+    def _escape_stuck(self, rewind_waypoint: bool = False):
+        """
+        Intelligent escape movement.
+        1) step back toward the previous position when available
+        2) random side-step
+        3) repeat a few times
+        4) reset target state
+        """
+        print("[Warn] [STUCK] blocked movement detected, escaping...")
+        self.state.is_stuck = True
+
+        for _ in range(random.randint(2, 3)):
+            if isinstance(self.last_pos, tuple) and len(self.last_pos) == 2:
+                cx, cy = self.state.x, self.state.y
+                lx, ly = self.last_pos
+                dx, dy = lx - cx, ly - cy
+                if abs(dx) > abs(dy):
+                    move_dir = "right" if dx > 0 else "left"
+                else:
+                    move_dir = "down" if dy > 0 else "up"
+                hw.hold_move(move_dir, "stuck_back_hold")
+                humanized_sleep(TIMING_CONFIG["key_gap"])
+
+            ccx, ccy = self._get_nav_grid_pos()
+            blocked_cells = self._get_blocked_cells()
+            escape_dirs = []
+            for d in ["left", "right", "up", "down"]:
+                nx, ny = _nav_step_from_dir(int(ccx), int(ccy), d)
+                if (nx, ny) not in blocked_cells:
+                    escape_dirs.append(d)
+            ranked_dirs = escape_dirs or ["left", "right", "up", "down"]
+            if isinstance(self._current_nav_context, dict) and self._current_nav_context.get("kind") == "follow":
+                follow_target = self._calc_follow_target()
+                if follow_target:
+                    tx, ty = follow_target
+                    ranked_dirs = sorted(
+                        ranked_dirs,
+                        key=lambda d: follow_manhattan_gap(
+                            int(tx),
+                            int(ty),
+                            *_nav_step_from_dir(int(ccx), int(ccy), d),
+                        ),
+                    )
+            side_dir = ranked_dirs[0] if ranked_dirs else random.choice(["left", "right", "up", "down"])
+            hw.hold_move(side_dir, "stuck_side_hold")
+            humanized_sleep(TIMING_CONFIG["key_gap"])
+
+        self.state.target_locked = False
+        self.state.target_name = ""
+        if rewind_waypoint and self.wp_idx > 0:
+            self.wp_idx -= 1
+        self.state.is_stuck = False
+        self.stuck_count = 0
+        self.stuck_timer = 0.0
+        self._nav_attempt_pos = None
+        self._nav_attempt_started_at = 0.0
+        print("[OK] [STUCK] escape complete, continue navigation.")
+
+    def _set_nav_context(self, kind: str, **kwargs):
+        self._current_nav_context = {"kind": kind, **kwargs}
+
+    def _clear_nav_context(self):
+        self._current_nav_context = None
+
+    def _mark_combat_pause(self):
+        ctx = self._current_nav_context
+        if not isinstance(ctx, dict):
+            return
+        if ctx.get("kind") not in ("seq_point", "list_wp"):
+            return
+        self._combat_resume_context = dict(ctx)
+        self._advance_waypoint_after_combat = True
+
+    def _advance_waypoint_after_interrupt(self):
+        if not self._advance_waypoint_after_combat:
+            return
+        ctx = self._combat_resume_context
+        if not isinstance(ctx, dict):
+            self._advance_waypoint_after_combat = False
+            return
+
+        kind = ctx.get("kind")
+        if kind == "seq_point":
+            idx = int(ctx.get("seq_point_idx", -1))
+            advance_delta = int(ctx.get("advance_delta", 1))
+            if self.seq_phase == "points" and self.seq_point_idx == idx:
+                self.seq_point_idx += advance_delta
+                print(f"[Nav] ?꾪닾 醫낅즺 ???ㅼ쓬 ?щ깷?먯쑝濡?嫄대꼫?: index {self.seq_point_idx}")
+        elif kind == "list_wp":
+            idx = int(ctx.get("wp_idx", -1))
+            advance_delta = int(ctx.get("advance_delta", 1))
+            if self.wp_idx == idx:
+                self.wp_idx += advance_delta
+                print(f"[Nav] ?꾪닾 醫낅즺 ???ㅼ쓬 ?⑥씠?ъ씤?몃줈 嫄대꼫?: index {self.wp_idx}")
+
+        self._advance_waypoint_after_combat = False
+        self._combat_resume_context = None
+
+    # ----------------------------------------------------------
+    def _is_in_combat(self) -> bool:
+        """?꾪닾 以??곹깭 ?먮퀎: target_locked == True ?먮뒗 combat_start_time?쇰줈遺??5珥??대궡."""
+        if self.state.target_locked:
+            return True
+        if self.state.combat_start_time > 0:
+            elapsed = time.time() - self.state.combat_start_time
+            if elapsed < 5.0:
+                return True
+        return False
+
+    # ----------------------------------------------------------
+    def _is_wall(self, gx: int, gy: int) -> bool:
+        """?꾩옱 留듭쓽 maps_db瑜?議고쉶?섏뿬 ?대떦 Grid媛 踰쎌씤吏 ?먮퀎."""
+        m = self.state.current_map
+        map_data = self.state.maps_db.get(m)
+        if not map_data:
+            return False
+        walls = map_data.get("walls", [])
+        return [gx, gy] in walls
+
+    def _get_remote_warrior_snapshot(self) -> dict | None:
+        remote = self.state.get_fresh_remote_data_by_role("격수")
+        return remote if isinstance(remote, dict) and remote else None
+
+    def _clear_target_for_portal_follow(self) -> bool:
+        """굴이동 감지 직후 대상선택box/red_tab을 하드웨어 강제 ESC 2회로 해제한다."""
+        try:
+            hw.send_force("RELEASE_ALL")
+        except Exception:
+            for direction in self._ALL_DIRS:
+                try:
+                    hw.release_key(direction)
+                except Exception:
+                    pass
+
+        current_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+        self.state.support_input_blocked_until = max(current_block, time.time() + 0.80)
+
+        try:
+            for _ in range(2):
+                hw.send_force("D:esc")
+                humanized_sleep(0.008, variance=0.02)
+                hw.send_force("U:esc")
+                humanized_sleep(0.014, variance=0.03)
+            print("[PortalFollow] clear target before portal follow: force D/U esc x2")
+            return True
+        except Exception as e:
+            print(f"[PortalFollow] force esc x2 failed: {e}")
+            try:
+                for _ in range(2):
+                    hw.fast_press("esc", variance=0.04)
+                    humanized_sleep(0.055, variance=0.06)
+                print("[PortalFollow] clear target before portal follow: fallback fast esc x2")
+                return True
+            except Exception as fallback_error:
+                print(f"[PortalFollow] fallback esc x2 failed: {fallback_error}")
+                return False
+
+    def _arm_portal_follow(
+        self,
+        warrior_last: tuple[int, int],
+        enter_dir: str | None,
+        *,
+        started_at: float | None = None,
+        clear_target: bool = False,
+        source_map_sig: tuple[str, str, str, str] | None = None,
+        log_prefix: str = "armed",
+    ) -> None:
+        warrior_xy = (int(warrior_last[0]), int(warrior_last[1]))
+        dir_norm = normalize_move_dir(enter_dir)
+        warrior_xy, portal_xy = resolve_portal_follow_cells(warrior_xy[0], warrior_xy[1], dir_norm)
+        started = float(started_at if started_at is not None else time.time())
+        self._portal_follow_active = True
+        self._portal_follow_approach = warrior_xy
+        self._portal_follow_coord = portal_xy
+        self._portal_follow_dir = dir_norm
+        self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
+        self._portal_follow_started_at = started
+        self._portal_enter_fail_streak = 0
+        self._last_self_portal_coord = (int(self.state.x), int(self.state.y))
+        self._blocked_cells_until.clear()
+        self._blocked_cell_hits.clear()
+        # Portal follow must be able to press movement keys.
+        try:
+            self.state.support_input_blocked_until = 0.0
+            self.state.is_combat_busy = False
+        except Exception:
+            pass
+        self.state.portal_follow_active = True
+        self.state.portal_follow_retarget_requested = True
+        self.state.portal_follow_started_at = started
+        self.state.portal_follow_finished_at = 0.0
+        self.state.portal_follow_coord = portal_xy
+        self.state.portal_follow_approach = warrior_xy
+        self.state.portal_follow_dir = dir_norm
+        try:
+            self.state.red_tab_enabled = False
+        except Exception:
+            pass
+        if clear_target:
+            self._clear_target_for_portal_follow()
+        print(
+            f"[PortalFollow] {log_prefix}: warrior_last={warrior_xy}, "
+            f"portal={portal_xy}, enter_dir={dir_norm or '-'}"
+        )
+
+    def _update_portal_follow_state(self, remote_data: dict | None) -> None:
+        if not isinstance(remote_data, dict):
+            return
+        try:
+            cur_x = int(remote_data.get("x", remote_data.get("pos_x", 0)) or 0)
+            cur_y = int(remote_data.get("y", remote_data.get("pos_y", 0)) or 0)
+        except Exception:
+            return
+
+        prev = self._last_warrior_coord
+        prev_dir = normalize_move_dir(self._last_warrior_dir)
+        prev_step = normalize_move_dir(self._last_warrior_step_dir)
+        dps_dir = normalize_move_dir(remote_data.get("last_move_dir", ""))
+        map_sig = (
+            str(remote_data.get("map_name", "") or ""),
+            str(remote_data.get("map_floor", "") or ""),
+            str(remote_data.get("current_map", "") or ""),
+            str(remote_data.get("current_floor", "") or ""),
+        )
+        map_info_change_seq = int(remote_data.get("map_info_change_seq", 0) or 0)
+        map_info_changed = map_info_change_seq > int(getattr(self, "_last_map_info_change_seq", 0) or 0)
+        if map_info_changed:
+            self._last_map_info_change_seq = map_info_change_seq
+        prev_map_sig = self._last_warrior_map_sig
+        cur_ok = is_plausible_map_coord(cur_x, cur_y)
+        event_prev = None
+        event_dir = None
+        event_seq = 0
+        event_age = None
+        event_data = remote_data.get("coord_transition")
+        if isinstance(event_data, dict):
+            try:
+                event_seq = int(event_data.get("seq", 0) or remote_data.get("coord_transition_seq", 0) or 0)
+                event_ts = float(event_data.get("ts", 0.0) or 0.0)
+                if event_ts > 0.0:
+                    event_age = max(0.0, time.time() - event_ts)
+                event_from = event_data.get("from") or []
+                event_x = int(event_from[0])
+                event_y = int(event_from[1])
+                if (
+                    event_seq > int(self._last_coord_transition_seq or 0)
+                    and is_plausible_transition_coord(event_x, event_y)
+                    and (event_age is None or event_age <= 0.75)
+                ):
+                    event_prev = (event_x, event_y)
+                    event_dir = normalize_move_dir(event_data.get("dir") or event_data.get("input_dir"))
+                    self._last_coord_transition_seq = event_seq
+            except Exception:
+                event_prev = None
+                event_dir = None
+                event_age = None
+
+        if self._portal_follow_active:
+            if cur_ok:
+                if prev and (prev[0], prev[1]) != (cur_x, cur_y):
+                    if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1:
+                        step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
+                        if step:
+                            self._last_warrior_step_dir = step
+                self._last_warrior_coord = (cur_x, cur_y)
+                self._last_warrior_map_sig = map_sig
+                if dps_dir:
+                    self._last_warrior_dir = dps_dir
+            return
+
+        map_changed = bool(prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+        cur_ok = (
+            is_plausible_map_coord(cur_x, cur_y)
+            or (event_prev is not None and is_plausible_transition_coord(cur_x, cur_y))
+            or (map_changed and is_plausible_transition_coord(cur_x, cur_y))
+        )
+        coord_jumped = bool(
+            prev
+            and is_plausible_map_coord(prev[0], prev[1])
+            and cur_ok
+            and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
+        )
+
+        if prev and cur_ok and (prev[0], prev[1]) != (cur_x, cur_y):
+            if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1:
+                step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
+                if step:
+                    self._last_warrior_step_dir = step
+                    prev_step = step
+            self._warrior_trail.append((prev[0], prev[1], prev_step or prev_dir))
+            if len(self._warrior_trail) > 12:
+                self._warrior_trail = self._warrior_trail[-12:]
+
+        transition_prev = event_prev or prev
+        if event_prev or (
+            prev
+            and is_plausible_map_coord(prev[0], prev[1])
+            and (coord_jumped or map_changed or map_info_changed)
+        ):
+            source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
+            cached_hint = {}
+            if isinstance(getattr(self.state, "portal_session_cache", None), dict):
+                cached_hint = dict(self.state.portal_session_cache.get(source_map_sig, {}) or {})
+            cached_dir = normalize_move_dir(cached_hint.get("enter_dir"))
+            enter_dir = event_dir or prev_step or self._last_warrior_step_dir or cached_dir
+            if not enter_dir:
+                if cur_ok:
+                    self._last_warrior_coord = (cur_x, cur_y)
+                    self._last_warrior_map_sig = map_sig
+                print(
+                    f"[PortalFollow] transition waiting for stable step dir: "
+                    f"now=({cur_x}, {cur_y}) event_age={event_age if event_age is not None else '-'} "
+                    f"map={prev_map_sig}->{map_sig}"
+                )
+                return False
+            self._arm_portal_follow(
+                transition_prev,
+                enter_dir,
+                started_at=time.time(),
+                clear_target=True,
+                source_map_sig=source_map_sig,
+                log_prefix=(
+                    f"warrior transition detected now=({cur_x}, {cur_y}) "
+                    f"coord_jump={coord_jumped} map_changed={map_changed} "
+                    f"event_seq={event_seq or '-'} step_dir={prev_step or '-'}"
+                ),
+            )
+
+        if cur_ok:
+            self._last_warrior_coord = (cur_x, cur_y)
+            self._last_warrior_map_sig = map_sig
+            if dps_dir:
+                self._last_warrior_dir = dps_dir
+        elif map_changed:
+            self._last_warrior_map_sig = map_sig
+
+    def _finish_portal_follow(self, reason: str) -> None:
+        self._portal_follow_active = False
+        self._portal_follow_coord = None
+        self._portal_follow_approach = None
+        self._portal_follow_dir = None
+        self._portal_follow_source_map_sig = None
+        self._last_self_portal_coord = None
+        self._portal_enter_fail_streak = 0
+        self.state.portal_follow_active = False
+        self.state.portal_follow_finished_at = time.time()
+        self.state.portal_follow_coord = None
+        self.state.portal_follow_approach = None
+        self.state.portal_follow_dir = None
+        self._nav_attempt_pos = None
+        self._nav_attempt_started_at = 0.0
+        self.stuck_count = 0
+        self._support_follow_soft_stuck_count = 0
+        self.state.last_move_dir = ""
+        print(f"[PortalFollow] finished: {reason}")
+
+    def _complete_portal_follow_on_self_transition(self) -> bool:
+        if not self._portal_follow_active:
+            return False
+        current = (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
+        prev = self._last_self_portal_coord
+        self._last_self_portal_coord = current
+        if not prev:
+            return False
+        if should_detect_warrior_transition(prev[0], prev[1], current[0], current[1], jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE):
+            self._finish_portal_follow(f"self_transition prev={prev}, now={current}")
+            return True
+        return False
+
+    def _get_portal_follow_target(self) -> tuple[int, int] | None:
+        if (
+            not self._portal_follow_active
+            and bool(getattr(self.state, "portal_follow_active", False))
+            and getattr(self.state, "portal_follow_coord", None)
+        ):
+            try:
+                requested = getattr(self.state, "portal_follow_coord", None)
+                requested_approach = getattr(self.state, "portal_follow_approach", None)
+                enter_dir = normalize_move_dir(getattr(self.state, "portal_follow_dir", None))
+                if requested_approach:
+                    warrior_last = (int(requested_approach[0]), int(requested_approach[1]))
+                else:
+                    warrior_last = (int(requested[0]), int(requested[1]))
+                self._arm_portal_follow(
+                    warrior_last,
+                    enter_dir,
+                    started_at=float(getattr(self.state, "portal_follow_started_at", 0.0) or time.time()),
+                    clear_target=False,
+                    log_prefix="adopted immediate service request",
+                )
+            except Exception:
+                self._portal_follow_active = False
+                self._portal_follow_coord = None
+                self._portal_follow_approach = None
+        if not self._portal_follow_active or not self._portal_follow_coord:
+            return None
+        if self._complete_portal_follow_on_self_transition():
+            return None
+        if time.time() - float(self._portal_follow_started_at or 0.0) > self._portal_follow_timeout:
+            print("[PortalFollow] timeout. Resume normal follow.")
+            self._finish_portal_follow("timeout")
+            return None
+        return self._portal_follow_coord
+
+    def _complete_portal_follow_if_arrived(self) -> bool:
+        target = self._get_portal_follow_target()
+        if not target:
+            return False
+        current_pos = (int(self.state.x), int(self.state.y))
+        warrior_last = self._portal_follow_approach or target
+        enter_dir = normalize_move_dir(self._portal_follow_dir)
+        _, portal_xy = resolve_portal_follow_cells(warrior_last[0], warrior_last[1], enter_dir)
+        if not should_attempt_portal_enter(
+            current_pos[0],
+            current_pos[1],
+            warrior_last[0],
+            warrior_last[1],
+            enter_dir=enter_dir,
+            portal_x=portal_xy[0],
+            portal_y=portal_xy[1],
+        ):
+            return False
+
+        before_pos = current_pos
+        print(
+            f"[PortalFollow] enter zone: current={current_pos}, warrior_last={warrior_last}, "
+            f"enter_dir={enter_dir or '-'}"
+        )
+        if not enter_dir:
+            print("[PortalFollow] enter_dir missing; waiting on warrior last tile")
+            return True
+
+        # Force-hold the entry key on the exact warrior last tile (ignore support input block).
+        try:
+            self.state.support_input_blocked_until = 0.0
+        except Exception:
+            pass
+        hold_sec = max(1.0, float(TIMING_CONFIG.get("entry_hold", 1.0) or 1.0))
+        warped = False
+        for attempt in range(3):
+            if current_pos != warrior_last and current_pos != portal_xy:
+                approach_dir = dir_between_coords(current_pos[0], current_pos[1], warrior_last[0], warrior_last[1])
+                if approach_dir:
+                    print(
+                        f"[PortalFollow] re-approach warrior_last={warrior_last} "
+                        f"from {current_pos} via {approach_dir}"
+                    )
+                    hw.hold_move(approach_dir, "move_hold", duration=0.18, force=True)
+                    humanized_sleep(0.08, variance=0.02)
+                    current_pos = (
+                        int(getattr(self.state, "x", 0) or 0),
+                        int(getattr(self.state, "y", 0) or 0),
+                    )
+                    if current_pos != warrior_last:
+                        break
+
+            before_pos = current_pos
+            hw.hold_move(
+                enter_dir,
+                "entry_hold",
+                duration=random.uniform(hold_sec, hold_sec + 0.35),
+                force=True,
+            )
+            self.state.last_move_dir = enter_dir
+            humanized_sleep(0.12, variance=0.04)
+            after_pos = (
+                int(getattr(self.state, "x", 0) or 0),
+                int(getattr(self.state, "y", 0) or 0),
+            )
+            if should_detect_warrior_transition(
+                before_pos[0],
+                before_pos[1],
+                after_pos[0],
+                after_pos[1],
+                jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE,
+            ):
+                warped = True
+                cache_key = self._portal_follow_source_map_sig
+                if cache_key is None:
+                    cache_key = (
+                        str(getattr(self.state, "map_name", "") or ""),
+                        str(getattr(self.state, "map_floor", "") or ""),
+                        str(getattr(self.state, "current_map", "") or ""),
+                        str(getattr(self.state, "current_floor", "") or ""),
+                    )
+                cache = getattr(self.state, "portal_session_cache", None)
+                if isinstance(cache, dict):
+                    cache[cache_key] = {
+                        "enter_dir": enter_dir,
+                        "approach": [int(warrior_last[0]), int(warrior_last[1])],
+                        "portal": [int(portal_xy[0]), int(portal_xy[1])],
+                        "confirmed_at": time.time(),
+                        "source": "runtime_success",
+                    }
+                self._finish_portal_follow(
+                    f"entered self_transition before={before_pos}, after={after_pos}, attempt={attempt + 1}"
+                )
+                break
+            current_pos = after_pos
+            if current_pos != warrior_last:
+                print(
+                    f"[PortalFollow] left warrior_last tile while holding {enter_dir}: "
+                    f"{before_pos} -> {current_pos}"
+                )
+
+        if warped:
+            return True
+
+        self._portal_enter_fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0) + 1
+        self._last_self_portal_coord = current_pos
+        print(
+            f"[PortalFollow] portal enter pending: current={current_pos}, "
+            f"warrior_last={warrior_last}, fail_streak={self._portal_enter_fail_streak}"
+        )
+        # Stay in portal mode so we keep retrying instead of normal follow.
+        return True
+
+    # ----------------------------------------------------------
+    def _calc_follow_target(self) -> tuple[int, int] | None:
+        """
+        ??? last_move_dir? ???? ??? ?? ??? ??.
+        ?? ???? ??? ??? ? ?? ??? ???? ??? ?? ??? ?? ????.
+        """
+        remote_data = self._get_remote_warrior_snapshot()
+        if not remote_data:
+            return None
+
+        dps_x = int(remote_data.get("x", remote_data.get("pos_x", 0)) or 0)
+        dps_y = int(remote_data.get("y", remote_data.get("pos_y", 0)) or 0)
+        if abs(dps_x) > 300 or abs(dps_y) > 300:
+            return None
+        map_sig = (
+            str(remote_data.get("map_name", "") or ""),
+            str(remote_data.get("map_floor", "") or ""),
+            str(remote_data.get("current_map", "") or ""),
+            str(remote_data.get("current_floor", "") or ""),
+        )
+        self._update_portal_follow_state(remote_data)
+        portal_target = self._get_portal_follow_target()
+        if portal_target:
+            self._last_follow_target_key = ("portal", *map_sig, dps_x, dps_y)
+            self._last_follow_target = (int(portal_target[0]), int(portal_target[1]))
+            self._last_follow_target_ts = time.time()
+            now = time.time()
+            if now - float(self._last_portal_follow_log_time or 0.0) >= 1.0:
+                print(
+                    f"[PortalFollow] target warrior_last={portal_target}, "
+                    f"enter_dir={getattr(self, '_portal_follow_dir', None) or '-'}, "
+                    f"warrior_now=({dps_x}, {dps_y})"
+                )
+                self._last_portal_follow_log_time = now
+            return portal_target
+        # 일반 추적은 마지막 방향값에 의존하지 않고 최신 격수 좌표를 직접 목표로 삼는다.
+        # 방향값은 포탈 진입 판정에서만 사용해야 지연/오래된 방향으로 선회하지 않는다.
+        follow_key = ("normal", *map_sig, dps_x, dps_y)
+        cached_target = getattr(self, "_last_follow_target", None)
+        cached_key = getattr(self, "_last_follow_target_key", None)
+        cached_age = time.time() - float(getattr(self, "_last_follow_target_ts", 0.0) or 0.0)
+        if cached_target and cached_key == follow_key and cached_age <= 0.75:
+            return cached_target
+
+        target_x = dps_x
+        target_y = dps_y
+
+        current_x = int(getattr(self.state, "x", 0) or 0)
+        current_y = int(getattr(self.state, "y", 0) or 0)
+        follow_target = adjust_follow_target_by_axis_gap(
+            target_x,
+            target_y,
+            current_x,
+            current_y,
+            dps_x,
+            dps_y,
+            min_axis_gap=1,
+        )
+        self._last_follow_target_key = follow_key
+        self._last_follow_target = (int(follow_target[0]), int(follow_target[1]))
+        self._last_follow_target_ts = time.time()
+        return follow_target
+
+    def _is_follow_reposition_needed(self) -> bool:
+        if not bool(getattr(self.state, "nav_follow_enabled", False)):
+            return False
+
+        remote_data = self.state.get_fresh_remote_data_by_role("격수")
+        if not isinstance(remote_data, dict):
+            return False
+
+        target_x = int(remote_data.get("x", remote_data.get("pos_x", 0)) or 0)
+        target_y = int(remote_data.get("y", remote_data.get("pos_y", 0)) or 0)
+        if abs(target_x) > 300 or abs(target_y) > 300:
+            return False
+
+        follow_x = target_x
+        follow_y = target_y
+        current_x = int(getattr(self.state, "x", 0) or 0)
+        current_y = int(getattr(self.state, "y", 0) or 0)
+        follow_x, follow_y = adjust_follow_target_by_axis_gap(
+            follow_x,
+            follow_y,
+            current_x,
+            current_y,
+            target_x,
+            target_y,
+            min_axis_gap=1,
+        )
+        return not should_hold_follow_position(follow_x, follow_y, current_x, current_y)
+
+    def _repair_dosa_f2_runtime_state(self):
+        if self.state.role not in ("도사", "도사1") or not bool(getattr(self.state, "service_active", False)):
+            return
+
+        changed = []
+        follow_pause_active = time.time() < float(getattr(self, "_follow_pause_until", 0.0) or 0.0)
+        if (not follow_pause_active) and not bool(getattr(self.state, "nav_follow_enabled", False)):
+            self.state.nav_follow_enabled = True
+            changed.append("follow")
+        if not bool(getattr(self.state, "auto_hunt", False)):
+            self.state.auto_hunt = True
+            changed.append("auto_hunt")
+        if not bool(getattr(self.state, "sentinel_enabled", False)):
+            self.state.sentinel_enabled = True
+            changed.append("sentinel")
+
+        busy_is_stale = (
+            bool(getattr(self.state, "is_combat_busy", False))
+            and not self._is_support_phase_active()
+            and not bool(getattr(self, "_warrior_debuff_active", False))
+            and not bool(getattr(self, "_death_recovery_active", False))
+            and time.time() >= float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+        )
+        if busy_is_stale:
+            self._set_combat_busy(False)
+            changed.append("combat_busy")
+
+        if changed:
+            now = time.time()
+            if now - float(getattr(self, "_last_dosa_f2_watchdog_log_time", 0.0) or 0.0) >= 1.0:
+                print(f"[F2Watchdog] restored: {','.join(changed)}")
+                self._last_dosa_f2_watchdog_log_time = now
+
+    def _restore_dosa_service_if_follow_autohunt(self) -> bool:
+        if self.state.role not in ("도사", "도사1"):
+            return False
+        if bool(getattr(self.state, "service_active", False)):
+            return True
+        if not (
+            bool(getattr(self.state, "auto_hunt", False))
+            and bool(getattr(self.state, "nav_follow_enabled", False))
+        ):
+            return False
+        self.state.service_active = True
+        self.state.control_mode = "FOLLOW+SERVICE"
+        self.state.sentinel_enabled = True
+        now = time.time()
+        if now - float(getattr(self, "_last_dosa_f2_watchdog_log_time", 0.0) or 0.0) >= 1.0:
+            print("[F2Watchdog] restored: service_active")
+            self._last_dosa_f2_watchdog_log_time = now
+        return True
+
+    def _log_dosa_f2_idle_reason(self, reason: str, interval: float = 1.0):
+        now = time.time()
+        if now - float(getattr(self, "_last_dosa_f2_idle_reason_log_time", 0.0) or 0.0) < max(0.2, float(interval)):
+            return
+        self._last_dosa_f2_idle_reason_log_time = now
+        print(
+            f"[F2Idle] {reason} | "
+            f"service={bool(getattr(self.state, 'service_active', False))} "
+            f"follow={bool(getattr(self.state, 'nav_follow_enabled', False))} "
+            f"auto_hunt={bool(getattr(self.state, 'auto_hunt', False))} "
+            f"busy={bool(getattr(self.state, 'is_combat_busy', False))} "
+            f"block_left={max(0.0, float(getattr(self.state, 'support_input_blocked_until', 0.0) or 0.0) - time.time()):.2f}s"
+        )
+
+    def _is_portal_support_paused(self) -> bool:
+        return (
+            bool(getattr(self.state, "portal_follow_active", False))
+            or time.time() < float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0)
+        )
+
+    def _force_portal_esc_clear(self) -> None:
+        try:
+            hw.send_force("RELEASE_ALL")
+        except Exception:
+            pass
+        for _ in range(2):
+            hw.send_force("D:esc")
+            humanized_sleep(0.008, variance=0.02)
+            hw.send_force("U:esc")
+            humanized_sleep(0.014, variance=0.03)
+
+    def _handle_warrior_transition_immediate_clear(self, support_target: dict | None) -> bool:
+        if not isinstance(support_target, dict):
+            return False
+        try:
+            cur_x = int(support_target.get("x", support_target.get("pos_x", 0)) or 0)
+            cur_y = int(support_target.get("y", support_target.get("pos_y", 0)) or 0)
+        except Exception:
+            return False
+
+        prev = self._service_last_warrior_coord
+        prev_dir = normalize_move_dir(self._service_last_warrior_dir)
+        prev_step = normalize_move_dir(self._service_last_warrior_step_dir)
+        dps_dir = normalize_move_dir(support_target.get("last_move_dir", ""))
+        map_sig = (
+            str(support_target.get("map_name", "") or ""),
+            str(support_target.get("map_floor", "") or ""),
+            str(support_target.get("current_map", "") or ""),
+            str(support_target.get("current_floor", "") or ""),
+        )
+        map_info_change_seq = int(support_target.get("map_info_change_seq", 0) or 0)
+        map_info_changed = map_info_change_seq > int(self._service_last_map_info_change_seq or 0)
+        if map_info_changed:
+            self._service_last_map_info_change_seq = map_info_change_seq
+        prev_map_sig = self._service_last_warrior_map_sig
+        cur_ok = is_plausible_map_coord(cur_x, cur_y)
+        event_prev = None
+        event_dir = None
+        event_seq = 0
+        event_age = None
+        event_data = support_target.get("coord_transition")
+        if isinstance(event_data, dict):
+            try:
+                event_seq = int(event_data.get("seq", 0) or support_target.get("coord_transition_seq", 0) or 0)
+                event_ts = float(event_data.get("ts", 0.0) or 0.0)
+                if event_ts > 0.0:
+                    event_age = max(0.0, time.time() - event_ts)
+                event_from = event_data.get("from") or []
+                event_x = int(event_from[0])
+                event_y = int(event_from[1])
+                if (
+                    event_seq > int(self._service_last_coord_transition_seq or 0)
+                    and is_plausible_transition_coord(event_x, event_y)
+                    and (event_age is None or event_age <= 0.75)
+                ):
+                    event_prev = (event_x, event_y)
+                    event_dir = normalize_move_dir(event_data.get("dir") or event_data.get("input_dir"))
+                    self._service_last_coord_transition_seq = event_seq
+            except Exception:
+                event_prev = None
+                event_dir = None
+                event_age = None
+
+        # Already following a portal: keep tracking only, never overwrite target mid-run.
+        if bool(getattr(self.state, "portal_follow_active", False)):
+            if cur_ok:
+                if prev and (prev[0], prev[1]) != (cur_x, cur_y):
+                    step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
+                    if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1 and step:
+                        self._service_last_warrior_step_dir = step
+                    self._service_warrior_trail.append((prev[0], prev[1], prev_step or prev_dir))
+                    if len(self._service_warrior_trail) > 12:
+                        self._service_warrior_trail = self._service_warrior_trail[-12:]
+                self._service_last_warrior_coord = (cur_x, cur_y)
+                self._service_last_warrior_map_sig = map_sig
+                if dps_dir:
+                    self._service_last_warrior_dir = dps_dir
+            return False
+
+        map_changed = bool(prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+        cur_ok = (
+            is_plausible_map_coord(cur_x, cur_y)
+            or (event_prev is not None and is_plausible_transition_coord(cur_x, cur_y))
+            or (map_changed and is_plausible_transition_coord(cur_x, cur_y))
+        )
+        coord_jumped = bool(
+            prev
+            and is_plausible_map_coord(prev[0], prev[1])
+            and cur_ok
+            and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
+        )
+        transition_prev = event_prev or prev
+        transition = bool(event_prev) or (
+            bool(prev)
+            and is_plausible_map_coord(prev[0], prev[1])
+            and (coord_jumped or map_changed or map_info_changed)
+        )
+
+        if prev and cur_ok and (prev[0], prev[1]) != (cur_x, cur_y):
+            step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
+            if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1 and step:
+                self._service_last_warrior_step_dir = step
+            self._service_warrior_trail.append((prev[0], prev[1], prev_step or prev_dir))
+            if len(self._service_warrior_trail) > 12:
+                self._service_warrior_trail = self._service_warrior_trail[-12:]
+
+        if cur_ok:
+            self._service_last_warrior_coord = (cur_x, cur_y)
+            self._service_last_warrior_map_sig = map_sig
+            if dps_dir:
+                self._service_last_warrior_dir = dps_dir
+        elif map_changed and prev:
+            # Map changed but new coords are junk — still allow transition using prev.
+            self._service_last_warrior_map_sig = map_sig
+
+        if not transition:
+            return False
+
+        now = time.time()
+        if (now - float(getattr(self, "_last_portal_immediate_clear_time", 0.0) or 0.0)) < 0.8:
+            return False
+        self._last_portal_immediate_clear_time = now
+        self._portal_support_pause_until = now + 3.0
+
+        # Do NOT block movement keys — only pause party heal via portal_follow_active.
+        source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
+        cached_hint = {}
+        if isinstance(getattr(self.state, "portal_session_cache", None), dict):
+            cached_hint = dict(self.state.portal_session_cache.get(source_map_sig, {}) or {})
+        cached_dir = normalize_move_dir(cached_hint.get("enter_dir"))
+        enter_dir = event_dir or prev_step or getattr(self, "_service_last_warrior_step_dir", None) or cached_dir
+        if not enter_dir:
+            if cur_ok:
+                self._service_last_warrior_coord = (cur_x, cur_y)
+                self._service_last_warrior_map_sig = map_sig
+            print(
+                f"[PortalFollow] transition waiting for stable step dir: "
+                f"now=({cur_x}, {cur_y}) event_age={event_age if event_age is not None else '-'} "
+                f"map={prev_map_sig}->{map_sig}"
+            )
+            return False
+        warrior_last = (int(transition_prev[0]), int(transition_prev[1]))
+        portal_xy = offset_coord_by_dir(warrior_last[0], warrior_last[1], enter_dir)
+        self.state.portal_follow_active = True
+        self.state.portal_follow_retarget_requested = True
+        self.state.portal_follow_started_at = time.time()
+        self.state.portal_follow_finished_at = 0.0
+        self.state.portal_follow_coord = warrior_last
+        self.state.portal_follow_approach = warrior_last
+        self.state.portal_follow_dir = enter_dir
+        try:
+            self.state.red_tab_enabled = False
+        except Exception:
+            pass
+        self._party_direct_heal_target_prepared = False
+        self._party_direct_heal_verified = False
+        self._warrior_redtab_verified = False
+
+        self._force_portal_esc_clear()
+        print(
+            "[PortalFollow] immediate clear on warrior transition: "
+            f"warrior_last={warrior_last}, portal={portal_xy}, now=({cur_x}, {cur_y}), "
+            f"dir={enter_dir or '-'}, step_dir={prev_step or '-'}, "
+            f"coord_jump={coord_jumped}, map_changed={map_changed}, "
+            f"event_seq={event_seq or '-'}, map={prev_map_sig}->{map_sig}"
         )
         return True
 
@@ -3930,16 +6341,29 @@ class RouteSvc(threading.Thread):
         self._last_support_quick_escape_dir = None
         self._last_warrior_coord: tuple[int, int] | None = None
         self._last_warrior_dir: str | None = None
+        self._last_warrior_step_dir: str | None = None
+        self._last_warrior_map_sig: tuple[str, str, str, str] | None = None
+        self._warrior_trail: list[tuple[int, int, str | None]] = []
+        self._last_follow_target_key: tuple | None = None
+        self._last_follow_target: tuple[int, int] | None = None
+        self._last_follow_target_ts = 0.0
+        self._last_map_info_change_seq = 0
+        self._last_coord_transition_seq = 0
+        self._portal_session_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
         self._portal_follow_active = False
         self._portal_follow_coord: tuple[int, int] | None = None
+        self._portal_follow_approach: tuple[int, int] | None = None
         self._portal_follow_dir: str | None = None
+        self._portal_follow_source_map_sig: tuple[str, str, str, str] | None = None
         self._portal_follow_started_at = 0.0
-        self._portal_follow_timeout = 15.0
+        self._portal_follow_timeout = 25.0
         self._last_portal_follow_log_time = 0.0
         self._last_self_portal_coord: tuple[int, int] | None = None
+        self._portal_enter_fail_streak = 0
         self.state.portal_follow_active = False
         self.state.portal_follow_retarget_requested = False
         self.state.portal_follow_coord = None
+        self.state.portal_follow_approach = None
         self.state.portal_follow_dir = None
 
     # ----------------------------------------------------------
@@ -4087,9 +6511,7 @@ class RouteSvc(threading.Thread):
         )
         if follow_navigation_active and follow_target:
             tx, ty = follow_target
-            if self._should_hold_follow_at_gap(
-                follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
-            ):
+            if should_hold_follow_position(int(tx), int(ty), int(self.state.x), int(self.state.y)):
                 self._nav_attempt_pos = None
                 self._nav_attempt_started_at = 0.0
                 self.stuck_count = 0
@@ -4317,7 +6739,7 @@ class RouteSvc(threading.Thread):
         return [gx, gy] in walls
 
     def _get_remote_warrior_snapshot(self) -> dict | None:
-        remote = self.state.get_remote_data_by_role("격수") or self.state.get_remote_data()
+        remote = self.state.get_fresh_remote_data_by_role("격수")
         return remote if isinstance(remote, dict) and remote else None
 
     def _clear_target_for_portal_follow(self) -> bool:
@@ -4354,6 +6776,54 @@ class RouteSvc(threading.Thread):
                 print(f"[PortalFollow] fallback esc x2 failed: {fallback_error}")
                 return False
 
+    def _arm_portal_follow(
+        self,
+        warrior_last: tuple[int, int],
+        enter_dir: str | None,
+        *,
+        started_at: float | None = None,
+        clear_target: bool = False,
+        source_map_sig: tuple[str, str, str, str] | None = None,
+        log_prefix: str = "armed",
+    ) -> None:
+        warrior_xy = (int(warrior_last[0]), int(warrior_last[1]))
+        dir_norm = normalize_move_dir(enter_dir)
+        warrior_xy, portal_xy = resolve_portal_follow_cells(warrior_xy[0], warrior_xy[1], dir_norm)
+        started = float(started_at if started_at is not None else time.time())
+        self._portal_follow_active = True
+        self._portal_follow_approach = warrior_xy
+        self._portal_follow_coord = portal_xy
+        self._portal_follow_dir = dir_norm
+        self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
+        self._portal_follow_started_at = started
+        self._portal_enter_fail_streak = 0
+        self._last_self_portal_coord = (int(self.state.x), int(self.state.y))
+        self._blocked_cells_until.clear()
+        self._blocked_cell_hits.clear()
+        # Portal follow must be able to press movement keys.
+        try:
+            self.state.support_input_blocked_until = 0.0
+            self.state.is_combat_busy = False
+        except Exception:
+            pass
+        self.state.portal_follow_active = True
+        self.state.portal_follow_retarget_requested = True
+        self.state.portal_follow_started_at = started
+        self.state.portal_follow_finished_at = 0.0
+        self.state.portal_follow_coord = portal_xy
+        self.state.portal_follow_approach = warrior_xy
+        self.state.portal_follow_dir = dir_norm
+        try:
+            self.state.red_tab_enabled = False
+        except Exception:
+            pass
+        if clear_target:
+            self._clear_target_for_portal_follow()
+        print(
+            f"[PortalFollow] {log_prefix}: warrior_last={warrior_xy}, "
+            f"portal={portal_xy}, enter_dir={dir_norm or '-'}"
+        )
+
     def _update_portal_follow_state(self, remote_data: dict | None) -> None:
         if not isinstance(remote_data, dict):
             return
@@ -4362,53 +6832,141 @@ class RouteSvc(threading.Thread):
             cur_y = int(remote_data.get("y", remote_data.get("pos_y", 0)) or 0)
         except Exception:
             return
-        if abs(cur_x) > 300 or abs(cur_y) > 300:
-            return
 
         prev = self._last_warrior_coord
-        dps_dir = str(remote_data.get("last_move_dir", "") or "").strip().lower()
-        if self._portal_follow_active:
-            self._last_warrior_coord = (cur_x, cur_y)
-            if dps_dir in self._ALL_DIRS:
-                self._last_warrior_dir = dps_dir
-            return
-        if prev and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=12):
-            prev_dir = str(getattr(self, "_last_warrior_dir", "") or "").strip().lower()
-            enter_dir = prev_dir if prev_dir in self._ALL_DIRS else dps_dir
-            self._portal_follow_active = True
-            self._portal_follow_coord = prev
-            self._portal_follow_dir = enter_dir if enter_dir in self._ALL_DIRS else None
-            self._portal_follow_started_at = time.time()
-            self._last_self_portal_coord = (int(self.state.x), int(self.state.y))
-            self._blocked_cells_until.clear()
-            self._blocked_cell_hits.clear()
-            self.state.portal_follow_active = True
-            self.state.portal_follow_retarget_requested = True
-            self.state.portal_follow_started_at = self._portal_follow_started_at
-            self.state.portal_follow_finished_at = 0.0
-            self.state.portal_follow_coord = prev
-            self.state.portal_follow_dir = self._portal_follow_dir
+        prev_dir = normalize_move_dir(self._last_warrior_dir)
+        prev_step = normalize_move_dir(self._last_warrior_step_dir)
+        dps_dir = normalize_move_dir(remote_data.get("last_move_dir", ""))
+        map_sig = (
+            str(remote_data.get("map_name", "") or ""),
+            str(remote_data.get("map_floor", "") or ""),
+            str(remote_data.get("current_map", "") or ""),
+            str(remote_data.get("current_floor", "") or ""),
+        )
+        map_info_change_seq = int(remote_data.get("map_info_change_seq", 0) or 0)
+        map_info_changed = map_info_change_seq > int(getattr(self, "_last_map_info_change_seq", 0) or 0)
+        if map_info_changed:
+            self._last_map_info_change_seq = map_info_change_seq
+        prev_map_sig = self._last_warrior_map_sig
+        cur_ok = is_plausible_map_coord(cur_x, cur_y)
+        event_prev = None
+        event_dir = None
+        event_seq = 0
+        event_age = None
+        event_data = remote_data.get("coord_transition")
+        if isinstance(event_data, dict):
             try:
-                self.state.red_tab_enabled = False
+                event_seq = int(event_data.get("seq", 0) or remote_data.get("coord_transition_seq", 0) or 0)
+                event_ts = float(event_data.get("ts", 0.0) or 0.0)
+                if event_ts > 0.0:
+                    event_age = max(0.0, time.time() - event_ts)
+                event_from = event_data.get("from") or []
+                event_x = int(event_from[0])
+                event_y = int(event_from[1])
+                if (
+                    event_seq > int(self._last_coord_transition_seq or 0)
+                    and is_plausible_transition_coord(event_x, event_y)
+                    and (event_age is None or event_age <= 0.75)
+                ):
+                    event_prev = (event_x, event_y)
+                    event_dir = normalize_move_dir(event_data.get("dir") or event_data.get("input_dir"))
+                    self._last_coord_transition_seq = event_seq
             except Exception:
-                pass
-            self._clear_target_for_portal_follow()
-            print(
-                "[PortalFollow] warrior transition detected: "
-                f"prev={prev}, now=({cur_x}, {cur_y}), enter_dir={self._portal_follow_dir or '-'}"
+                event_prev = None
+                event_dir = None
+                event_age = None
+
+        if self._portal_follow_active:
+            if cur_ok:
+                if prev and (prev[0], prev[1]) != (cur_x, cur_y):
+                    if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1:
+                        step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
+                        if step:
+                            self._last_warrior_step_dir = step
+                self._last_warrior_coord = (cur_x, cur_y)
+                self._last_warrior_map_sig = map_sig
+                if dps_dir:
+                    self._last_warrior_dir = dps_dir
+            return
+
+        map_changed = bool(prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+        cur_ok = (
+            is_plausible_map_coord(cur_x, cur_y)
+            or (event_prev is not None and is_plausible_transition_coord(cur_x, cur_y))
+            or (map_changed and is_plausible_transition_coord(cur_x, cur_y))
+        )
+        coord_jumped = bool(
+            prev
+            and is_plausible_map_coord(prev[0], prev[1])
+            and cur_ok
+            and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
+        )
+
+        if prev and cur_ok and (prev[0], prev[1]) != (cur_x, cur_y):
+            if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1:
+                step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
+                if step:
+                    self._last_warrior_step_dir = step
+                    prev_step = step
+            self._warrior_trail.append((prev[0], prev[1], prev_step or prev_dir))
+            if len(self._warrior_trail) > 12:
+                self._warrior_trail = self._warrior_trail[-12:]
+
+        transition_prev = event_prev or prev
+        if event_prev or (
+            prev
+            and is_plausible_map_coord(prev[0], prev[1])
+            and (coord_jumped or map_changed or map_info_changed)
+        ):
+            source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
+            cached_hint = {}
+            if isinstance(getattr(self.state, "portal_session_cache", None), dict):
+                cached_hint = dict(self.state.portal_session_cache.get(source_map_sig, {}) or {})
+            cached_dir = normalize_move_dir(cached_hint.get("enter_dir"))
+            enter_dir = event_dir or prev_step or self._last_warrior_step_dir or cached_dir
+            if not enter_dir:
+                if cur_ok:
+                    self._last_warrior_coord = (cur_x, cur_y)
+                    self._last_warrior_map_sig = map_sig
+                print(
+                    f"[PortalFollow] transition waiting for stable step dir: "
+                    f"now=({cur_x}, {cur_y}) event_age={event_age if event_age is not None else '-'} "
+                    f"map={prev_map_sig}->{map_sig}"
+                )
+                return False
+            self._arm_portal_follow(
+                transition_prev,
+                enter_dir,
+                started_at=time.time(),
+                clear_target=True,
+                source_map_sig=source_map_sig,
+                log_prefix=(
+                    f"warrior transition detected now=({cur_x}, {cur_y}) "
+                    f"coord_jump={coord_jumped} map_changed={map_changed} "
+                    f"event_seq={event_seq or '-'} step_dir={prev_step or '-'}"
+                ),
             )
-        self._last_warrior_coord = (cur_x, cur_y)
-        if dps_dir in self._ALL_DIRS:
-            self._last_warrior_dir = dps_dir
+
+        if cur_ok:
+            self._last_warrior_coord = (cur_x, cur_y)
+            self._last_warrior_map_sig = map_sig
+            if dps_dir:
+                self._last_warrior_dir = dps_dir
+        elif map_changed:
+            self._last_warrior_map_sig = map_sig
 
     def _finish_portal_follow(self, reason: str) -> None:
         self._portal_follow_active = False
         self._portal_follow_coord = None
+        self._portal_follow_approach = None
         self._portal_follow_dir = None
+        self._portal_follow_source_map_sig = None
         self._last_self_portal_coord = None
+        self._portal_enter_fail_streak = 0
         self.state.portal_follow_active = False
         self.state.portal_follow_finished_at = time.time()
         self.state.portal_follow_coord = None
+        self.state.portal_follow_approach = None
         self.state.portal_follow_dir = None
         self._nav_attempt_pos = None
         self._nav_attempt_started_at = 0.0
@@ -4425,7 +6983,7 @@ class RouteSvc(threading.Thread):
         self._last_self_portal_coord = current
         if not prev:
             return False
-        if should_detect_warrior_transition(prev[0], prev[1], current[0], current[1], jump_distance=12):
+        if should_detect_warrior_transition(prev[0], prev[1], current[0], current[1], jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE):
             self._finish_portal_follow(f"self_transition prev={prev}, now={current}")
             return True
         return False
@@ -4438,21 +6996,23 @@ class RouteSvc(threading.Thread):
         ):
             try:
                 requested = getattr(self.state, "portal_follow_coord", None)
-                self._portal_follow_coord = (int(requested[0]), int(requested[1]))
-                requested_dir = str(getattr(self.state, "portal_follow_dir", "") or "").strip().lower()
-                self._portal_follow_dir = requested_dir if requested_dir in self._ALL_DIRS else None
-                self._portal_follow_active = True
-                self._portal_follow_started_at = float(getattr(self.state, "portal_follow_started_at", 0.0) or time.time())
-                self._last_self_portal_coord = (int(self.state.x), int(self.state.y))
-                self._blocked_cells_until.clear()
-                self._blocked_cell_hits.clear()
-                print(
-                    "[PortalFollow] adopted immediate service request: "
-                    f"target={self._portal_follow_coord}, enter_dir={self._portal_follow_dir or '-'}"
+                requested_approach = getattr(self.state, "portal_follow_approach", None)
+                enter_dir = normalize_move_dir(getattr(self.state, "portal_follow_dir", None))
+                if requested_approach:
+                    warrior_last = (int(requested_approach[0]), int(requested_approach[1]))
+                else:
+                    warrior_last = (int(requested[0]), int(requested[1]))
+                self._arm_portal_follow(
+                    warrior_last,
+                    enter_dir,
+                    started_at=float(getattr(self.state, "portal_follow_started_at", 0.0) or time.time()),
+                    clear_target=False,
+                    log_prefix="adopted immediate service request",
                 )
             except Exception:
                 self._portal_follow_active = False
                 self._portal_follow_coord = None
+                self._portal_follow_approach = None
         if not self._portal_follow_active or not self._portal_follow_coord:
             return None
         if self._complete_portal_follow_on_self_transition():
@@ -4468,38 +7028,120 @@ class RouteSvc(threading.Thread):
         if not target:
             return False
         current_pos = (int(self.state.x), int(self.state.y))
-        if current_pos != (int(target[0]), int(target[1])):
+        warrior_last = self._portal_follow_approach or target
+        enter_dir = normalize_move_dir(self._portal_follow_dir)
+        _, portal_xy = resolve_portal_follow_cells(warrior_last[0], warrior_last[1], enter_dir)
+        if not should_attempt_portal_enter(
+            current_pos[0],
+            current_pos[1],
+            warrior_last[0],
+            warrior_last[1],
+            enter_dir=enter_dir,
+            portal_x=portal_xy[0],
+            portal_y=portal_xy[1],
+        ):
             return False
-        enter_dir = self._portal_follow_dir
+
         before_pos = current_pos
-        print(f"[PortalFollow] portal reached exactly: target={target}, enter_dir={enter_dir or '-'}")
-        if enter_dir in self._ALL_DIRS:
-            hw.hold_move(enter_dir, "move_hold", duration=random.uniform(0.45, 0.60))
+        print(
+            f"[PortalFollow] enter zone: current={current_pos}, warrior_last={warrior_last}, "
+            f"enter_dir={enter_dir or '-'}"
+        )
+        if not enter_dir:
+            print("[PortalFollow] enter_dir missing; waiting on warrior last tile")
+            return True
+
+        # Force-hold the entry key on the exact warrior last tile (ignore support input block).
+        try:
+            self.state.support_input_blocked_until = 0.0
+        except Exception:
+            pass
+        hold_sec = max(1.0, float(TIMING_CONFIG.get("entry_hold", 1.0) or 1.0))
+        warped = False
+        for attempt in range(3):
+            if current_pos != warrior_last and current_pos != portal_xy:
+                approach_dir = dir_between_coords(current_pos[0], current_pos[1], warrior_last[0], warrior_last[1])
+                if approach_dir:
+                    print(
+                        f"[PortalFollow] re-approach warrior_last={warrior_last} "
+                        f"from {current_pos} via {approach_dir}"
+                    )
+                    hw.hold_move(approach_dir, "move_hold", duration=0.18, force=True)
+                    humanized_sleep(0.08, variance=0.02)
+                    current_pos = (
+                        int(getattr(self.state, "x", 0) or 0),
+                        int(getattr(self.state, "y", 0) or 0),
+                    )
+                    if current_pos != warrior_last:
+                        break
+
+            before_pos = current_pos
+            hw.hold_move(
+                enter_dir,
+                "entry_hold",
+                duration=random.uniform(hold_sec, hold_sec + 0.35),
+                force=True,
+            )
             self.state.last_move_dir = enter_dir
-            humanized_sleep(0.35, variance=0.08)
-            after_pos = (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
-            if follow_manhattan_gap(before_pos[0], before_pos[1], after_pos[0], after_pos[1]) < 12:
-                print(f"[PortalFollow] portal enter retry: dir={enter_dir}, before={before_pos}, after={after_pos}")
-                hw.hold_move(enter_dir, "move_hold", duration=random.uniform(0.45, 0.60))
-                self.state.last_move_dir = enter_dir
-            try:
-                hw.release_key(enter_dir)
-            except Exception:
-                pass
-        after_pos = (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
-        if should_detect_warrior_transition(before_pos[0], before_pos[1], after_pos[0], after_pos[1], jump_distance=12):
-            self._finish_portal_follow(f"entered self_transition before={before_pos}, after={after_pos}")
-        else:
-            self._last_self_portal_coord = after_pos
+            humanized_sleep(0.12, variance=0.04)
+            after_pos = (
+                int(getattr(self.state, "x", 0) or 0),
+                int(getattr(self.state, "y", 0) or 0),
+            )
+            if should_detect_warrior_transition(
+                before_pos[0],
+                before_pos[1],
+                after_pos[0],
+                after_pos[1],
+                jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE,
+            ):
+                warped = True
+                cache_key = self._portal_follow_source_map_sig
+                if cache_key is None:
+                    cache_key = (
+                        str(getattr(self.state, "map_name", "") or ""),
+                        str(getattr(self.state, "map_floor", "") or ""),
+                        str(getattr(self.state, "current_map", "") or ""),
+                        str(getattr(self.state, "current_floor", "") or ""),
+                    )
+                cache = getattr(self.state, "portal_session_cache", None)
+                if isinstance(cache, dict):
+                    cache[cache_key] = {
+                        "enter_dir": enter_dir,
+                        "approach": [int(warrior_last[0]), int(warrior_last[1])],
+                        "portal": [int(portal_xy[0]), int(portal_xy[1])],
+                        "confirmed_at": time.time(),
+                        "source": "runtime_success",
+                    }
+                self._finish_portal_follow(
+                    f"entered self_transition before={before_pos}, after={after_pos}, attempt={attempt + 1}"
+                )
+                break
+            current_pos = after_pos
+            if current_pos != warrior_last:
+                print(
+                    f"[PortalFollow] left warrior_last tile while holding {enter_dir}: "
+                    f"{before_pos} -> {current_pos}"
+                )
+
+        if warped:
+            return True
+
+        self._portal_enter_fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0) + 1
+        self._last_self_portal_coord = current_pos
+        print(
+            f"[PortalFollow] portal enter pending: current={current_pos}, "
+            f"warrior_last={warrior_last}, fail_streak={self._portal_enter_fail_streak}"
+        )
+        # Stay in portal mode so we keep retrying instead of normal follow.
         return True
 
     # ----------------------------------------------------------
     def _calc_follow_target(self) -> tuple[int, int] | None:
         """
-        寃⑹닔??last_move_dir??湲곕컲?쇰줈 ????醫뚰몴 怨꾩궛.
-        寃⑹닔媛 諛붾씪蹂대뒗 諛⑺뼢??諛섎???1~2移??ㅻ? ?寃잛쑝濡??ㅼ젙.
+        ??? last_move_dir? ???? ??? ?? ??? ??.
+        ?? ???? ??? ??? ? ?? ??? ???? ??? ?? ??? ?? ????.
         """
-        # ?ㅽ듃?뚰겕?먯꽌 寃⑹닔 ?곗씠???뺤씤
         remote_data = self._get_remote_warrior_snapshot()
         if not remote_data:
             return None
@@ -4508,34 +7150,42 @@ class RouteSvc(threading.Thread):
         dps_y = int(remote_data.get("y", remote_data.get("pos_y", 0)) or 0)
         if abs(dps_x) > 300 or abs(dps_y) > 300:
             return None
+        map_sig = (
+            str(remote_data.get("map_name", "") or ""),
+            str(remote_data.get("map_floor", "") or ""),
+            str(remote_data.get("current_map", "") or ""),
+            str(remote_data.get("current_floor", "") or ""),
+        )
         self._update_portal_follow_state(remote_data)
         portal_target = self._get_portal_follow_target()
         if portal_target:
+            self._last_follow_target_key = ("portal", *map_sig, dps_x, dps_y)
+            self._last_follow_target = (int(portal_target[0]), int(portal_target[1]))
+            self._last_follow_target_ts = time.time()
             now = time.time()
             if now - float(self._last_portal_follow_log_time or 0.0) >= 1.0:
-                print(f"[PortalFollow] target portal={portal_target}, warrior_now=({dps_x}, {dps_y})")
+                print(
+                    f"[PortalFollow] target warrior_last={portal_target}, "
+                    f"enter_dir={getattr(self, '_portal_follow_dir', None) or '-'}, "
+                    f"warrior_now=({dps_x}, {dps_y})"
+                )
                 self._last_portal_follow_log_time = now
             return portal_target
-        dps_dir = remote_data.get("last_move_dir", None)
+        # 일반 추적은 마지막 방향값에 의존하지 않고 최신 격수 좌표를 직접 목표로 삼는다.
+        # 방향값은 포탈 진입 판정에서만 사용해야 지연/오래된 방향으로 선회하지 않는다.
+        follow_key = ("normal", *map_sig, dps_x, dps_y)
+        cached_target = getattr(self, "_last_follow_target", None)
+        cached_key = getattr(self, "_last_follow_target_key", None)
+        cached_age = time.time() - float(getattr(self, "_last_follow_target_ts", 0.0) or 0.0)
+        if cached_target and cached_key == follow_key and cached_age <= 0.75:
+            return cached_target
 
-        # 諛⑺뼢???놁쑝硫?寃⑹닔 醫뚰몴 洹몃?濡??ъ슜
-        if not dps_dir or dps_dir not in self._ALL_DIRS:
-            return (dps_x, dps_y)
-
-        # 諛⑺뼢 諛섎? 留ㅽ븨 (寃⑹닔媛 蹂대뒗 諛⑺뼢??諛섎?媛 ????
-        behind_offset = {
-            "up": (0, 1),      # 寃⑹닔媛 ?꾨? 蹂대㈃ ?꾨옒 1移몄씠 ????
-            "down": (0, -1),    # 寃⑹닔媛 ?꾨옒瑜?蹂대㈃ ??1移몄씠 ????
-            "left": (1, 0),     # 寃⑹닔媛 ?쇱そ??蹂대㈃ ?ㅻⅨ履?1移몄씠 ????
-            "right": (-1, 0)    # 寃⑹닔媛 ?ㅻⅨ履쎌쓣 蹂대㈃ ?쇱そ 1移몄씠 ????
-        }.get(dps_dir, (0, 0))
-
-        target_x = dps_x + behind_offset[0]
-        target_y = dps_y + behind_offset[1]
+        target_x = dps_x
+        target_y = dps_y
 
         current_x = int(getattr(self.state, "x", 0) or 0)
         current_y = int(getattr(self.state, "y", 0) or 0)
-        return adjust_follow_target_by_axis_gap(
+        follow_target = adjust_follow_target_by_axis_gap(
             target_x,
             target_y,
             current_x,
@@ -4544,6 +7194,10 @@ class RouteSvc(threading.Thread):
             dps_y,
             min_axis_gap=1,
         )
+        self._last_follow_target_key = follow_key
+        self._last_follow_target = (int(follow_target[0]), int(follow_target[1]))
+        self._last_follow_target_ts = time.time()
+        return follow_target
 
     def _is_follow_reposition_needed(self) -> bool:
         if not bool(getattr(self.state, "nav_follow_enabled", False)):
@@ -4553,8 +7207,7 @@ class RouteSvc(threading.Thread):
             return False
         tx, ty = follow_target
         cx, cy = int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0)
-        gap = follow_manhattan_gap(tx, ty, cx, cy)
-        return not self._should_hold_follow_at_gap(gap)
+        return not should_hold_follow_position(tx, ty, cx, cy)
 
     def _move_toward(self, tx: int, ty: int) -> bool:
         """Move one step toward a world target, avoiding walls / monsters / users."""
@@ -4565,8 +7218,10 @@ class RouteSvc(threading.Thread):
 
         cx, cy = self.state.x, self.state.y
         dx, dy = tx - cx, ty - cy
+        if dx == 0 and dy == 0:
+            return True
         gap = max(abs(dx), abs(dy))
-        trace_sig = (cx, cy, self.state.char_grid)
+        trace_sig = (cx, cy)
         now = time.time()
         target_changed = False
         if isinstance(self._last_nav_trace_target, tuple) and len(self._last_nav_trace_target) == 2:
@@ -4584,7 +7239,7 @@ class RouteSvc(threading.Thread):
             should_log = True
 
         if should_log:
-            print(f"[Nav] Target: ({tx}, {ty}) | Current: ({cx}, {cy}) | Grid: {self.state.char_grid}")
+            print(f"[FollowROI] Target: ({tx}, {ty}) | Current: ({cx}, {cy}) | dx={dx} dy={dy}")
             self._last_nav_trace_signature = trace_sig
             self._last_nav_trace_target = (tx, ty)
             self._last_nav_trace_pos = (cx, cy)
@@ -4597,19 +7252,29 @@ class RouteSvc(threading.Thread):
             getattr(self.state, "is_connected", False),
         )
         aggressive_follow = bool(follow_mode and gap >= 4)
-        ccx, ccy = self._get_nav_grid_pos()
         portal_follow = bool(getattr(self, "_portal_follow_active", False))
-        blocked_cells = set() if portal_follow else self._get_blocked_cells()
-        step_dir, next_grid, blockers = nav_pick_step_direction(
-            self.state,
-            (ccx, ccy),
-            dx,
-            dy,
-            include_entities=True,
-            blocked_cells=blocked_cells,
-            prefer_manhattan_reduction=follow_mode,
-            aggressive_follow=aggressive_follow,
-        )
+        if follow_mode:
+            # F2 추적은 격수/도사 양쪽의 pos ROI x,y만 사용한다.
+            # char_grid와 Grid 기반 장애물 판정은 다른 좌표계이므로 추적 경로에서 제외한다.
+            if abs(dx) >= abs(dy):
+                step_dir = "right" if dx > 0 else "left"
+            else:
+                step_dir = "down" if dy > 0 else "up"
+            next_grid = (int(cx), int(cy))
+            blockers = []
+        else:
+            ccx, ccy = self._get_nav_grid_pos()
+            blocked_cells = set() if portal_follow else self._get_blocked_cells()
+            step_dir, next_grid, blockers = nav_pick_step_direction(
+                self.state,
+                (ccx, ccy),
+                dx,
+                dy,
+                include_entities=True,
+                blocked_cells=blocked_cells,
+                prefer_manhattan_reduction=follow_mode,
+                aggressive_follow=aggressive_follow,
+            )
         if step_dir is None and portal_follow:
             retry_step_dir, retry_next_grid, retry_blockers = nav_pick_step_direction(
                 self.state,
@@ -4825,6 +7490,7 @@ class RouteSvc(threading.Thread):
                     # ??갑??諛⑺뼢??寃곗젙
                     rev_dir = self._get_reverse_direction(exit_data["direction"], exit_data.get("reverse_action", ""))
                     print(f"[Seq-Rev] 異쒓뎄 ?꾨떖: ({tx}, {ty}) ??諛⑺뼢??{rev_dir} 1珥덇컙 ?꾨쫫")
+                    self.state.last_move_dir = rev_dir
                     hw.hold_move(rev_dir, "exit_hold")
                     time.sleep(1.0)
                     self.seq_phase = "points"
@@ -4861,6 +7527,7 @@ class RouteSvc(threading.Thread):
                     # ??갑??諛⑺뼢??寃곗젙
                     rev_dir = self._get_reverse_direction(entry["direction"], entry.get("reverse_action", ""))
                     print(f"[Seq-Rev] ?낃뎄 ?꾨떖: ({tx}, {ty}) ??諛⑺뼢??{rev_dir} 1珥덇컙 ?꾨쫫")
+                    self.state.last_move_dir = rev_dir
                     hw.hold_move(rev_dir, "entry_hold")
                     time.sleep(1.0)
                     # ?쒗???꾨즺, ?ㅼ떆 泥섏쓬遺??
@@ -4879,6 +7546,7 @@ class RouteSvc(threading.Thread):
                 arrived = self._move_toward(tx, ty)
                 if arrived:
                     print(f"[Seq] ?낃뎄 ?꾨떖: ({tx}, {ty}) ??諛⑺뼢??{entry['direction']} 1珥덇컙 ?꾨쫫")
+                    self.state.last_move_dir = entry["direction"]
                     hw.hold_move(entry["direction"], "entry_hold")
                     time.sleep(1.0)  # 1珥덇컙 hold
                     self.seq_phase = "points"
@@ -4913,6 +7581,7 @@ class RouteSvc(threading.Thread):
                 arrived = self._move_toward(tx, ty)
                 if arrived:
                     print(f"[Seq] 異쒓뎄 ?꾨떖: ({tx}, {ty}) ??諛⑺뼢??{exit_data['direction']} 1珥덇컙 ?꾨쫫")
+                    self.state.last_move_dir = exit_data["direction"]
                     hw.hold_move(exit_data["direction"], "exit_hold")
                     time.sleep(1.0)  # 1珥덇컙 hold
                     # ?쒗???꾨즺, ?ㅼ떆 泥섏쓬遺??
@@ -5019,7 +7688,7 @@ class RouteSvc(threading.Thread):
                     gap_y = abs(ty - cy)
                     follow_gap = follow_manhattan_gap(tx, ty, cx, cy)
                     hold_follow_gap = 0 if bool(getattr(self, "_portal_follow_active", False)) else int(getattr(self, "_support_follow_hold_distance", 1) or 1)
-                    if should_hold_follow_gap(follow_gap, hold_distance=hold_follow_gap):
+                    if should_hold_follow_position(tx, ty, cx, cy):
                         # [FIX] Follow range ?덉뿉???湲???Stuck ??대㉧ 由ъ뀑 (?대룞 ???대룄 Stuck???꾨떂)
                         self._nav_attempt_pos = None
                         self._nav_attempt_started_at = 0.0

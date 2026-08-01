@@ -2060,8 +2060,19 @@ class MonitorSvc(threading.Thread):
         marker_names = sorted(list(self.matcher.templates.get("marker", {}).keys()))
         print(f"[GPS] 마커 템플릿 로드 완료: {marker_names}")
 
+        from svc_map_ocr import MapNameRecognizer
+        self.map_ocr = MapNameRecognizer(digit_patterns=self.matcher.AHK_PATTERNS)
+        self._map_ocr_last_log_time = 0.0
+        self._map_fail_count = 0
+        print(f"[MapOCR] ready tokens={list(self.map_ocr.tokens.keys())}")
+
         self.load_roi()
         self.load_maps()
+        if "map_info" in self.regions:
+            r = self.regions["map_info"]
+            print(f"[MapOCR] map_info ROI loaded: ({r.sx},{r.sy})-({r.dx},{r.dy})")
+        else:
+            print("[MapOCR] WARN: map_info ROI missing in config")
         self.obs_params = (0, 0, 1.0, 1.0) # (ox, oy, scx, scy) 초기값
         self.offset_history = []
         self.offset_locked = False
@@ -2613,21 +2624,56 @@ class MonitorSvc(threading.Thread):
                         res_updates["item_score"] = item_score
                     continue
 
-                # ?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═
-                # 6. map_info ??maps 폴더 (??별)
-                # ?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═
+                # ════════════════════════════════════════════════
+                # 6. map_info — FindText 토큰 OCR (선비족 3형태)
+                # ════════════════════════════════════════════════
                 if name == "map_info":
-                    matched_map = self.matcher.recognize(crop, "maps")
-                    if matched_map and matched_map != self.state.current_map:
-                        print(f"[Map] 맵 변경됨: {matched_map}")
-                        self.state.current_map = matched_map
-                        self.load_maps()  # ????이??로드
-                    elif not matched_map:
-                        # 인식 실패 메시지 3?만 출력
-                        if not hasattr(self, '_map_fail_count'): self._map_fail_count = 0
-                        if self._map_fail_count < 3:
-                            print("[Warn] 인식 실패, 이전 값 유지")
-                            self._map_fail_count += 1
+                    now_map = time.time()
+                    map_text = ""
+                    score = 0.0
+                    try:
+                        map_text = str(self.map_ocr.recognize(crop) or "").strip()
+                        score = float(getattr(self.map_ocr, "last_score", 0.0) or 0.0)
+                    except Exception as e:
+                        print(f"[MapOCR] recognize error: {e}")
+
+                    if not map_text:
+                        matched_map = self.matcher.recognize(crop, "maps")
+                        if matched_map:
+                            map_text = str(matched_map).strip()
+
+                    if (now_map - float(getattr(self, "_map_ocr_last_log_time", 0.0) or 0.0)) >= 2.0:
+                        self._map_ocr_last_log_time = now_map
+                        h, w = crop.shape[:2]
+                        print(
+                            f"[MapOCR] crop={w}x{h} result='{map_text or '-'}' "
+                            f"score={score:.3f} current='{getattr(self.state, 'current_map', '')}'"
+                        )
+
+                    if map_text:
+                        from bis_core import split_map_name_floor
+                        map_name, map_floor = split_map_name_floor(map_text)
+                        if map_text != getattr(self.state, "current_map", ""):
+                            print(f"[Map] 맵 변경됨: {map_text}")
+                            self.state.current_map = map_text
+                            self.load_maps()
+                        if hasattr(self.state, "map_name"):
+                            self.state.map_name = map_name
+                        if hasattr(self.state, "map_floor"):
+                            self.state.map_floor = map_floor
+                        if hasattr(self.state, "current_floor"):
+                            self.state.current_floor = map_floor
+                        res_updates["current_map"] = map_text
+                        res_updates["map_name"] = map_name
+                        res_updates["map_floor"] = map_floor
+                        res_updates["current_floor"] = map_floor
+                        res_updates["map_info_text"] = map_text
+                        self._map_fail_count = 0
+                    else:
+                        self._map_fail_count = int(getattr(self, "_map_fail_count", 0) or 0) + 1
+                        if self._map_fail_count <= 5 or (self._map_fail_count % 20) == 0:
+                            h, w = crop.shape[:2]
+                            print(f"[MapOCR] 인식 실패 #{self._map_fail_count} crop={w}x{h} (이전 값 유지)")
                     continue
 
             # ── [최종 업데이트 및 제어] ──────────────────────

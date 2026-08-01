@@ -1,5 +1,5 @@
-﻿# -*- coding: utf-8 -*-
-"""Dosa-only launcher for the shared worker stack."""
+# -*- coding: utf-8 -*-
+"""Dosa2 launcher for the shared worker stack."""
 
 import sys
 import io
@@ -24,8 +24,9 @@ from svc_worker import main
 
 
 if __name__ == '__main__':
+    os.environ.setdefault("SVC_VERBOSE_LOGS", "1")
     main(
-        preset_role='도사1',
-        preset_network_role='도사1',
+        preset_role='도사2',
+        preset_network_role='도사2',
         preset_auto_hunt=False,
     )

@@ -8,10 +8,18 @@ from support_runtime_rules import (
     build_f5_hon_sequence,
     build_warrior_search_sequence,
     confirm_support_lock_by_hp_gain,
+    dir_between_coords,
+    infer_dir_from_trail,
     is_confirmed_zero_hp_state,
     next_zero_hp_count,
+    normalize_move_dir,
+    offset_coord_by_dir,
+    pick_portal_enter_dir,
+    is_plausible_transition_coord,
+    resolve_portal_follow_cells,
     should_allow_party_support_cast,
     should_allow_follow_navigation,
+    should_attempt_portal_enter,
     should_block_party_heal,
     should_cast_periodic_heewon,
     should_continue_self_hp_recovery,
@@ -25,15 +33,18 @@ from support_runtime_rules import (
     should_detect_warrior_transition,
     should_prioritize_follow_distance,
     should_trigger_self_hp_emergency,
+    should_accept_hotkey_press,
+    classify_map_sync,
     speed_up_delay,
 )
+from bis_core import GameState
 
 
-def test_follow_hold_position_uses_manhattan_distance():
+def test_follow_hold_position_allows_one_tile_axis_error():
     assert should_hold_follow_position(10, 10, 10, 10) is True
     assert should_hold_follow_position(10, 10, 11, 10) is True
     assert should_hold_follow_position(10, 10, 10, 11) is True
-    assert should_hold_follow_position(10, 10, 11, 11) is False
+    assert should_hold_follow_position(10, 10, 11, 11) is True
 
 
 def test_support_follow_hold_gap_uses_one_tile_spacing():
@@ -46,13 +57,105 @@ def test_follow_distance_risk_starts_at_seven_tiles():
     assert should_prioritize_follow_distance(7, risk_distance=7) is True
 
 
-def test_warrior_transition_detects_twelve_tile_coordinate_jump():
-    assert should_detect_warrior_transition(10, 10, 16, 15, jump_distance=12) is False
+def test_pause_hotkey_rejects_duplicate_event_but_accepts_later_press():
+    assert should_accept_hotkey_press(0.0, 1.0, debounce_sec=0.20) is True
+    assert should_accept_hotkey_press(1.0, 1.05, debounce_sec=0.20) is False
+    assert should_accept_hotkey_press(1.0, 1.25, debounce_sec=0.20) is True
+
+
+def test_map_sync_prefers_normalized_text_then_roi_fingerprint():
+    local = {"map_info_text": "Map A - 1F", "map_info_fingerprint": "0101", "_received_at": 10.0}
+    same_text = {"map_info_text": "mapa1f", "map_info_fingerprint": "1111", "_received_at": 10.1}
+    same_roi = {"map_info_text": "", "map_info_fingerprint": "0101", "_received_at": 10.1}
+    different = {"map_info_text": "Map B - 1F", "map_info_fingerprint": "1100", "_received_at": 10.1}
+
+    assert classify_map_sync(local, same_text, now=10.2) == "same"
+    assert classify_map_sync(local, same_roi, now=10.2) == "same"
+    assert classify_map_sync(local, different, now=10.2) == "different"
+    assert classify_map_sync(local, None, now=10.2) == "pending"
+
+
+def test_warrior_transition_detects_small_portal_jumps():
+    # Default threshold is 4: ignore normal walking, catch small cave warps.
+    assert should_detect_warrior_transition(10, 10, 11, 10) is False  # 1
+    assert should_detect_warrior_transition(10, 10, 12, 11) is False  # 3
+    assert should_detect_warrior_transition(10, 10, 14, 10) is True   # 4
+    # User case: 31,01 -> 27,03 (manhattan 6)
+    assert should_detect_warrior_transition(31, 1, 27, 3) is True
+    # Legacy large jump still works
     assert should_detect_warrior_transition(10, 10, 22, 10, jump_distance=12) is True
-    assert should_detect_warrior_transition(10, 10, 16, 16, jump_distance=12) is True
+    assert should_detect_warrior_transition(10, 10, 16, 15, jump_distance=12) is False
 
 
-def test_follow_target_ignores_axis_when_warrior_gap_is_one_or_less():
+def test_portal_follow_uses_exact_warrior_last_tile():
+    # Warrior last seen at 17.11 — target is exact 17.11 (not invented 18.11)
+    approach, portal = resolve_portal_follow_cells(17, 11, "right")
+    assert approach == (17, 11)
+    assert portal == (18, 11)
+    assert offset_coord_by_dir(17, 11, "right") == (18, 11)
+    assert dir_between_coords(17, 11, 18, 11) == "right"
+    assert normalize_move_dir("RIGHT") == "right"
+    assert infer_dir_from_trail([(16, 11, None), (17, 11, "right")]) == "right"
+
+
+def test_portal_enter_direction_prefers_transition_key_over_prior_step():
+    assert pick_portal_enter_dir("up", "right", [(30, 1, "right"), (31, 1, "right")]) == "right"
+
+
+def test_game_state_shares_coord_transition_without_map_ocr():
+    state = GameState()
+    state.x = 31
+    state.y = 1
+    state.last_move_dir = "up"
+    first = state.build_share_payload()["status"]
+    assert first["coord_transition"] is None
+
+    state.x = 27
+    state.y = 3
+    second = state.build_share_payload()["status"]
+    assert second["coord_transition"]["from"] == [31, 1]
+    assert second["coord_transition"]["to"] == [27, 3]
+    assert second["coord_transition"]["dir"] == "up"
+
+
+def test_game_state_shares_map_info_text_for_cross_pc_map_compare():
+    state = GameState()
+    state.map_info_text = "선비족입구"
+    state.map_name = "선비족"
+    state.map_floor = "입구"
+    state.map_info_fingerprint = "a1b2c3d4"
+    payload = state.build_share_payload()["status"]
+    assert payload["map_info_text"] == "선비족입구"
+    assert payload["map_name"] == "선비족"
+    assert payload["map_floor"] == "입구"
+    assert payload["map_info_fingerprint"] == "a1b2c3d4"
+
+
+def test_game_state_emits_portal_edge_transition_at_zero_coord():
+    state = GameState()
+    state.x = 1
+    state.y = 4
+    state.build_share_payload()
+
+    state.x = 0
+    state.y = 4
+    payload = state.build_share_payload()["status"]
+    assert is_plausible_transition_coord(0, 4) is True
+    assert payload["coord_transition"]["from"] == [1, 4]
+    assert payload["coord_transition"]["to"] == [0, 4]
+    assert payload["coord_transition"]["dir"] == "left"
+    assert payload["coord_transition"]["input_dir"] is None
+
+
+def test_portal_enter_zone_is_exact_warrior_last_tile_only():
+    assert should_attempt_portal_enter(31, 1, 31, 1, enter_dir="up") is True
+    assert should_attempt_portal_enter(31, 0, 31, 1, enter_dir="up") is True
+    assert should_attempt_portal_enter(27, 3, 31, 1, enter_dir="up") is False
+    assert should_attempt_portal_enter(32, 1, 31, 1, enter_dir="right") is True
+    assert should_attempt_portal_enter(31, 1, 31, 1, None, 31, 1) is True
+
+
+def test_follow_target_stays_anchored_to_intended_target():
     assert adjust_follow_target_by_axis_gap(
         target_x=12,
         target_y=15,
@@ -60,7 +163,7 @@ def test_follow_target_ignores_axis_when_warrior_gap_is_one_or_less():
         current_y=20,
         warrior_x=11,
         warrior_y=18,
-    ) == (10, 15)
+    ) == (12, 15)
     assert adjust_follow_target_by_axis_gap(
         target_x=12,
         target_y=15,
@@ -68,7 +171,7 @@ def test_follow_target_ignores_axis_when_warrior_gap_is_one_or_less():
         current_y=20,
         warrior_x=14,
         warrior_y=21,
-    ) == (12, 20)
+    ) == (12, 15)
 
 
 def test_follow_navigation_can_use_fresh_target_without_connected_flag():

@@ -134,7 +134,7 @@ class CaptureSvc(threading.Thread):
             self.state.last_frame_time = time.time()
             
             # 약 100~120 FPS 제한으로 CPU 부하 조절
-            time.sleep(0.005)
+            time.sleep(0.015)
 
     def stop(self):
         self._running = False
@@ -2025,24 +2025,24 @@ class NumericFieldScanner(threading.Thread):
         while self._running and self.state.running:
             now = time.time()
             # 100 FPS 제한 (약 10ms 주기) - 병목 해소를 위해 상향
-            if now - self._last_run_time < 0.010:
-                time.sleep(0.001)
+            if now - self._last_run_time < 0.025:
+                time.sleep(0.003)
                 continue
             self._last_run_time = now
 
             # GameState의 캐싱된 프레임 사용
             if not hasattr(self.state, 'last_frame') or self.state.last_frame is None:
-                time.sleep(0.01)
+                time.sleep(0.02)
                 continue
 
             # 프레임이 너무 오래되었으면 스킵 (500ms 이상으로 완화)
             if now - self.state.last_frame_time > 0.5:
-                time.sleep(0.01)
+                time.sleep(0.02)
                 continue
 
             frame_time = self.state.last_frame_time
             if frame_time <= self._last_processed_frame_time:
-                time.sleep(0.002)
+                time.sleep(0.004)
                 continue
 
             frame = self.state.last_frame
@@ -2411,8 +2411,23 @@ class MonitorSvc(threading.Thread):
         self.findtext_engine = FindTextEngine(self.matcher.AHK_PATTERNS)
         self.findtext = FindText()
 
+        # map_info: 선비족 FindText 토큰 인식기
+        from svc_map_ocr import MapNameRecognizer
+        self.map_ocr = MapNameRecognizer(digit_patterns=self.matcher.AHK_PATTERNS)
+        self._map_ocr_last_log_time = 0.0
+        self._map_fail_count = 0
+        self._map_info_last_signature = ""
+        self._map_info_change_seq = 0
+        self._map_info_changed_at = 0.0
+        print(f"[MapOCR] ready tokens={list(self.map_ocr.tokens.keys())}")
+
         self.load_roi()
         self.load_maps()
+        if "map_info" in self.regions:
+            r = self.regions["map_info"]
+            print(f"[MapOCR] map_info ROI loaded: ({r.sx},{r.sy})-({r.dx},{r.dy})")
+        else:
+            print("[MapOCR] WARN: map_info ROI missing in config")
         self.obs_params = (0, 0, 1.0, 1.0) # (ox, oy, scx, scy) 초기값
         self.offset_history = []
         self.offset_locked = False
@@ -2459,7 +2474,7 @@ class MonitorSvc(threading.Thread):
             "cooltime_area": 0.090,
             "stat_info": 0.140,
             "items_scan": 0.120,
-            "map_info": 0.350,
+            "map_info": 0.080,
         }
 
         # patterns.json 로드
@@ -2503,6 +2518,23 @@ class MonitorSvc(threading.Thread):
             int(c1[0]), int(c1[1]), int(c1[2]),
             round(mean_val, 2),
         )
+
+    @staticmethod
+    def _map_info_fingerprint(crop: np.ndarray) -> str:
+        if crop is None or crop.size == 0:
+            return ""
+        try:
+            gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+            normalized = cv2.resize(gray, (16, 8), interpolation=cv2.INTER_AREA)
+            _threshold, binary = cv2.threshold(
+                normalized,
+                0,
+                255,
+                cv2.THRESH_BINARY | cv2.THRESH_OTSU,
+            )
+            return "".join("1" if value else "0" for value in binary.reshape(-1))
+        except Exception:
+            return ""
 
     def _resolve_user_info_mode(self, now_ts: float) -> str:
         if bool(getattr(self.state, "ntab_active", False)):
@@ -4015,10 +4047,11 @@ class MonitorSvc(threading.Thread):
                 # 좌표 계산 및 crop 추출
                 ox, oy, scx, scy = self.obs_params
                 fh, fw = img_np.shape[:2]
-                sx = max(0, int(reg.sx * scx + ox - 5))
-                sy = max(0, int(reg.sy * scy + oy - 5))
-                dx = min(fw, int(reg.dx * scx + ox + 5))
-                dy = min(fh, int(reg.dy * scy + oy + 5))
+                pad = 0 if name == "map_info" else 5  # map_info는 패딩 없이 정확히 crop
+                sx = max(0, int(reg.sx * scx + ox - pad))
+                sy = max(0, int(reg.sy * scy + oy - pad))
+                dx = min(fw, int(reg.dx * scx + ox + pad))
+                dy = min(fh, int(reg.dy * scy + oy + pad))
 
                 # hp_trig/mp_trig are point-style ROIs in config (often dx<=sx, dy<=sy).
                 is_point = (reg.dx <= reg.sx) and (reg.dy <= reg.sy)
@@ -4049,12 +4082,20 @@ class MonitorSvc(threading.Thread):
                 target_w, target_h = reg.dx - reg.sx, reg.dy - reg.sy
                 if target_w > 0 and target_h > 0:
                     if crop.shape[1] != target_w or crop.shape[0] != target_h:
-                        crop = cv2.resize(crop, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+                        # map_info는 도트 폰트 → NEAREST 필수 (CUBIC이면 FindText 매칭 붕괴)
+                        interp = cv2.INTER_NEAREST if name == "map_info" else cv2.INTER_CUBIC
+                        crop = cv2.resize(crop, (target_w, target_h), interpolation=interp)
                 else:
                     continue
 
                 cur_hash = self._fast_crop_signature(crop)
-                if self.last_hashes.get(name) == cur_hash and name in self.last_values and name not in ("play_area", "target_info"):
+                # map_info는 상태 로그/재시도를 위해 해시 스킵에서 제외
+                if (
+                    name != "map_info"
+                    and self.last_hashes.get(name) == cur_hash
+                    and name in self.last_values
+                    and name not in ("play_area", "target_info")
+                ):
                     continue
                 self.last_hashes[name] = cur_hash
 
@@ -4318,23 +4359,71 @@ class MonitorSvc(threading.Thread):
                         res_updates["item_score"] = item_score
                     continue
 
-                # ?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═
-                # 6. map_info ??maps 폴더 (??별)
-                # ?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═
+                # ════════════════════════════════════════════════
+                # 6. map_info — FindText 토큰 OCR (선비족 3형태)
+                # ════════════════════════════════════════════════
                 if name == "map_info":
-                    matched_map = self.matcher.recognize(crop, "maps")
-                    if matched_map:
-                        map_text = str(matched_map).strip()
-                        match = re.match(r"^(.*?)(\d+)\s*층?$", map_text)
-                        if match:
-                            map_name = match.group(1).strip() or map_text
-                            map_floor = match.group(2).strip()
-                        else:
-                            map_name = map_text
-                            map_floor = ""
+                    now_map = time.time()
+                    map_text = ""
+                    score = 0.0
+                    dbg = {}
+                    map_signature = ""
+                    map_info_changed = False
+                    try:
+                        map_text = str(self.map_ocr.recognize(crop) or "").strip()
+                        score = float(getattr(self.map_ocr, "last_score", 0.0) or 0.0)
+                        dbg = dict(getattr(self.map_ocr, "last_debug", {}) or {})
+                    except Exception as e:
+                        print(f"[MapOCR] recognize error: {e}")
+                    try:
+                        map_signature = "|".join(map(str, self._fast_crop_signature(crop)))
+                    except Exception:
+                        map_signature = ""
+                    map_fingerprint = self._map_info_fingerprint(crop)
+                    map_info_changed = bool(map_signature and map_signature != self._map_info_last_signature)
+                    if map_info_changed:
+                        self._map_info_last_signature = map_signature
+                        self._map_info_change_seq += 1
+                        self._map_info_changed_at = now_map
 
-                        if map_text != self.state.current_map:
-                            _monitor_log(f"[Map] 맵 변경됨: {map_text}")
+                    # Fallback: temple/maps 통짜 템플릿
+                    if not map_text:
+                        matched_map = self.matcher.recognize(crop, "maps")
+                        if matched_map:
+                            map_text = str(matched_map).strip()
+
+                    # 2초마다 상태 출력 + 실패 시 crop 덤프
+                    if (now_map - float(getattr(self, "_map_ocr_last_log_time", 0.0) or 0.0)) >= 2.0:
+                        self._map_ocr_last_log_time = now_map
+                        h, w = crop.shape[:2]
+                        print(
+                            f"[MapOCR] crop={w}x{h} result='{map_text or '-'}' "
+                            f"score={score:.3f} prefix={float(dbg.get('prefix_score', 0.0)):.3f} "
+                            f"mean={float(dbg.get('mean', 0.0)):.1f} fg={int(dbg.get('fg', 0) or 0)} "
+                            f"current='{getattr(self.state, 'current_map', '')}'"
+                        )
+                        if not map_text:
+                            try:
+                                dump_dir = os.path.join(
+                                    os.path.dirname(os.path.abspath(__file__)),
+                                    "temple", "maps", "debug",
+                                )
+                                os.makedirs(dump_dir, exist_ok=True)
+                                # RGB frame -> BGR for imwrite
+                                dump_bgr = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+                                dump_path = os.path.join(dump_dir, "map_info_last_fail.png")
+                                cv2.imwrite(dump_path, dump_bgr)
+                                bin160 = ((crop.mean(axis=2) >= 160) * 255).astype(np.uint8)
+                                cv2.imwrite(os.path.join(dump_dir, "map_info_last_fail_bin.png"), bin160)
+                            except Exception as e:
+                                print(f"[MapOCR] debug dump failed: {e}")
+
+                    if map_text:
+                        from bis_core import split_map_name_floor
+                        map_name, map_floor = split_map_name_floor(map_text)
+
+                        if map_text != getattr(self.state, "current_map", ""):
+                            print(f"[Map] 맵 변경됨: {map_text}")
                             self.state.current_map = map_text
                             self.load_maps()
 
@@ -4343,12 +4432,31 @@ class MonitorSvc(threading.Thread):
                         res_updates["map_floor"] = map_floor
                         res_updates["current_floor"] = map_floor
                         res_updates["map_info_text"] = map_text
+                        if map_signature:
+                            res_updates["map_info_signature"] = map_signature
+                        if map_fingerprint:
+                            res_updates["map_info_fingerprint"] = map_fingerprint
+                        res_updates["map_info_change_seq"] = self._map_info_change_seq
+                        res_updates["map_info_changed_at"] = self._map_info_changed_at
+                        res_updates["map_info_changed"] = map_info_changed
+                        self.last_values["map_info"] = map_text
+                        self._map_fail_count = 0
                     else:
-                        if not hasattr(self, '_map_fail_count'):
-                            self._map_fail_count = 0
-                        if self._map_fail_count < 3:
-                            _monitor_log("[Warn] 인식 실패, 이전 값 유지")
-                            self._map_fail_count += 1
+                        self._map_fail_count = int(getattr(self, "_map_fail_count", 0) or 0) + 1
+                        if self._map_fail_count <= 5 or (self._map_fail_count % 20) == 0:
+                            h, w = crop.shape[:2]
+                            print(
+                                f"[MapOCR] 인식 실패 #{self._map_fail_count} crop={w}x{h} "
+                                f"prefix={float(dbg.get('prefix_score', 0.0)):.3f} "
+                                f"(선비족 맵인지 / ROI에 흰 글자가 보이는지 확인)"
+                            )
+                    if map_signature:
+                        res_updates["map_info_signature"] = map_signature
+                    if map_fingerprint:
+                        res_updates["map_info_fingerprint"] = map_fingerprint
+                    res_updates["map_info_change_seq"] = self._map_info_change_seq
+                    res_updates["map_info_changed_at"] = self._map_info_changed_at
+                    res_updates["map_info_changed"] = map_info_changed
                     continue
 
             # Trigger flags must update even when no other ROI changed.

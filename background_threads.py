@@ -62,6 +62,7 @@ from enum import Enum, auto
 
 # 而ㅻ꼸 ?대옒???꾪룷??
 from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
+from config_utils import choose_preferred_local_ipv4, get_local_ipv4_candidates, load_network_config
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
@@ -153,7 +154,7 @@ class NetworkThread(threading.Thread):
         self.bind_host = str(self.cfg.get('bind_host', getattr(state, 'network_bind_host', '0.0.0.0')) or '0.0.0.0')
         self.telemetry_port = int(self.cfg.get('telemetry_port', getattr(state, 'network_telemetry_port', 5555)) or 5555)
         self.local_port = int(self.cfg.get('local_port', getattr(state, 'network_local_port', 5556)) or 5556)
-        self.is_server = self.role == '도사'
+        self.is_server = self.role in {'도사', '도사1', 'Priest', 'Priest1 (Hub)'}
         self.sock: Optional[pysocket.socket] = None
         self._peers: dict[tuple[str, int], dict] = {}
         self._last_send = 0.0
@@ -288,6 +289,15 @@ class NetworkThread(threading.Thread):
             if self.is_server:
                 self.sock.bind((self.bind_host, self.telemetry_port))
                 print(f'[Net] UDP hub connected: {self.bind_host}:{self.telemetry_port} (role={self.role})')
+                preferred_ip = choose_preferred_local_ipv4()
+                candidates = get_local_ipv4_candidates()
+                if preferred_ip:
+                    print(f"[Net] Dosa PC recommended server_ip: {preferred_ip}")
+                    print("[Net] Set warrior/sulsa PC network.server_ip to this value.")
+                if candidates:
+                    print(f"[Net] Dosa PC IPv4 candidates: {', '.join(candidates)}")
+                else:
+                    print("[Net] WARNING: no usable local IPv4 found. Run ipconfig and check the active adapter.")
             else:
                 self.sock.bind((self.bind_host, self.local_port))
                 print(f'[Net] UDP client connected: {self.bind_host}:{self.local_port} -> {self.server_ip}:{self.telemetry_port} (role={self.role})')
