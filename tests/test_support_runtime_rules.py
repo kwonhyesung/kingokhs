@@ -35,6 +35,7 @@ from support_runtime_rules import (
     should_trigger_self_hp_emergency,
     should_accept_hotkey_press,
     classify_map_sync,
+    classify_peer_connection,
     is_hub_network_role,
     is_support_role,
     normalize_network_role,
@@ -54,6 +55,13 @@ def test_both_priests_are_support_roles_for_warrior_follow_and_service():
     assert is_support_role("도사1") is True
     assert is_support_role("도사2") is True
     assert is_support_role("격수") is False
+
+
+def test_peer_connection_status_is_fixed_by_last_received_time():
+    assert classify_peer_connection(0.0, now=10.0) == "DISCONNECTED"
+    assert classify_peer_connection(9.4, now=10.0) == "CONNECTED"
+    assert classify_peer_connection(7.0, now=10.0) == "STALE"
+    assert classify_peer_connection(4.0, now=10.0) == "DISCONNECTED"
 
 
 def test_follow_hold_position_allows_one_tile_axis_error():

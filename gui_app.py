@@ -67,7 +67,7 @@ from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
 from bis_logic import LogicSvc, RouteSvc
 from patrol_routes import inject_patrol_points, load_patrol_points_csv, parse_route_point
-from support_runtime_rules import should_accept_hotkey_press
+from support_runtime_rules import classify_peer_connection, should_accept_hotkey_press
 
 # 怨좏빐?곷룄(65?몄튂 ?? 紐⑤땲???명솚?깆쓣 ?꾪븳 DPI ?몄떇 ?쒖꽦??
 try:
@@ -2781,28 +2781,29 @@ class AppView:
             if remote_role != target_role:
                 continue
             rx_ts = float(data.get("_received_at") or 0.0)
-            if rx_ts and (time.time() - rx_ts) > 1.5:
-                continue
             if rx_ts >= best_ts:
                 best = dict(data)
                 best_ts = rx_ts
         return best
 
+    def _peer_connection_state(self, snapshot: Optional[dict]) -> tuple[str, float]:
+        if not isinstance(snapshot, dict):
+            return "DISCONNECTED", 0.0
+        received_at = float(snapshot.get("_received_at") or 0.0)
+        return classify_peer_connection(received_at, now=time.time()), max(0.0, time.time() - received_at)
+
     def _format_rx_summary(self) -> str:
-        sender = str(getattr(self.state, "last_network_rx_sender", "") or "-")
-        seq = int(getattr(self.state, "last_network_rx_seq", 0) or 0)
-        role = str(getattr(self.state, "last_network_rx_role", "") or "-")
-        kind = str(getattr(self.state, "last_network_rx_kind", "") or "-")
-        peer = None
-        if sender != "-":
-            peer = getattr(self.state, "other_pc_data", {}).get(sender)
-            if not isinstance(peer, dict):
-                peer = None
-        if peer:
-            map_text = self._format_map_text(peer)
-            x_text, y_text = self._format_coord_text(peer)
-            return f"RX sender={sender} seq={seq} role={role} kind={kind} map={map_text} x={x_text} y={y_text}"
-        return f"RX sender={sender} seq={seq} role={role} kind={kind} map=- x=- y=-"
+        active_role = self._effective_role_name(self.state.role)
+        summary = []
+        for role_name in ("도사1", "도사2", "격수", "술사"):
+            if self._normalize_role_name(role_name) == active_role:
+                summary.append(f"{self._display_role_name(role_name)}:LOCAL")
+                continue
+            peer = self._get_peer_snapshot_by_role(role_name)
+            status, age = self._peer_connection_state(peer)
+            age_text = f" {age:.1f}s" if status != "DISCONNECTED" else ""
+            summary.append(f"{self._display_role_name(role_name)}:{status}{age_text}")
+        return "LINK | " + " | ".join(summary)
 
     def _get_role_snapshot(self, role_name: str) -> Optional[dict]:
         if self._normalize_role_name(role_name) == self._normalize_role_name(str(getattr(self.state, "role", "") or "")):
@@ -2829,8 +2830,11 @@ class AppView:
 
         if role_kind == "LOCAL":
             return "#0B3B5A", "#38BDF8", "LOCAL"
-        if fresh:
+        connection_status, _age = self._peer_connection_state(snapshot)
+        if connection_status == "CONNECTED":
             return "#103B28", "#34D399", "REMOTE"
+        if connection_status == "STALE":
+            return "#4A3412", "#FBBF24", "STALE"
         return "#3F1D1D", "#F87171", "DISCONNECTED"
 
     def _display_role_name(self, role_name: str) -> str:
@@ -3471,9 +3475,8 @@ class AppView:
             is_connected = getattr(state, "is_connected", False)
             net_status = "연결됨" if is_connected else "연결 끊김"
 
-            if self._effective_role_name(self.state.role) in ("도사", "도사1") and getattr(state, "last_network_rx_sender", ""):
-
-                net_status = f"연결됨 (격수PC: {state.last_network_rx_sender})"
+            if is_connected:
+                net_status = self._format_rx_summary()
             
             # 연결 상태 변경 시 즉시 UI 업데이트
             if net_status != self.last_values.get("dash_net"):

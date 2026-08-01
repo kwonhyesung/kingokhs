@@ -31,6 +31,22 @@ def is_support_role(role: object) -> bool:
     return normalize_network_role(role) in {"도사1", "도사2"}
 
 
+def classify_peer_connection(
+    received_at: float,
+    now: float,
+    connected_sec: float = 1.5,
+    stale_sec: float = 5.0,
+) -> str:
+    if float(received_at or 0.0) <= 0.0:
+        return "DISCONNECTED"
+    age = max(0.0, float(now) - float(received_at))
+    if age <= max(0.0, float(connected_sec)):
+        return "CONNECTED"
+    if age <= max(float(connected_sec), float(stale_sec)):
+        return "STALE"
+    return "DISCONNECTED"
+
+
 def should_accept_hotkey_press(last_pressed_at: float, now: float, debounce_sec: float = 0.20) -> bool:
     return float(now) - float(last_pressed_at or 0.0) >= max(0.0, float(debounce_sec))
 
