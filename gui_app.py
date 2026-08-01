@@ -69,6 +69,7 @@ from bis_logic import LogicSvc, RouteSvc
 from patrol_routes import inject_patrol_points, load_patrol_points_csv, parse_route_point
 from support_runtime_rules import (
     classify_peer_connection,
+    is_support_role,
     should_accept_hotkey_press,
     should_run_periodic_refresh,
 )
@@ -3136,14 +3137,23 @@ class AppView:
         action_thread = getattr(self, 'action_thread', None)
         if action_thread is not None:
             action_thread.task_active = service_enabled
-            if service_enabled and getattr(self.state, "role", "") in ("도사", "도사1"):
+            if service_enabled and is_support_role(
+                getattr(self.state, "network_role", "") or getattr(self.state, "role", "")
+            ):
                 prepare = getattr(action_thread, "request_initial_direct_heal_target_prepare", None)
                 if callable(prepare):
                     prepare()
 
         self._sync_control_mode_widgets()
         if announce:
-            print(f"[Hotkey] Mode set: {control_mode}")
+            warrior = self.state.get_fresh_remote_data_by_role("격수")
+            warrior_pos = "-"
+            if isinstance(warrior, dict):
+                warrior_pos = f"{warrior.get('x', '?')},{warrior.get('y', '?')}"
+            print(
+                f"[Hotkey] Mode set: {control_mode} | input={hw.get_input_backend()} "
+                f"net={bool(getattr(self.state, 'is_connected', False))} warrior={warrior_pos}"
+            )
             self.show_toast(f"MODE: {control_mode}")
 
     def _toggle_control_mode(self, mode: str, label: str):

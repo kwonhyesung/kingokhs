@@ -91,6 +91,7 @@ def test_software_input_backend_translates_force_key_command(monkeypatch):
         def release(key):
             events.append(("release", key))
 
+    monkeypatch.setattr(bis_core, "direct_software_input", None)
     monkeypatch.setattr(bis_core, "software_keyboard", FakeKeyboard())
     controller = BisHardware()
     controller.send_force("K,3")

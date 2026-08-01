@@ -14,6 +14,12 @@ try:
 except ImportError:
     software_keyboard = None
 
+try:
+    import pydirectinput as direct_software_input
+    direct_software_input.PAUSE = 0
+except ImportError:
+    direct_software_input = None
+
 VERBOSE_STATE_LOGS = os.environ.get("SVC_VERBOSE_LOGS", "0") == "1"
 VERBOSE_HW_LOGS = os.environ.get("SVC_HW_LOGS", "0") == "1"
 
@@ -968,29 +974,34 @@ class BisHardware:
         return "HW" if self.is_hardware_ready() else "SW"
 
     def is_input_ready(self) -> bool:
-        return self.is_hardware_ready() or software_keyboard is not None
+        return self.is_hardware_ready() or direct_software_input is not None or software_keyboard is not None
 
     def announce_input_backend(self) -> str:
         backend = self.get_input_backend()
         if backend != self._last_announced_input_backend:
-            detail = "ESP32" if backend == "HW" else "keyboard"
+            detail = "ESP32" if backend == "HW" else "pydirectinput"
             print(f"[Input] backend={backend} ({detail})")
             self._last_announced_input_backend = backend
         return backend
 
     @staticmethod
     def _software_release_all() -> None:
-        if software_keyboard is None:
+        input_driver = direct_software_input or software_keyboard
+        if input_driver is None:
             return
         for key in ("left", "right", "up", "down", "shift", "ctrl", "alt", "esc", "space", "enter"):
             try:
-                software_keyboard.release(key)
+                if direct_software_input is not None:
+                    direct_software_input.keyUp(key)
+                else:
+                    input_driver.release(key)
             except Exception:
                 pass
 
     def _send_software(self, cmd: str) -> None:
         self.announce_input_backend()
-        if software_keyboard is None:
+        input_driver = direct_software_input or software_keyboard
+        if input_driver is None:
             _hw_log(f"[Software] input unavailable: {cmd}")
             return
         command = str(cmd or "").strip()
@@ -998,14 +1009,28 @@ class BisHardware:
             if command == "RELEASE_ALL" or command == "U:all":
                 self._software_release_all()
             elif command.startswith("D:"):
-                software_keyboard.press(command[2:].strip())
+                key = command[2:].strip()
+                if direct_software_input is not None:
+                    direct_software_input.keyDown(key)
+                else:
+                    input_driver.press(key)
             elif command.startswith("U:"):
-                software_keyboard.release(command[2:].strip())
+                key = command[2:].strip()
+                if direct_software_input is not None:
+                    direct_software_input.keyUp(key)
+                else:
+                    input_driver.release(key)
             elif command.startswith("K,"):
                 key = command[2:].strip()
-                software_keyboard.press(key)
+                if direct_software_input is not None:
+                    direct_software_input.keyDown(key)
+                else:
+                    input_driver.press(key)
                 humanized_sleep(TIMING_CONFIG["key_down_hold"], variance=0.05)
-                software_keyboard.release(key)
+                if direct_software_input is not None:
+                    direct_software_input.keyUp(key)
+                else:
+                    input_driver.release(key)
             else:
                 _hw_log(f"[Software] unsupported command: {command}")
                 return
