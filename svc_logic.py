@@ -1295,15 +1295,15 @@ class LogicSvc(threading.Thread):
         if (now - float(getattr(self, "_last_party_direct_heal_log_time", 0.0) or 0.0)) >= 1.0:
             print(f"[Support] HP heal casting on warrior: key={self._party_direct_heal_key}, hp={hp_val}, direct_verified={self._party_direct_heal_verified}")
             self._last_party_direct_heal_log_time = now
-        self.state.support_targeting_active = True
-        try:
-            if not self._press_hw_key(self._party_direct_heal_key, variance=0.10):
-                return False
-            self._last_party_hp_support_time = time.time()
-            self._sleep_ui_gap(random.uniform(0.012, 0.030))
-            return True
-        finally:
-            self.state.support_targeting_active = False
+        # 이미 red_tab이 잠긴 대상에게 핫키 한 번 탭하는 것뿐이라 이동을 막을
+        # 필요가 없다 (자힐 수정과 동일한 이유 - 방향키와 스킬키는 서로 다른
+        # 채널이라 동시에 눌러도 충돌하지 않는다). support_targeting_active는
+        # 실제 ESC>TAB>TAB 재타겟팅에만 사용한다.
+        if not self._press_hw_key(self._party_direct_heal_key, variance=0.10):
+            return False
+        self._last_party_hp_support_time = time.time()
+        self._sleep_ui_gap(random.uniform(0.012, 0.030))
+        return True
 
     def _cast_party_heewon(self, snapshot: dict | None = None) -> bool:
         if self._is_portal_support_paused():
@@ -1320,21 +1320,17 @@ class LogicSvc(threading.Thread):
             return False
         hp_val = int((snapshot or {}).get("hp", 0) or 0)
         print(f"[Support] Heewon casting on warrior: key=1, hp={hp_val}")
-        self.state.support_targeting_active = True
-        try:
-            if not self._press_hw_key("1", variance=0.10):
-                return False
-            now = time.time()
-            self._last_warrior_heewon_time = now
-            if spell is not None:
-                try:
-                    spell.last_cast_time = now
-                except Exception:
-                    pass
-            self._sleep_ui_gap(random.uniform(0.018, 0.036))
-            return True
-        finally:
-            self.state.support_targeting_active = False
+        if not self._press_hw_key("1", variance=0.10):
+            return False
+        now = time.time()
+        self._last_warrior_heewon_time = now
+        if spell is not None:
+            try:
+                spell.last_cast_time = now
+            except Exception:
+                pass
+        self._sleep_ui_gap(random.uniform(0.018, 0.036))
+        return True
 
     def _cast_party_heewoncheom(self, snapshot: dict | None = None) -> bool:
         if self._is_portal_support_paused():
@@ -1351,21 +1347,17 @@ class LogicSvc(threading.Thread):
             return False
         hp_val = int((snapshot or {}).get("hp", 0) or 0)
         print(f"[Support] Heewoncheom casting on warrior: key=4, hp={hp_val}")
-        self.state.support_targeting_active = True
-        try:
-            if not self._press_hw_key("4", variance=0.10):
-                return False
-            now = time.time()
-            self._last_warrior_heewoncheom_time = now
-            if spell is not None:
-                try:
-                    spell.last_cast_time = now
-                except Exception:
-                    pass
-            self._sleep_ui_gap(random.uniform(0.018, 0.036))
-            return True
-        finally:
-            self.state.support_targeting_active = False
+        if not self._press_hw_key("4", variance=0.10):
+            return False
+        now = time.time()
+        self._last_warrior_heewoncheom_time = now
+        if spell is not None:
+            try:
+                spell.last_cast_time = now
+            except Exception:
+                pass
+        self._sleep_ui_gap(random.uniform(0.018, 0.036))
+        return True
 
     def _cast_due_periodic_party_support(self, snapshot: dict | None, now_support: float | None = None) -> bool:
         if not snapshot:
