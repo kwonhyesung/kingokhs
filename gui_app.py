@@ -65,7 +65,8 @@ from enum import Enum, auto
 from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
-from bis_logic import LogicSvc, RouteSvc
+from svc_logic import LogicSvc
+from svc_route import RouteSvc
 from patrol_routes import inject_patrol_points, load_patrol_points_csv, parse_route_point
 from support_runtime_rules import (
     classify_peer_connection,
@@ -2700,7 +2701,7 @@ class AppView:
 
     def toggle_service(self):
         self._toggle_control_mode("FOLLOW_SERVICE", "Follow+Service")
-        # [FIX] 중복 힐 코드 제거 - bis_logic.py의 _run_dosa_service_cycle이 이미 힐을 처리함
+        # [FIX] 중복 힐 코드 제거 - svc_logic.py의 _run_dosa_service_cycle이 이미 힐을 처리함
         # 별도 LogicSvc 생성 시 타이머 충돌 발생 → 삭제
 
     def set_game_scale(self, scale: float):

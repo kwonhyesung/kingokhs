@@ -51,7 +51,7 @@ from support_runtime_rules import (
     speed_up_delay,
 )
 from bis_core import BisHardware, GameState
-from bis_logic import LogicSvc
+from svc_logic import LogicSvc
 
 
 def test_network_role_normalization_keeps_priest2_as_udp_client():

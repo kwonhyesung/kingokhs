@@ -135,7 +135,7 @@ class Skill:
     
     Integration:
         - spell_casting.py: 스킬 캐스팅 함수 연동
-        - bis_logic.py: 스킬 사용 로직에서 참조
+        - svc_logic.py: 스킬 사용 로직에서 참조
         - svc_worker.py: GUI 스킬 설정 관리
     """
     name:           str              # 스킬 이름 (UI 표시 및 로깅용)

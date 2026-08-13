@@ -64,7 +64,8 @@ from enum import Enum, auto
 from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
-from bis_logic import LogicSvc, RouteSvc
+from svc_logic import LogicSvc
+from svc_route import RouteSvc
 
 # 怨좏빐?곷룄(65?몄튂 ?? 紐⑤땲???명솚?깆쓣 ?꾪븳 DPI ?몄떇 ?쒖꽦??
 try:

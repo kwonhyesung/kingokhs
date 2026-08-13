@@ -3,7 +3,8 @@ svc_worker.py
 svc_kernel.py
 svc_monitor.py
 bis_core.py
-bis_logic.py
+svc_logic.py
+svc_route.py
 bis_route.py
 bis_spell.py
 bis_vision.py

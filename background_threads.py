@@ -66,7 +66,8 @@ from config_utils import choose_preferred_local_ipv4, get_local_ipv4_candidates,
 from support_runtime_rules import is_hub_network_role, is_peer_role_conflict, normalize_network_role
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
-from bis_logic import LogicSvc, RouteSvc
+from svc_logic import LogicSvc
+from svc_route import RouteSvc
 
 # 怨좏빐?곷룄(65?몄튂 ?? 紐⑤땲???명솚?깆쓣 ?꾪븳 DPI ?몄떇 ?쒖꽦??
 try:
