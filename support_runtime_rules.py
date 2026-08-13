@@ -323,7 +323,6 @@ def build_f5_hon_sequence(repeat_count: int = 5) -> tuple[str, ...]:
     sequence: list[str] = []
     for _ in range(max(1, int(repeat_count or 1))):
         sequence.extend(("esc", "6", "up", "enter"))
-    sequence.extend(("esc", "tab", "tab"))
     return tuple(sequence)
 
 

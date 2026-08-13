@@ -1408,7 +1408,7 @@ class LogicSvc(threading.Thread):
             print("[Hon] follow paused. Cast ESC>6>UP>ENTER.")
             tick_interval = 0.20
             sequence = build_f5_hon_sequence(repeat_count=repeat_count)
-            for idx in range(0, max(0, len(sequence) - 3), 4):
+            for idx in range(0, len(sequence), 4):
                 tick_started = time.perf_counter()
                 for key, delay in zip(sequence[idx:idx + 4], (0.04, 0.04, 0.04, 0.06)):
                     if not self._press_hw_key(key, variance=0.10, skip_focus_guard=True):
@@ -1417,10 +1417,10 @@ class LogicSvc(threading.Thread):
                 remaining = tick_interval - (time.perf_counter() - tick_started)
                 if remaining > 0:
                     humanized_sleep(remaining, variance=0.05)
-            for key, delay in zip(sequence[-3:], (0.07, 0.08, 0.08)):
-                if not self._press_hw_key(key, variance=0.10, skip_focus_guard=True):
-                    return False
-                self._sleep_ui_gap(delay)
+            print("[Hon] cast sequence complete. Reacquiring warrior red_tab.")
+            retargeted = self._reacquire_warrior_red_tab_after_emergency(moving_follow=False)
+            if not retargeted:
+                print("[Hon] warrior red_tab reacquire failed after cast.")
             print("[Hon] cast complete. Follow resumed.")
             return True
         finally:

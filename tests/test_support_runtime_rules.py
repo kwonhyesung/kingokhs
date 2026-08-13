@@ -342,12 +342,12 @@ def test_retarget_delay_can_be_tuned_faster_than_double_speed():
     assert speed_up_delay(0.46, factor=3.0) == 0.1533
 
 
-def test_f5_hon_sequence_uses_esc_before_each_cast_and_retargets_after():
+def test_f5_hon_sequence_uses_esc_before_each_cast():
     sequence = build_f5_hon_sequence(repeat_count=5)
     assert sequence[:4] == ("esc", "6", "up", "enter")
-    assert sequence[-3:] == ("esc", "tab", "tab")
+    assert sequence[-4:] == ("esc", "6", "up", "enter")
     assert sequence.count("6") == 5
-    assert len(sequence) == 23
+    assert len(sequence) == 20
 
 
 def test_party_heal_is_blocked_until_retarget_finishes():
