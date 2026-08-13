@@ -245,9 +245,9 @@ class RouteSvc(threading.Thread):
         self._support_follow_soft_stuck_count = 0
         self._support_follow_visited_cells: set[tuple[int, int]] = set()
         self._support_follow_escape_attempts = 0
+        self._support_follow_tried_escape_dirs: set[str] = set()
         self._last_support_quick_escape_time = 0.0
         self._follow_blocked_memory_count = 0
-        self._last_support_quick_escape_dir = None
         self._last_warrior_coord: tuple[int, int] | None = None
         self._last_warrior_dir: str | None = None
         self._last_warrior_step_dir: str | None = None
@@ -324,9 +324,14 @@ class RouteSvc(threading.Thread):
             direction for direction in candidate_dirs
             if _nav_step_from_dir(int(ccx), int(ccy), direction) not in blocked_cells
         ] or ["left", "right", "up", "down"]
-        last_escape_dir = str(getattr(self, "_last_support_quick_escape_dir", "") or "")
-        if len(candidate_dirs) > 1 and last_escape_dir in candidate_dirs:
-            candidate_dirs = [direction for direction in candidate_dirs if direction != last_escape_dir]
+        # 이번 stuck 에피소드에서 이미 시도해서 실패한 방향은 다시 고르지 않는다.
+        # last_move_dir 기반 후보 선정은 정상 follow 이동이 끼어들면 신뢰할 수
+        # 없어서(방향이 계속 덮어써짐), 같은 방향을 몇 번이고 재시도하는 문제가
+        # 있었다 - 시도한 방향 자체를 직접 기록해서 확실하게 배제한다.
+        tried_dirs = self._support_follow_tried_escape_dirs
+        untried_dirs = [direction for direction in candidate_dirs if direction not in tried_dirs]
+        if untried_dirs:
+            candidate_dirs = untried_dirs
 
         if follow_target:
             tx, ty = follow_target
@@ -352,7 +357,7 @@ class RouteSvc(threading.Thread):
                     candidate_dirs = closer_dirs
 
         escape_dir = candidate_dirs[0]
-        self._last_support_quick_escape_dir = escape_dir
+        tried_dirs.add(escape_dir)
         attempts = int(getattr(self, "_support_follow_escape_attempts", 0) or 0)
         self._support_follow_escape_attempts = attempts + 1
         # 같은 자리에서 반복 실패할수록(진전 없음) 더 멀리, 더 빠르게 밀어붙여서
@@ -446,6 +451,7 @@ class RouteSvc(threading.Thread):
                 self._support_follow_soft_stuck_count = 0
                 self._support_follow_visited_cells = set()
                 self._support_follow_escape_attempts = 0
+                self._support_follow_tried_escape_dirs = set()
                 return False
 
         now = time.time()
@@ -471,10 +477,12 @@ class RouteSvc(threading.Thread):
                         self._support_follow_visited_cells = {current_pos}
                     self._support_follow_soft_stuck_count = 0
                     self._support_follow_escape_attempts = 0
+                    self._support_follow_tried_escape_dirs = set()
             else:
                 self._support_follow_soft_stuck_count = 0
                 self._support_follow_visited_cells = set()
                 self._support_follow_escape_attempts = 0
+                self._support_follow_tried_escape_dirs = set()
             return False
 
         if self._nav_attempt_pos != current_pos:
@@ -503,6 +511,7 @@ class RouteSvc(threading.Thread):
                 self._support_follow_soft_stuck_count = 0
                 self._support_follow_visited_cells = set()
                 self._support_follow_escape_attempts = 0
+                self._support_follow_tried_escape_dirs = set()
                 return False
 
             self.stuck_count += 1
@@ -531,6 +540,7 @@ class RouteSvc(threading.Thread):
                     return False
                 self._support_follow_soft_stuck_count = 0
                 self._support_follow_visited_cells = set()
+                self._support_follow_tried_escape_dirs = set()
                 self._trigger_box_collision_recover(force_retarget=True)
                 self._nav_attempt_pos = None
                 self._nav_attempt_started_at = 0.0
@@ -947,6 +957,7 @@ class RouteSvc(threading.Thread):
         self._support_follow_soft_stuck_count = 0
         self._support_follow_visited_cells = set()
         self._support_follow_escape_attempts = 0
+        self._support_follow_tried_escape_dirs = set()
         self.state.last_move_dir = ""
         print(f"[PortalFollow] finished: {reason}")
 
