@@ -624,7 +624,7 @@ class LogicSvc(threading.Thread):
             self._refresh_self_cooltime_view("[Recovery] post-revive status refresh.")
             self._execute_self_geumgang_cycle(skip_refresh=True, force_cast=True)
             self._execute_self_bomu_cycle(skip_refresh=True, force_cast=True)
-            if self.state.role == "도사" and self.state.service_active:
+            if self.state.role in ("도사", "도사1", "도사2") and self.state.service_active:
                 self.request_initial_direct_heal_target_prepare()
             self._zero_hp_read_count = 0
             print("[Recovery] self revive sequence complete. Resume follow/service.")
@@ -1567,7 +1567,7 @@ class LogicSvc(threading.Thread):
     def _should_abort_self_support_buff(self) -> bool:
         if self._is_support_lock_search_active():
             return True
-        if self.state.role == "도사" and self._is_follow_reposition_needed():
+        if self.state.role in ("도사", "도사1", "도사2") and self._is_follow_reposition_needed():
             return True
         if self._needs_hp_recovery():
             return True
@@ -3115,7 +3115,7 @@ class LogicSvc(threading.Thread):
                 self._complete_self_hp_recovery_reengage(
                     source_log="[Recovery] self low-HP recovery complete."
                 )
-            elif self.state.role == "도사" and self.state.service_active:
+            elif self.state.role in ("도사", "도사1", "도사2") and self.state.service_active:
                 self.request_initial_direct_heal_target_prepare()
             self._pace_service_loop("active")
             return True
