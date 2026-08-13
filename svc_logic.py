@@ -59,6 +59,8 @@ from support_runtime_rules import (
     should_cast_periodic_heewon,
     classify_map_sync,
     is_implausible_walk_speed,
+    fingerprint_hamming_distance,
+    MAP_FINGERPRINT_SAME_MAX_DISTANCE,
     should_continue_self_hp_recovery,
     should_hold_follow_gap,
     should_hold_follow_position,
@@ -238,6 +240,7 @@ class LogicSvc(threading.Thread):
         self._periodic_support_min_mp = 50000
         self._service_last_warrior_coord: tuple[int, int] | None = None
         self._service_last_warrior_coord_ts: float = 0.0
+        self._service_last_warrior_fingerprint: str = ""
         self._service_last_warrior_dir: str | None = None
         self._service_last_warrior_step_dir: str | None = None
         self._service_last_warrior_map_sig: tuple[str, str, str, str] | None = None
@@ -2855,9 +2858,30 @@ class LogicSvc(threading.Thread):
                 self._service_last_warrior_map_sig = map_sig
                 if dps_dir:
                     self._service_last_warrior_dir = dps_dir
+                cur_fp = str(support_target.get("map_info_fingerprint", "") or "")
+                if cur_fp:
+                    self._service_last_warrior_fingerprint = cur_fp
             return False
 
-        map_changed = bool(prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+        # map_name/current_map (OCR text) go stale when text recognition fails on a
+        # given map and just keep the last successful value forever - so text-only
+        # comparison can miss a real map change on maps where OCR doesn't read.
+        # map_info_fingerprint is recomputed every cycle regardless of OCR success,
+        # so use it as a second, independent "did the map actually change" signal.
+        cur_fingerprint = str(support_target.get("map_info_fingerprint", "") or "")
+        prev_fingerprint = self._service_last_warrior_fingerprint
+        fingerprint_changed = bool(
+            prev_fingerprint
+            and cur_fingerprint
+            and fingerprint_hamming_distance(prev_fingerprint, cur_fingerprint) > MAP_FINGERPRINT_SAME_MAX_DISTANCE
+        )
+        if cur_fingerprint:
+            self._service_last_warrior_fingerprint = cur_fingerprint
+
+        map_changed = bool(
+            (prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+            or fingerprint_changed
+        )
         cur_ok = (
             is_plausible_map_coord(cur_x, cur_y)
             or (event_prev is not None and is_plausible_transition_coord(cur_x, cur_y))
