@@ -46,11 +46,15 @@ def discord_notify(message: str, prefix: str = "") -> None:
         body = json.dumps({"content": content}).encode("utf-8")
         req = urllib.request.Request(
             DISCORD_WEBHOOK_URL, data=body,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                # Discord/Cloudflare 403s urllib's default "Python-urllib/x.x" UA.
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DiscordBot",
+            },
         )
         urllib.request.urlopen(req, timeout=3)
-    except Exception:
-        pass
+    except Exception as e:
+        _hw_log(f"[Discord] notify failed: {e}")
 
 from dataclasses import dataclass, field
 from enum import Enum
