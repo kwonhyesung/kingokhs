@@ -389,6 +389,8 @@ def test_periodic_heewoncheom_uses_twenty_five_second_interval():
 
 def test_support_autohunt_ignores_monster_combat_for_dosa_follow_service():
     assert should_ignore_monster_combat_for_support_autohunt("도사", True, True) is True
+    assert should_ignore_monster_combat_for_support_autohunt("도사1", True, True) is True
+    assert should_ignore_monster_combat_for_support_autohunt("도사2", True, True) is True
     assert should_ignore_monster_combat_for_support_autohunt("도사", True, False) is False
     assert should_ignore_monster_combat_for_support_autohunt("격수", True, True) is False
 

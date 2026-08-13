@@ -1099,27 +1099,6 @@ class LogicSvc(threading.Thread):
             return bool(close_infos)
 
         return bool(monsters)
-        monsters = self._get_visible_monsters()
-        now = time.time()
-        if monsters:
-            self._last_monster_seen_time = now
-
-        if self.state.target_locked:
-            acquire_grace = max(0.30, float(TIMING_CONFIG.get("ocr_wait", 0.10)) * 3.0)
-            if self.state.target_name:
-                return True
-            if monsters and (now - self._last_target_search_time) <= max(acquire_grace, 0.50):
-                return True
-            if (now - self._last_target_search_time) <= acquire_grace:
-                return True
-            self._clear_target_state()
-            return False
-
-        if self.state.role == "술사":
-            _me_grid, close_infos, _dense_count = self._get_priest_engage_metrics()
-            return bool(close_infos)
-
-        return bool(monsters)
 
     def _recover_hp(self):
         if not self._needs_hp_recovery():

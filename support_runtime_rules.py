@@ -378,7 +378,11 @@ def should_ignore_monster_combat_for_support_autohunt(
     nav_follow_enabled: bool,
 ) -> bool:
     normalized_role = str(role or "").strip()
-    return normalized_role == "도사" and bool(service_active) and bool(nav_follow_enabled)
+    return (
+        normalized_role in ("도사", "도사1", "도사2")
+        and bool(service_active)
+        and bool(nav_follow_enabled)
+    )
 
 
 def should_defer_stuck_escape_for_support(
