@@ -243,7 +243,7 @@ class RouteSvc(threading.Thread):
         self._last_box_collision_recover_request_time = 0.0
         self._support_follow_hold_distance = 1
         self._support_follow_soft_stuck_count = 0
-        self._support_follow_progress_best_gap = None
+        self._support_follow_visited_cells: set[tuple[int, int]] = set()
         self._support_follow_escape_attempts = 0
         self._last_support_quick_escape_time = 0.0
         self._follow_blocked_memory_count = 0
@@ -444,7 +444,7 @@ class RouteSvc(threading.Thread):
                 self._nav_attempt_started_at = 0.0
                 self.stuck_count = 0
                 self._support_follow_soft_stuck_count = 0
-                self._support_follow_progress_best_gap = None
+                self._support_follow_visited_cells = set()
                 self._support_follow_escape_attempts = 0
                 return False
 
@@ -457,20 +457,23 @@ class RouteSvc(threading.Thread):
             self._nav_attempt_pos = None
             self._nav_attempt_started_at = 0.0
             self.stuck_count = 0
-            # 회피(escape)로 좌표가 바뀌어도 목표에 실제로 가까워진 게 아니면
-            # soft-stuck 카운트를 리셋하지 않는다 - 안 그러면 막다른 구석에서
-            # 매번 카운트가 지워져 재타겟팅까지 절대 도달하지 못한다.
+            # 좌표가 바뀌어도 이번 stuck 에피소드에서 이미 지나간 칸으로
+            # 되돌아온 것이면 진전이 아니다 - follow_target(격수)이 움직이면
+            # 거리(gap)만으로는 진전 여부를 판단할 수 없어서, 실제로 처음
+            # 밟는 칸인지로 판정한다. 안 그러면 막다른 구석에서 격수가
+            # 조금만 움직여도 카운트가 지워져 재타겟팅까지 도달 못 한다.
             if follow_navigation_active and follow_target:
-                tx, ty = follow_target
-                new_gap = follow_manhattan_gap(int(tx), int(ty), int(current_pos[0]), int(current_pos[1]))
-                best_gap = self._support_follow_progress_best_gap
-                if best_gap is None or new_gap < best_gap:
-                    self._support_follow_progress_best_gap = new_gap
+                if current_pos in self._support_follow_visited_cells:
+                    pass
+                else:
+                    self._support_follow_visited_cells.add(current_pos)
+                    if len(self._support_follow_visited_cells) > 12:
+                        self._support_follow_visited_cells = {current_pos}
                     self._support_follow_soft_stuck_count = 0
                     self._support_follow_escape_attempts = 0
             else:
                 self._support_follow_soft_stuck_count = 0
-                self._support_follow_progress_best_gap = None
+                self._support_follow_visited_cells = set()
                 self._support_follow_escape_attempts = 0
             return False
 
@@ -498,7 +501,7 @@ class RouteSvc(threading.Thread):
                 self._nav_attempt_started_at = 0.0
                 self.stuck_count = 0
                 self._support_follow_soft_stuck_count = 0
-                self._support_follow_progress_best_gap = None
+                self._support_follow_visited_cells = set()
                 self._support_follow_escape_attempts = 0
                 return False
 
@@ -527,7 +530,7 @@ class RouteSvc(threading.Thread):
                     self._nav_attempt_started_at = 0.0
                     return False
                 self._support_follow_soft_stuck_count = 0
-                self._support_follow_progress_best_gap = None
+                self._support_follow_visited_cells = set()
                 self._trigger_box_collision_recover(force_retarget=True)
                 self._nav_attempt_pos = None
                 self._nav_attempt_started_at = 0.0
@@ -942,7 +945,7 @@ class RouteSvc(threading.Thread):
         self._nav_attempt_started_at = 0.0
         self.stuck_count = 0
         self._support_follow_soft_stuck_count = 0
-        self._support_follow_progress_best_gap = None
+        self._support_follow_visited_cells = set()
         self._support_follow_escape_attempts = 0
         self.state.last_move_dir = ""
         print(f"[PortalFollow] finished: {reason}")
