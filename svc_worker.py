@@ -63,7 +63,7 @@ from typing import Tuple, Optional, Dict
 from enum import Enum, auto
 
 # ?뚣끇瑗???????袁る７??
-from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
+from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep, discord_notify
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc
 from svc_sentinel import SentinelThread
@@ -534,6 +534,7 @@ def main(
     logger.start()
 
     print("[OK] System started. (Production Mode)")
+    discord_notify(f"connected (role={resolved_role})")
     
     # GUI ??쎈뻬
     gui.action_thread = action_thread
