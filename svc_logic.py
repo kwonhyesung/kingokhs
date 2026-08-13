@@ -58,6 +58,7 @@ from support_runtime_rules import (
     should_block_party_heal,
     should_cast_periodic_heewon,
     classify_map_sync,
+    is_implausible_walk_speed,
     should_continue_self_hp_recovery,
     should_hold_follow_gap,
     should_hold_follow_position,
@@ -236,6 +237,7 @@ class LogicSvc(threading.Thread):
         self._last_warrior_heewoncheom_time = 0.0
         self._periodic_support_min_mp = 50000
         self._service_last_warrior_coord: tuple[int, int] | None = None
+        self._service_last_warrior_coord_ts: float = 0.0
         self._service_last_warrior_dir: str | None = None
         self._service_last_warrior_step_dir: str | None = None
         self._service_last_warrior_map_sig: tuple[str, str, str, str] | None = None
@@ -478,6 +480,15 @@ class LogicSvc(threading.Thread):
                 print(f"[Signal] 격수 데이터 수신 - HP: {hp}, MP: {mp}, 힐요청: {heal_request}, MP요청: {mp_request}")
                 print(f"[Signal] HP기준값: {good_hp}, MP기준값: {good_mp}, red_tab: {red_tab_enabled}")
                 print(f"[Signal] 요청 계산: good_hp>0={good_hp>0}, hp>0={hp>0}, hp<=good_hp={hp<=good_hp}")
+                map_info_text = str(remote.get("map_info_text", "") or "")
+                fingerprint = str(remote.get("map_info_fingerprint", "") or "")
+                received_at = float(remote.get("_received_at", 0.0) or 0.0)
+                age = (current_time - received_at) if received_at > 0 else -1.0
+                print(
+                    f"[Signal] 격수 map - name={remote.get('map_name', '')}, "
+                    f"current_map={remote.get('current_map', '')}, "
+                    f"text={map_info_text[:20]!r}, fingerprint_len={len(fingerprint)}, age={age:.2f}s"
+                )
                 self.state.last_signal_log_time = current_time
         else:
             current_time = time.time()
@@ -2838,6 +2849,7 @@ class LogicSvc(threading.Thread):
                     if len(self._service_warrior_trail) > 12:
                         self._service_warrior_trail = self._service_warrior_trail[-12:]
                 self._service_last_warrior_coord = (cur_x, cur_y)
+                self._service_last_warrior_coord_ts = float(support_target.get("_received_at") or 0.0) or time.time()
                 self._service_last_warrior_map_sig = map_sig
                 if dps_dir:
                     self._service_last_warrior_dir = dps_dir
@@ -2855,6 +2867,16 @@ class LogicSvc(threading.Thread):
             and cur_ok
             and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
         )
+        if coord_jumped and not map_changed and not map_info_changed and event_prev is None:
+            # No corroborating signal (map didn't change, no explicit transition event) -
+            # a distance jump alone can also mean a telemetry gap swallowed a few normal
+            # walking ticks. Only trust it as a real portal if the implied speed is
+            # something normal walking could never produce.
+            cur_received_at = float(support_target.get("_received_at") or 0.0)
+            prev_ts = float(getattr(self, "_service_last_warrior_coord_ts", 0.0) or 0.0)
+            elapsed = cur_received_at - prev_ts if (cur_received_at > 0.0 and prev_ts > 0.0) else 0.0
+            jump_distance = follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y)
+            coord_jumped = is_implausible_walk_speed(jump_distance, elapsed)
         transition_prev = event_prev or prev
         transition = bool(event_prev) or (
             bool(prev)
@@ -2872,6 +2894,7 @@ class LogicSvc(threading.Thread):
 
         if cur_ok:
             self._service_last_warrior_coord = (cur_x, cur_y)
+            self._service_last_warrior_coord_ts = float(support_target.get("_received_at") or 0.0) or time.time()
             self._service_last_warrior_map_sig = map_sig
             if dps_dir:
                 self._service_last_warrior_dir = dps_dir
@@ -2898,6 +2921,7 @@ class LogicSvc(threading.Thread):
         if not enter_dir:
             if cur_ok:
                 self._service_last_warrior_coord = (cur_x, cur_y)
+                self._service_last_warrior_coord_ts = float(support_target.get("_received_at") or 0.0) or time.time()
                 self._service_last_warrior_map_sig = map_sig
             print(
                 f"[PortalFollow] transition waiting for stable step dir: "

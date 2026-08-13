@@ -40,6 +40,8 @@ from support_runtime_rules import (
     should_trigger_self_hp_emergency,
     should_accept_hotkey_press,
     classify_map_sync,
+    fingerprint_hamming_distance,
+    is_implausible_walk_speed,
     classify_peer_connection,
     is_hub_network_role,
     enqueue_hotkey_callback,
@@ -229,6 +231,26 @@ def test_map_sync_prefers_normalized_text_then_roi_fingerprint():
     assert classify_map_sync(local, same_roi, now=10.2) == "same"
     assert classify_map_sync(local, different, now=10.2) == "different"
     assert classify_map_sync(local, None, now=10.2) == "pending"
+
+
+def test_map_sync_fingerprint_tolerates_a_few_flipped_bits():
+    # 16-bit fingerprints, no OCR text (forces the fingerprint path).
+    base = {"map_info_fingerprint": "0101010101010101", "_received_at": 10.0}
+    near = {"map_info_fingerprint": "1001010101010101", "_received_at": 10.1}  # 2 bits flipped
+    far = {"map_info_fingerprint": "1010101010100101", "_received_at": 10.1}  # 12 bits flipped
+
+    assert fingerprint_hamming_distance(base["map_info_fingerprint"], near["map_info_fingerprint"]) == 2
+    assert classify_map_sync(base, near, now=10.2) == "same"
+    assert classify_map_sync(base, far, now=10.2) == "pending"
+
+
+def test_implausible_walk_speed_separates_teleport_from_delayed_telemetry():
+    # 7 tiles in 0.2s = 35 tiles/s: no normal walk speed explains this -> real teleport.
+    assert is_implausible_walk_speed(distance=7, elapsed_sec=0.2) is True
+    # Same 7 tiles but the reading was 2s late: 3.5 tiles/s is ordinary walking.
+    assert is_implausible_walk_speed(distance=7, elapsed_sec=2.0) is False
+    # Unknown timing stays fail-safe (treated as implausible, same as before this existed).
+    assert is_implausible_walk_speed(distance=7, elapsed_sec=0.0) is True
 
 
 def test_warrior_transition_detects_small_portal_jumps():

@@ -115,9 +115,24 @@ def classify_map_sync(
 
     local_fingerprint = str(local.get("map_info_fingerprint") or "").strip()
     remote_fingerprint = str(remote.get("map_info_fingerprint") or "").strip()
-    if local_fingerprint and remote_fingerprint and local_fingerprint == remote_fingerprint:
-        return "same"
+    if local_fingerprint and remote_fingerprint and len(local_fingerprint) == len(remote_fingerprint):
+        if fingerprint_hamming_distance(local_fingerprint, remote_fingerprint) <= MAP_FINGERPRINT_SAME_MAX_DISTANCE:
+            return "same"
     return "pending"
+
+
+# map_info_fingerprint is a 128-bit dHash (16x8 Otsu-binarized crop). Exact-string equality
+# breaks on any single flipped bit (compression/anti-aliasing/animation), which only shows up
+# on some maps depending on how noisy their crop region is. Perceptual hashes are compared by
+# Hamming distance, not equality - ~8% of bit length is the standard "same image" tolerance.
+MAP_FINGERPRINT_SAME_MAX_DISTANCE = 10
+
+
+def fingerprint_hamming_distance(a: str, b: str) -> int:
+    """Bit differences between two equal-length '0'/'1' fingerprint strings."""
+    if len(a) != len(b):
+        return max(len(a), len(b))
+    return (int(a, 2) ^ int(b, 2)).bit_count()
 
 
 def follow_manhattan_gap(target_x: int, target_y: int, current_x: int, current_y: int) -> int:
@@ -144,6 +159,29 @@ def should_detect_warrior_transition(
     while normal 1~2 tile walking between telemetry ticks is ignored.
     """
     return follow_manhattan_gap(prev_x, prev_y, cur_x, cur_y) >= max(1, int(jump_distance))
+
+
+# Empirically measured from game_log.csv (63k one-second samples of real walking):
+# median 2 tiles/sec, p90 3, p95 jumps to 13 - normal walking essentially never exceeds
+# ~4-5 tiles/sec. 6 tiles/sec is comfortably above any plausible normal-walk speed while
+# still well below what a telemetry gap can produce (e.g. 7 tiles over a 2s gap = 3.5/s).
+WARRIOR_TRANSITION_MAX_WALK_SPEED = 6.0
+
+
+def is_implausible_walk_speed(
+    distance: int,
+    elapsed_sec: float,
+    max_walk_speed: float = WARRIOR_TRANSITION_MAX_WALK_SPEED,
+) -> bool:
+    """
+    True when covering `distance` tiles in `elapsed_sec` is faster than any plausible
+    normal walk - i.e. it can only be explained by an actual teleport/portal, not by a
+    delayed telemetry read of ordinary movement. elapsed_sec <= 0 (unknown timing) is
+    treated as implausible so behavior stays unchanged when timing data is missing.
+    """
+    if elapsed_sec <= 0:
+        return True
+    return (float(distance) / float(elapsed_sec)) > float(max_walk_speed)
 
 
 
