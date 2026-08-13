@@ -1230,11 +1230,24 @@ class RouteSvc(threading.Thread):
         portal_follow = bool(getattr(self, "_portal_follow_active", False))
         if follow_mode:
             # F2 추적은 격수/도사 양쪽의 pos ROI x,y만 사용한다.
-            # char_grid와 Grid 기반 장애물 판정은 다른 좌표계이므로 추적 경로에서 제외한다.
+            # char_grid와 Grid 기반 장애물 판정(nav_cell_blockers)은 다른 좌표계이므로
+            # 추적 경로에서 제외한다. 다만 stuck-recovery가 같은 ROI 좌표계로 기록해둔
+            # blocked_cells 메모리는 참조 가능하므로, 방금 막혀서 회피했던 칸으로
+            # 곧바로 다시 걸어 들어가는 것만은 피한다.
             if abs(dx) >= abs(dy):
-                step_dir = "right" if dx > 0 else "left"
+                primary_dir = "right" if dx > 0 else "left"
+                secondary_dir = ("down" if dy > 0 else "up") if dy != 0 else None
             else:
-                step_dir = "down" if dy > 0 else "up"
+                primary_dir = "down" if dy > 0 else "up"
+                secondary_dir = ("right" if dx > 0 else "left") if dx != 0 else None
+            step_dir = primary_dir
+            blocked_cells_roi = self._get_blocked_cells()
+            for candidate in (primary_dir, secondary_dir):
+                if candidate is None:
+                    continue
+                if _nav_step_from_dir(int(cx), int(cy), candidate) not in blocked_cells_roi:
+                    step_dir = candidate
+                    break
             next_grid = (int(cx), int(cy))
             blockers = []
         else:
