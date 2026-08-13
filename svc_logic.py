@@ -36,7 +36,7 @@ import win32con
 
 from bis_core import (
     AppStatus, hw, GameState,
-    TIMING_CONFIG, humanized_sleep, tc, display_game_hotkey
+    TIMING_CONFIG, humanized_sleep, tc, display_game_hotkey, discord_notify
 )
 from bis_spell import RecoveryManager
 from support_runtime_rules import (
@@ -484,11 +484,13 @@ class LogicSvc(threading.Thread):
                 fingerprint = str(remote.get("map_info_fingerprint", "") or "")
                 received_at = float(remote.get("_received_at", 0.0) or 0.0)
                 age = (current_time - received_at) if received_at > 0 else -1.0
-                print(
+                signal_map_line = (
                     f"[Signal] 격수 map - name={remote.get('map_name', '')}, "
                     f"current_map={remote.get('current_map', '')}, "
                     f"text={map_info_text[:20]!r}, fingerprint_len={len(fingerprint)}, age={age:.2f}s"
                 )
+                print(signal_map_line)
+                discord_notify(signal_map_line)
                 self.state.last_signal_log_time = current_time
         else:
             current_time = time.time()

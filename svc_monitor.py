@@ -194,7 +194,10 @@ class MonitorSvc(threading.Thread):
             elif crop.ndim == 3 and crop.shape[2] == 3:
                 gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
             else:
-                _monitor_log(f"[MapFingerprint] unexpected crop shape: {crop.shape}")
+                msg = f"[MapFingerprint] unexpected crop shape: {crop.shape}"
+                _monitor_log(msg)
+                from bis_core import discord_notify
+                discord_notify(msg)
                 return ""
             normalized = cv2.resize(gray, (16, 8), interpolation=cv2.INTER_AREA)
             _threshold, binary = cv2.threshold(
@@ -205,7 +208,10 @@ class MonitorSvc(threading.Thread):
             )
             return "".join("1" if value else "0" for value in binary.reshape(-1))
         except Exception as e:
-            _monitor_log(f"[MapFingerprint] failed: {e}, crop_shape={getattr(crop, 'shape', None)}")
+            msg = f"[MapFingerprint] failed: {e}, crop_shape={getattr(crop, 'shape', None)}"
+            _monitor_log(msg)
+            from bis_core import discord_notify
+            discord_notify(msg)
             return ""
 
     def _resolve_user_info_mode(self, now_ts: float) -> str:

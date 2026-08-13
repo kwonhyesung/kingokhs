@@ -29,6 +29,29 @@ def _hw_log(*args, **kwargs):
     if VERBOSE_HW_LOGS:
         print(*args, **kwargs)
 
+
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+
+
+def discord_notify(message: str, prefix: str = "") -> None:
+    """Post a line to Discord (via DISCORD_WEBHOOK_URL) so remote PCs don't need
+    manual terminal copy/paste to share logs. No-op if the webhook isn't set;
+    never raises (best-effort, must not break the bot loop)."""
+    if not DISCORD_WEBHOOK_URL:
+        return
+    try:
+        import urllib.request
+        pc = prefix or os.environ.get("COMPUTERNAME", "PC")
+        content = f"**[{pc}]** {message}"[:1900]
+        body = json.dumps({"content": content}).encode("utf-8")
+        req = urllib.request.Request(
+            DISCORD_WEBHOOK_URL, data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=3)
+    except Exception:
+        pass
+
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
