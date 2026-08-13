@@ -36,7 +36,6 @@ from support_runtime_rules import (
     should_retarget_after_support_follow_stuck,
     should_detect_warrior_transition,
     should_prioritize_follow_distance,
-    support_follow_stuck_timeout,
     WARRIOR_TRANSITION_JUMP_DISTANCE,
     is_plausible_transition_coord,
 )
@@ -450,22 +449,14 @@ class RouteSvc(threading.Thread):
 
         stuck_time_limit = float(TIMING_CONFIG.get("stuck_time", 4.0))
         if follow_navigation_active and follow_target:
-            support_follow_active = should_defer_stuck_escape_for_support(
-                f"{getattr(self.state, 'role', '')} {getattr(self.state, 'network_role', '')}",
-                bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
-                True,
-            )
-            if support_follow_active:
-                stuck_time_limit = support_follow_stuck_timeout(True)
+            tx, ty = follow_target
+            follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
+            if follow_gap >= 4:
+                stuck_time_limit = min(stuck_time_limit, 0.35)
+            elif follow_gap >= 2:
+                stuck_time_limit = min(stuck_time_limit, 0.55)
             else:
-                tx, ty = follow_target
-                follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
-                if follow_gap >= 4:
-                    stuck_time_limit = min(stuck_time_limit, 0.35)
-                elif follow_gap >= 2:
-                    stuck_time_limit = min(stuck_time_limit, 0.55)
-                else:
-                    stuck_time_limit = min(stuck_time_limit, 1.00)
+                stuck_time_limit = min(stuck_time_limit, 1.00)
         if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= stuck_time_limit:
             if bool(getattr(self, "_portal_follow_active", False)):
                 if (now - float(getattr(self, "_last_portal_follow_log_time", 0.0) or 0.0)) >= 0.8:
