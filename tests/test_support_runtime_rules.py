@@ -445,7 +445,7 @@ def test_self_recovery_retarget_keeps_follow_block_short():
 
 def test_target_box_clear_waits_for_support_targeting_to_finish():
     assert should_clear_target_box_after_support_stuck(True, False, False) is True
-    assert should_clear_target_box_after_support_stuck(True, True, False) is True
+    assert should_clear_target_box_after_support_stuck(True, True, False) is False
     assert should_clear_target_box_after_support_stuck(True, False, True) is False
     assert should_clear_target_box_after_support_stuck(False, False, False) is False
 

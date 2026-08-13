@@ -422,7 +422,11 @@ def should_clear_target_box_after_support_stuck(
     red_tab_confirmed: bool,
     targeting_active: bool,
 ) -> bool:
-    return bool(support_follow_active) and not bool(targeting_active)
+    return (
+        bool(support_follow_active)
+        and not bool(red_tab_confirmed)
+        and not bool(targeting_active)
+    )
 
 
 def should_block_party_heal(
