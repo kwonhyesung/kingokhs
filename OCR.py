@@ -10,7 +10,8 @@ from PIL import Image, ImageTk
 
 # 기존 프로젝트 모듈 임포트
 from svc_kernel import GameState, Region
-from svc_monitor import PatternMatcher, get_camera
+from svc_pattern_matcher import PatternMatcher
+from svc_capture import get_camera
 # FindText 엔진 임포트
 from svc_findtext import FindTextEngine
 

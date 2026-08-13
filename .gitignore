@@ -12,6 +12,7 @@ Thumbs.db
 
 # Runtime logs / generated artifacts
 game_log*.csv
+run_log.txt
 debug_*
 debug_analysis/
 debug_crops/

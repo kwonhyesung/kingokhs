@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 from svc_map_ocr import MapNameRecognizer
-from svc_monitor import PatternMatcher
+from svc_pattern_matcher import PatternMatcher
 
 paths = {
     "entrance": r"C:\Users\kwon\.cursor\projects\c-Users-kwon-Desktop-0416-1\assets\c__Users_kwon_AppData_Roaming_Cursor_User_workspaceStorage_8cf0939215353b360bd991176e7118fc_images_image-4ec1ff02-6ac5-43dd-b7e3-cef9584787f6.png",

@@ -2,6 +2,12 @@
 svc_worker.py
 svc_kernel.py
 svc_monitor.py
+svc_monitor_common.py
+svc_capture.py
+svc_pattern_matcher.py
+svc_entity_tracker.py
+svc_numeric_scanner.py
+svc_sentinel.py
 bis_core.py
 svc_logic.py
 svc_route.py

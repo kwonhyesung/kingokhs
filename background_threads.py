@@ -48,7 +48,7 @@ import socket as pysocket
 import queue
 from tkinter import ttk, messagebox, simpledialog
 from PIL import Image, ImageTk
-from svc_monitor import NumericFieldScanner
+from svc_numeric_scanner import NumericFieldScanner
 
 # Pillow 10+ ?명솚 由ъ깦?뚮쭅 (援щ쾭?꾩? ?뺤닔 0 = NEAREST)
 try:
@@ -65,7 +65,9 @@ from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_slee
 from config_utils import choose_preferred_local_ipv4, get_local_ipv4_candidates, load_network_config
 from support_runtime_rules import is_hub_network_role, is_peer_role_conflict, normalize_network_role
 from svc_stealth import StealthChecker
-from svc_monitor import MonitorSvc, SentinelThread, CaptureSvc
+from svc_monitor import MonitorSvc
+from svc_sentinel import SentinelThread
+from svc_capture import CaptureSvc
 from svc_logic import LogicSvc
 from svc_route import RouteSvc
 
