@@ -1313,7 +1313,10 @@ class BisHardware:
 
         if self.state is not None and not force:
             support_blocked = time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
-            if support_blocked or bool(getattr(self.state, "is_combat_busy", False)):
+            support_targeting = bool(getattr(self.state, "support_targeting_active", False)) or bool(
+                getattr(self.state, "red_tab_promotion_active", False)
+            )
+            if support_blocked or support_targeting or bool(getattr(self.state, "is_combat_busy", False)):
                 return
         
         _hw_log(f"[Move] 방향키: {direction}{' (force)' if force else ''}")

@@ -82,6 +82,7 @@ from support_runtime_rules import (
     should_trigger_self_hp_emergency,
     speed_up_delay,
     support_retarget_block_duration,
+    support_follow_stuck_timeout,
     WARRIOR_TRANSITION_JUMP_DISTANCE,
     is_plausible_transition_coord,
 )
@@ -207,6 +208,7 @@ class LogicSvc(threading.Thread):
         self._self_mp_priority_failed_until = 0.0
         self._self_mp_priority_defer_until = 0.0
         self._mp_follow_self_heal_until = 0.0
+        self._last_mp_follow_self_heal_tick = 0.0
         self._mp_stationary_self_heal_threshold = 50000
         self._last_party_heal_blocked_log_time = 0.0
         self._death_recovery_heal_attempts = 6
@@ -778,7 +780,7 @@ class LogicSvc(threading.Thread):
 
         self._invalidate_warrior_redtab_verification()
         self._party_direct_heal_target_prepared = False
-        self._set_support_input_block(support_retarget_block_duration(moving_follow))
+        self._set_support_input_block(0.75 if moving_follow else support_retarget_block_duration(False))
         self.state.support_targeting_active = True
         if not moving_follow:
             self._stop_support_movement_inputs()
@@ -813,6 +815,11 @@ class LogicSvc(threading.Thread):
                     self._last_party_hp_support_time = 0.0
                     print("[Recovery] warrior red_tab confirmed after TAB>TAB.")
                     self.state.support_targeting_active = False
+                    if moving_follow:
+                        self.state.support_input_blocked_until = min(
+                            float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
+                            time.time() + 0.02,
+                        )
                     return True
                 self._cancel_ntab_selection()
             finally:
@@ -820,6 +827,11 @@ class LogicSvc(threading.Thread):
             humanized_sleep(speed_up_delay(0.24, factor=3.0), variance=0.10)
         self._party_direct_heal_target_prepared = False
         self.state.support_targeting_active = False
+        if moving_follow:
+            self.state.support_input_blocked_until = min(
+                float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
+                time.time() + 0.02,
+            )
         return False
 
     def _handle_self_mp_priority(self, support_target: dict | None = None) -> bool:
@@ -892,7 +904,7 @@ class LogicSvc(threading.Thread):
                         )
                     return True
                 if after_hp > 0 and after_hp <= good_hp:
-                    self._mp_follow_self_heal_until = time.time() + 3.0
+                    self._mp_follow_self_heal_until = time.time() + 0.35
                     self._set_support_input_block(support_retarget_block_duration(True))
                     self._release_movement_keys_only()
                     red_tab_reacquired = self._reacquire_warrior_red_tab_after_emergency(moving_follow=True)
@@ -1256,12 +1268,15 @@ class LogicSvc(threading.Thread):
             return False
         self.state.box_collision_reprepare_requested = False
         now = time.time()
-        if (now - float(getattr(self, "_last_box_collision_recover_time", 0.0) or 0.0)) < 1.0:
-            return False
         self._last_box_collision_recover_time = now
-        print("[Support] box collision recover: re-prepare direct target (자동사냥 flow).")
-        self.request_initial_direct_heal_target_prepare()
-        self._handle_initial_direct_heal_prepare_request()
+        self._invalidate_warrior_redtab_verification()
+        self._set_support_input_block(0.75)
+        self._stop_support_movement_inputs()
+        print("[Support] stalled follow recover: ESC -> TAB -> TAB (movement locked).")
+        try:
+            self._prepare_direct_tab_heal_target()
+        finally:
+            self.state.support_targeting_active = False
         return True
 
     def _prepare_direct_tab_heal_target(self) -> bool:
@@ -1273,7 +1288,7 @@ class LogicSvc(threading.Thread):
             getattr(self.state, "nav_follow_enabled", False)
             and getattr(self.state, "service_active", False)
         )
-        self._set_support_input_block(support_retarget_block_duration(moving_follow))
+        self._set_support_input_block(0.75 if moving_follow else support_retarget_block_duration(False))
         if not moving_follow:
             self._stop_support_movement_inputs()
         self._support_lock_search_until = time.time() + 0.60
@@ -1294,6 +1309,11 @@ class LogicSvc(threading.Thread):
         finally:
             self._ntab_in_progress = False
             self.state.support_targeting_active = False
+            if moving_follow:
+                self.state.support_input_blocked_until = min(
+                    float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
+                    time.time() + 0.02,
+                )
             self._support_lock_search_until = time.time() + 0.12
             self._set_combat_busy(previous_busy)
 
@@ -2234,6 +2254,8 @@ class LogicSvc(threading.Thread):
         self._support_lock_search_until = time.time() + 0.90
         self.state.red_tab_promotion_active = True
         self.state.red_tab_promotion_until = time.time() + 1.20
+        self.state.support_targeting_active = True
+        self._set_support_input_block(0.75)
         self.state.ntab_active = False
         self.state.ntab_active_since = 0.0
         self._set_combat_busy(True)
@@ -2266,6 +2288,11 @@ class LogicSvc(threading.Thread):
             self.state.red_tab_promotion_active = False
             self.state.ntab_active = False
             self.state.ntab_active_since = 0.0
+            self.state.support_targeting_active = False
+            self.state.support_input_blocked_until = min(
+                float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
+                time.time() + 0.02,
+            )
             self._set_combat_busy(previous_busy)
     # ----------------------------------------------------------
     # ?? 蹂대Т(Buff) ?먮룞 愿由??????????????????????????????????
@@ -3060,7 +3087,10 @@ class LogicSvc(threading.Thread):
             and current_self_hp > int(getattr(self, "_mp_stationary_self_heal_threshold", 50000) or 50000)
             and time.time() < float(getattr(self, "_mp_follow_self_heal_until", 0.0) or 0.0)
         ):
-            self._cast_self_hp_micro_follow_tick()
+            now_micro_heal = time.time()
+            if (now_micro_heal - float(getattr(self, "_last_mp_follow_self_heal_tick", 0.0) or 0.0)) >= 0.22:
+                self._last_mp_follow_self_heal_tick = now_micro_heal
+                self._cast_self_hp_micro_follow_tick()
             self._log_dosa_f2_idle_reason(
                 f"post_mp_micro_self_heal self_hp={current_self_hp}/{good_hp}",
                 interval=0.5,
@@ -4327,15 +4357,22 @@ class RouteSvc(threading.Thread):
 
         stuck_time_limit = float(TIMING_CONFIG.get("stuck_time", 4.0))
         if follow_navigation_active and follow_target:
-            tx, ty = follow_target
-            follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
-            # 2D ?듬줈(??2移??먯꽌 留됲옒? 鍮⑤━ ??댁빞 ?섎?濡?follow 以묒뿉??湲곗????⑥텞.
-            if follow_gap >= 4:
-                stuck_time_limit = min(stuck_time_limit, 0.35)
-            elif follow_gap >= 2:
-                stuck_time_limit = min(stuck_time_limit, 0.55)
+            support_follow_active = should_defer_stuck_escape_for_support(
+                f"{getattr(self.state, 'role', '')} {getattr(self.state, 'network_role', '')}",
+                bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
+                True,
+            )
+            if support_follow_active:
+                stuck_time_limit = support_follow_stuck_timeout(True)
             else:
-                stuck_time_limit = min(stuck_time_limit, 1.00)
+                tx, ty = follow_target
+                follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
+                if follow_gap >= 4:
+                    stuck_time_limit = min(stuck_time_limit, 0.35)
+                elif follow_gap >= 2:
+                    stuck_time_limit = min(stuck_time_limit, 0.55)
+                else:
+                    stuck_time_limit = min(stuck_time_limit, 1.00)
         if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= stuck_time_limit:
             if bool(getattr(self, "_portal_follow_active", False)):
                 if (now - float(getattr(self, "_last_portal_follow_log_time", 0.0) or 0.0)) >= 0.8:
@@ -4405,16 +4442,16 @@ class RouteSvc(threading.Thread):
             ):
                 try:
                     hw.stop_all_inputs(repeat=1, delay=0.005)
-                    for _ in range(2):
-                        hw.fast_press("esc", variance=0.04)
-                        humanized_sleep(0.025, variance=0.04)
                     self.state.support_input_blocked_until = max(
                         float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
-                        time.time() + 0.12,
+                        time.time() + 0.75,
                     )
-                    print("[Recover] support follow stalled: clear suspected target box with ESC x2.")
+                    self.state.support_targeting_active = True
+                    self.state.box_collision_reprepare_requested = True
+                    print("[Recover] support follow stalled: request ESC -> TAB -> TAB with movement locked.")
                 except Exception as error:
-                    print(f"[Recover] support target-box clear failed: {error}")
+                    self.state.support_targeting_active = False
+                    print(f"[Recover] support red_tab reset request failed: {error}")
                 return
             self._quick_support_follow_escape(self._calc_follow_target())
             print("[Recover] support follow stalled with confirmed red_tab: use detour, keep target.")
@@ -6648,15 +6685,22 @@ class RouteSvc(threading.Thread):
 
         stuck_time_limit = float(TIMING_CONFIG.get("stuck_time", 4.0))
         if follow_navigation_active and follow_target:
-            tx, ty = follow_target
-            follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
-            # 2D ?듬줈(??2移??먯꽌 留됲옒? 鍮⑤━ ??댁빞 ?섎?濡?follow 以묒뿉??湲곗????⑥텞.
-            if follow_gap >= 4:
-                stuck_time_limit = min(stuck_time_limit, 0.35)
-            elif follow_gap >= 2:
-                stuck_time_limit = min(stuck_time_limit, 0.55)
+            support_follow_active = should_defer_stuck_escape_for_support(
+                f"{getattr(self.state, 'role', '')} {getattr(self.state, 'network_role', '')}",
+                bool(getattr(self.state, "service_active", False)) or bool(getattr(self.state, "auto_hunt", False)),
+                True,
+            )
+            if support_follow_active:
+                stuck_time_limit = support_follow_stuck_timeout(True)
             else:
-                stuck_time_limit = min(stuck_time_limit, 1.00)
+                tx, ty = follow_target
+                follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
+                if follow_gap >= 4:
+                    stuck_time_limit = min(stuck_time_limit, 0.35)
+                elif follow_gap >= 2:
+                    stuck_time_limit = min(stuck_time_limit, 0.55)
+                else:
+                    stuck_time_limit = min(stuck_time_limit, 1.00)
         if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= stuck_time_limit:
             if bool(getattr(self, "_portal_follow_active", False)):
                 if (now - float(getattr(self, "_last_portal_follow_log_time", 0.0) or 0.0)) >= 0.8:
@@ -6726,16 +6770,16 @@ class RouteSvc(threading.Thread):
             ):
                 try:
                     hw.stop_all_inputs(repeat=1, delay=0.005)
-                    for _ in range(2):
-                        hw.fast_press("esc", variance=0.04)
-                        humanized_sleep(0.025, variance=0.04)
                     self.state.support_input_blocked_until = max(
                         float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
-                        time.time() + 0.12,
+                        time.time() + 0.75,
                     )
-                    print("[Recover] support follow stalled: clear suspected target box with ESC x2.")
+                    self.state.support_targeting_active = True
+                    self.state.box_collision_reprepare_requested = True
+                    print("[Recover] support follow stalled: request ESC -> TAB -> TAB with movement locked.")
                 except Exception as error:
-                    print(f"[Recover] support target-box clear failed: {error}")
+                    self.state.support_targeting_active = False
+                    print(f"[Recover] support red_tab reset request failed: {error}")
                 return
             self._quick_support_follow_escape(self._calc_follow_target())
             print("[Recover] support follow stalled with confirmed red_tab: use detour, keep target.")

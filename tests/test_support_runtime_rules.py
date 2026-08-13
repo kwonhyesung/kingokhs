@@ -34,6 +34,7 @@ from support_runtime_rules import (
     should_prioritize_self_mp_over_party_heal,
     should_retarget_after_support_follow_stuck,
     should_run_periodic_refresh,
+    support_follow_stuck_timeout,
     support_retarget_block_duration,
     should_detect_warrior_transition,
     should_prioritize_follow_distance,
@@ -439,11 +440,12 @@ def test_party_support_requires_confirmed_red_tab():
 def test_self_recovery_retarget_keeps_follow_block_short():
     assert support_retarget_block_duration(True) == 0.18
     assert support_retarget_block_duration(False) == 2.4
+    assert support_follow_stuck_timeout(True) == 0.8
 
 
 def test_target_box_clear_waits_for_support_targeting_to_finish():
     assert should_clear_target_box_after_support_stuck(True, False, False) is True
-    assert should_clear_target_box_after_support_stuck(True, True, False) is False
+    assert should_clear_target_box_after_support_stuck(True, True, False) is True
     assert should_clear_target_box_after_support_stuck(True, False, True) is False
     assert should_clear_target_box_after_support_stuck(False, False, False) is False
 
