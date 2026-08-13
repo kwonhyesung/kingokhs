@@ -243,6 +243,8 @@ class RouteSvc(threading.Thread):
         self._last_box_collision_recover_request_time = 0.0
         self._support_follow_hold_distance = 1
         self._support_follow_soft_stuck_count = 0
+        self._support_follow_progress_best_gap = None
+        self._support_follow_escape_attempts = 0
         self._last_support_quick_escape_time = 0.0
         self._follow_blocked_memory_count = 0
         self._last_support_quick_escape_dir = None
@@ -351,8 +353,16 @@ class RouteSvc(threading.Thread):
 
         escape_dir = candidate_dirs[0]
         self._last_support_quick_escape_dir = escape_dir
-        print(f"[Recover] support follow quick escape: {escape_dir} (no retarget).")
-        hw.hold_move(escape_dir, "stuck_side_hold", duration=0.085)
+        attempts = int(getattr(self, "_support_follow_escape_attempts", 0) or 0)
+        self._support_follow_escape_attempts = attempts + 1
+        # 같은 자리에서 반복 실패할수록(진전 없음) 더 멀리 밀어붙여서
+        # 장애물 폭을 실제로 벗어나게 한다. 1회차 0.085s -> 4회차부터 0.285s 상한.
+        escape_duration = min(0.085 + 0.05 * attempts, 0.285)
+        print(
+            f"[Recover] support follow quick escape: {escape_dir} "
+            f"(no retarget, attempt={attempts + 1}, dur={escape_duration:.3f}s)."
+        )
+        hw.hold_move(escape_dir, "stuck_side_hold", duration=escape_duration)
         self.state.last_move_dir = escape_dir
         self._nav_attempt_pos = (self.state.x, self.state.y)
         self._nav_attempt_started_at = time.time()
@@ -430,6 +440,8 @@ class RouteSvc(threading.Thread):
                 self._nav_attempt_started_at = 0.0
                 self.stuck_count = 0
                 self._support_follow_soft_stuck_count = 0
+                self._support_follow_progress_best_gap = None
+                self._support_follow_escape_attempts = 0
                 return False
 
         now = time.time()
@@ -441,7 +453,21 @@ class RouteSvc(threading.Thread):
             self._nav_attempt_pos = None
             self._nav_attempt_started_at = 0.0
             self.stuck_count = 0
-            self._support_follow_soft_stuck_count = 0
+            # 회피(escape)로 좌표가 바뀌어도 목표에 실제로 가까워진 게 아니면
+            # soft-stuck 카운트를 리셋하지 않는다 - 안 그러면 막다른 구석에서
+            # 매번 카운트가 지워져 재타겟팅까지 절대 도달하지 못한다.
+            if follow_navigation_active and follow_target:
+                tx, ty = follow_target
+                new_gap = follow_manhattan_gap(int(tx), int(ty), int(current_pos[0]), int(current_pos[1]))
+                best_gap = self._support_follow_progress_best_gap
+                if best_gap is None or new_gap < best_gap:
+                    self._support_follow_progress_best_gap = new_gap
+                    self._support_follow_soft_stuck_count = 0
+                    self._support_follow_escape_attempts = 0
+            else:
+                self._support_follow_soft_stuck_count = 0
+                self._support_follow_progress_best_gap = None
+                self._support_follow_escape_attempts = 0
             return False
 
         if self._nav_attempt_pos != current_pos:
@@ -468,6 +494,8 @@ class RouteSvc(threading.Thread):
                 self._nav_attempt_started_at = 0.0
                 self.stuck_count = 0
                 self._support_follow_soft_stuck_count = 0
+                self._support_follow_progress_best_gap = None
+                self._support_follow_escape_attempts = 0
                 return False
 
             self.stuck_count += 1
@@ -495,6 +523,7 @@ class RouteSvc(threading.Thread):
                     self._nav_attempt_started_at = 0.0
                     return False
                 self._support_follow_soft_stuck_count = 0
+                self._support_follow_progress_best_gap = None
                 self._trigger_box_collision_recover(force_retarget=True)
                 self._nav_attempt_pos = None
                 self._nav_attempt_started_at = 0.0
@@ -909,6 +938,8 @@ class RouteSvc(threading.Thread):
         self._nav_attempt_started_at = 0.0
         self.stuck_count = 0
         self._support_follow_soft_stuck_count = 0
+        self._support_follow_progress_best_gap = None
+        self._support_follow_escape_attempts = 0
         self.state.last_move_dir = ""
         print(f"[PortalFollow] finished: {reason}")
 
