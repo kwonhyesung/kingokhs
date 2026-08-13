@@ -537,7 +537,7 @@ class LogicSvc(threading.Thread):
                 pass
 
     def _cast_self_hp_micro_follow_tick(self) -> bool:
-        """이동형 자힐 1틱: 방향키만 짧게 끊고 3>home>enter 후 follow를 즉시 재개한다."""
+        """이동형 자힐 1틱: 방향키는 유지한 채 3>home>enter만 끼워 넣어 follow 이동을 끊지 않는다."""
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
         key, skill = self.recovery_manager.resolve_recovery_key(
@@ -555,7 +555,6 @@ class LogicSvc(threading.Thread):
 
         previous_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
         self.state.support_input_blocked_until = max(previous_block, time.time() + 0.16)
-        self._release_movement_keys_only()
         for press_key in (key, "home", "enter"):
             if not self._press_hw_key(str(press_key), variance=0.06, skip_focus_guard=True):
                 return False
