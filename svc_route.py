@@ -358,6 +358,10 @@ class RouteSvc(threading.Thread):
         # 같은 자리에서 반복 실패할수록(진전 없음) 더 멀리 밀어붙여서
         # 장애물 폭을 실제로 벗어나게 한다. 1회차 0.085s -> 4회차부터 0.285s 상한.
         escape_duration = min(0.085 + 0.05 * attempts, 0.285)
+        if attempts >= 2:
+            # 회피가 3회 연속 진전 없이 실패한 지점 자체(주저앉은 칸)를 몇 초간
+            # 막힌 칸으로 기억해서, 나중에 다시 여기로 되돌아오려는 경로를 피한다.
+            self._remember_blocked_cell(int(ccx), int(ccy), reason="repeated_escape_fail")
         print(
             f"[Recover] support follow quick escape: {escape_dir} "
             f"(no retarget, attempt={attempts + 1}, dur={escape_duration:.3f}s)."
