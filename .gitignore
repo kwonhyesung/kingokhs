@@ -26,6 +26,7 @@ logs/
 gui_state.json
 
 # Secrets (do not commit)
+.env
 token.json
 credentials.json
 

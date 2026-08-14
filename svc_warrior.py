@@ -3,11 +3,13 @@
 
 import os
 
+from env_utils import load_env_file
 from svc_worker import main
 
 
 if __name__ == "__main__":
     # Keep manual F2 start and expose OBS/capture diagnostics on warrior PC.
+    load_env_file(os.path.dirname(os.path.abspath(__file__)))
     os.environ.setdefault("SVC_VERBOSE_LOGS", "1")
     os.environ.setdefault("SVC_HW_LOGS", "0")
     main(

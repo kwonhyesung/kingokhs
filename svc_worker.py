@@ -11,6 +11,7 @@ import csv
 import io
 import ipaddress
 import traceback
+from env_utils import load_env_file
 
 # 표준 출력 인코딩을 현재 윈도우 로캘에 맞춘다.
 try:
@@ -87,6 +88,7 @@ ctk.set_default_color_theme("blue")
 WIN_KEY = "ory"
 MULT = 1
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+load_env_file(SCRIPT_DIR)
 LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
 LOG_FILE_STR = os.path.join(SCRIPT_DIR, "game_log_str.csv")
 
