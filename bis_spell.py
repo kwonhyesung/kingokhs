@@ -78,19 +78,30 @@ class SpellCaster:
         humanized_sleep(0.05, variance=0.40) # 0.05초 대기
         self.hardware.release_key(spell_char.lower()) # 단축키를 뗗니다.
         
+    def _release_movement_keys(self):
+        """방향키가 눌려있으면 타겟선택 박스(Home/화살표 확정)가 캐릭터 대신 그
+        박스를 움직여서 이동이 멈춰버린다. 대상선택형 시전 전엔 항상 놓는다."""
+        for direction in ("up", "down", "left", "right"):
+            try:
+                self.hardware.release_key(direction)
+            except Exception:
+                pass
+
     def spell_home_enter(self, spell_char: str, delay: float = 0.1):
         """자가 마법을 사용할 때 쓰는 매크로입니다. (단축키 -> Home 키 -> Enter)"""
         # +z (Shift+Z)는 대화창 등을 초기화하는 용도로 흔히 쓰입니다.
+        self._release_movement_keys()
         self.send_key_sequence(['+z', spell_char.lower(), 'home', 'enter', 'escape'], delay)
-        
+
     def spell_click_enter(self, spell_char: str, delay: float = 0.1):
         """특정 대상 없이 단축키만 눌러서 마우스 클릭 등으로 발동할 때 씁니다."""
         self.hardware.press_key(spell_char.lower())
         humanized_sleep(0.1, variance=0.40)
         self.hardware.release_key(spell_char.lower())
-        
+
     def spell_arrow_enter(self, spell_char: str, arrow: str = "up", delay: float = 0.1):
         """마법을 쓰고 방향키(기본값: 위쪽)를 누른 뒤 엔터를 쳐서 마법을 발동시킵니다."""
+        self._release_movement_keys()
         self.send_key_sequence(['+z', spell_char.lower(), arrow.lower(), 'enter', 'escape'], delay)
         
     def spell_enter(self, spell_char: str, delay: float = 0.1):
@@ -260,6 +271,9 @@ class RecoveryManager:
             return
 
         # 나 자신에게 힐을 주는 올바른 키보드 순서: ESC -> 숫자키(마법) -> Home(나 자신 지정) -> Enter
+        # Home으로 대상선택 박스가 뜨는 동안엔 방향키가 캐릭터 대신 그 박스를
+        # 움직이므로, 이동키가 눌려있으면 캐릭터가 멈춰버린다 - 먼저 놓는다.
+        self.caster._release_movement_keys()
         self.caster._press_fast("esc") # 혹시 열려있는 창이 있을 수 있으니 ESC를 먼저 누릅니다.
         humanized_sleep(TIMING_CONFIG["key_gap"]) # 사람처럼 약간 기다립니다 (0.05초 등).
         
