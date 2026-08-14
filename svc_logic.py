@@ -543,7 +543,12 @@ class LogicSvc(threading.Thread):
                 pass
 
     def _cast_self_hp_micro_follow_tick(self) -> bool:
-        """이동형 자힐 1틱: 방향키는 유지한 채 3>home>enter만 끼워 넣어 follow 이동을 끊지 않는다."""
+        """이동형 자힐 1틱: 3>home>enter 후 이동을 즉시 재개한다.
+
+        3키는 기존에 잠긴 타겟이 없으면(예: 이동 중 red_tab이 풀린 상태) 힐 대신
+        대상선택 박스를 띄운다. 그 박스가 열려있는 동안 방향키는 캐릭터가 아니라
+        박스를 움직이므로, 이동키를 누른 채로 두면 캐릭터가 그대로 멈춰버린다.
+        그래서 3>home>enter가 끝날 때까지는 이동키를 반드시 놓아야 한다."""
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
         key, skill = self.recovery_manager.resolve_recovery_key(
@@ -561,6 +566,7 @@ class LogicSvc(threading.Thread):
 
         previous_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
         self.state.support_input_blocked_until = max(previous_block, time.time() + 0.16)
+        self._release_movement_keys_only()
         for press_key in (key, "home", "enter"):
             if not self._press_hw_key(str(press_key), variance=0.06, skip_focus_guard=True):
                 return False
