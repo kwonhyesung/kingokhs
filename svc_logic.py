@@ -494,6 +494,16 @@ class LogicSvc(threading.Thread):
                 )
                 print(signal_map_line)
                 discord_notify(signal_map_line)
+                local_state = self.state.get_all()
+                local_fp = str(local_state.get("map_info_fingerprint", "") or "")
+                local_text = str(local_state.get("map_info_text", "") or "")
+                local_line = (
+                    f"[Signal] 도사(local) map - current_map={local_state.get('current_map', '')}, "
+                    f"text={local_text[:20]!r}, fingerprint_len={len(local_fp)}, "
+                    f"map_sync_status={getattr(self.state, 'map_sync_status', '')}"
+                )
+                print(local_line)
+                discord_notify(local_line)
                 self.state.last_signal_log_time = current_time
         else:
             current_time = time.time()

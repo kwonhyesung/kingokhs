@@ -17,7 +17,7 @@ import threading
 import random
 
 from bis_core import (
-    hw, GameState, TIMING_CONFIG, humanized_sleep, GridManager,
+    hw, GameState, TIMING_CONFIG, humanized_sleep, GridManager, discord_notify,
 )
 from patrol_routes import parse_route_point
 from support_runtime_rules import (
@@ -38,6 +38,9 @@ from support_runtime_rules import (
     should_prioritize_follow_distance,
     WARRIOR_TRANSITION_JUMP_DISTANCE,
     is_plausible_transition_coord,
+    is_implausible_walk_speed,
+    fingerprint_hamming_distance,
+    MAP_FINGERPRINT_SAME_MAX_DISTANCE,
 )
 
 
@@ -249,6 +252,8 @@ class RouteSvc(threading.Thread):
         self._last_support_quick_escape_time = 0.0
         self._follow_blocked_memory_count = 0
         self._last_warrior_coord: tuple[int, int] | None = None
+        self._last_warrior_coord_ts: float = 0.0
+        self._last_warrior_fingerprint: str = ""
         self._last_warrior_dir: str | None = None
         self._last_warrior_step_dir: str | None = None
         self._last_warrior_map_sig: tuple[str, str, str, str] | None = None
@@ -802,10 +807,12 @@ class RouteSvc(threading.Thread):
             pass
         if clear_target:
             self._clear_target_for_portal_follow()
-        print(
+        portal_arm_line = (
             f"[PortalFollow] {log_prefix}: warrior_last={warrior_xy}, "
             f"portal={portal_xy}, enter_dir={dir_norm or '-'}"
         )
+        print(portal_arm_line)
+        discord_notify(portal_arm_line)
 
     def _update_portal_follow_state(self, remote_data: dict | None) -> None:
         if not isinstance(remote_data, dict):
@@ -867,12 +874,33 @@ class RouteSvc(threading.Thread):
                         if step:
                             self._last_warrior_step_dir = step
                 self._last_warrior_coord = (cur_x, cur_y)
+                self._last_warrior_coord_ts = float(remote_data.get("_received_at") or 0.0) or time.time()
                 self._last_warrior_map_sig = map_sig
                 if dps_dir:
                     self._last_warrior_dir = dps_dir
+                cur_fp = str(remote_data.get("map_info_fingerprint", "") or "")
+                if cur_fp:
+                    self._last_warrior_fingerprint = cur_fp
             return
 
-        map_changed = bool(prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+        # Same fallback as LogicSvc's _handle_warrior_transition_immediate_clear
+        # (kept in sync manually - both copies must move together):
+        # map text goes stale when OCR fails, so also trust the fingerprint,
+        # which is recomputed every cycle regardless of OCR success.
+        cur_fingerprint = str(remote_data.get("map_info_fingerprint", "") or "")
+        prev_fingerprint = self._last_warrior_fingerprint
+        fingerprint_changed = bool(
+            prev_fingerprint
+            and cur_fingerprint
+            and fingerprint_hamming_distance(prev_fingerprint, cur_fingerprint) > MAP_FINGERPRINT_SAME_MAX_DISTANCE
+        )
+        if cur_fingerprint:
+            self._last_warrior_fingerprint = cur_fingerprint
+
+        map_changed = bool(
+            (prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
+            or fingerprint_changed
+        )
         cur_ok = (
             is_plausible_map_coord(cur_x, cur_y)
             or (event_prev is not None and is_plausible_transition_coord(cur_x, cur_y))
@@ -884,6 +912,14 @@ class RouteSvc(threading.Thread):
             and cur_ok
             and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
         )
+        if coord_jumped and not map_changed and not map_info_changed and event_prev is None:
+            # No corroborating signal - only trust a bare distance jump as a real
+            # portal if the implied speed is faster than normal walking can produce.
+            cur_received_at = float(remote_data.get("_received_at") or 0.0)
+            prev_ts = float(getattr(self, "_last_warrior_coord_ts", 0.0) or 0.0)
+            elapsed = cur_received_at - prev_ts if (cur_received_at > 0.0 and prev_ts > 0.0) else 0.0
+            jump_distance = follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y)
+            coord_jumped = is_implausible_walk_speed(jump_distance, elapsed)
 
         if prev and cur_ok and (prev[0], prev[1]) != (cur_x, cur_y):
             if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1:
@@ -910,6 +946,7 @@ class RouteSvc(threading.Thread):
             if not enter_dir:
                 if cur_ok:
                     self._last_warrior_coord = (cur_x, cur_y)
+                    self._last_warrior_coord_ts = float(remote_data.get("_received_at") or 0.0) or time.time()
                     self._last_warrior_map_sig = map_sig
                 print(
                     f"[PortalFollow] transition waiting for stable step dir: "
@@ -932,6 +969,7 @@ class RouteSvc(threading.Thread):
 
         if cur_ok:
             self._last_warrior_coord = (cur_x, cur_y)
+            self._last_warrior_coord_ts = float(remote_data.get("_received_at") or 0.0) or time.time()
             self._last_warrior_map_sig = map_sig
             if dps_dir:
                 self._last_warrior_dir = dps_dir
@@ -959,7 +997,9 @@ class RouteSvc(threading.Thread):
         self._support_follow_escape_attempts = 0
         self._support_follow_tried_escape_dirs = set()
         self.state.last_move_dir = ""
-        print(f"[PortalFollow] finished: {reason}")
+        finish_line = f"[PortalFollow] finished: {reason}"
+        print(finish_line)
+        discord_notify(finish_line)
 
     def _complete_portal_follow_on_self_transition(self) -> bool:
         if not self._portal_follow_active:
