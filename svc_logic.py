@@ -46,34 +46,24 @@ from support_runtime_rules import (
     SELF_HP_EMERGENCY_THRESHOLD,
     SELF_MP_PRIORITY_THRESHOLD,
     ZERO_HP_CONFIRMATIONS_REQUIRED,
-    dir_between_coords,
     follow_manhattan_gap,
     is_support_role,
     is_confirmed_zero_hp_state,
-    is_plausible_map_coord,
     next_zero_hp_count,
-    normalize_move_dir,
-    offset_coord_by_dir,
     should_allow_party_support_cast,
     should_block_party_heal,
     should_cast_periodic_heewon,
     classify_map_sync,
-    is_implausible_walk_speed,
-    fingerprint_hamming_distance,
-    MAP_FINGERPRINT_SAME_MAX_DISTANCE,
     should_continue_self_hp_recovery,
     should_hold_follow_gap,
     should_hold_follow_position,
     should_ignore_monster_combat_for_support_autohunt,
     should_prioritize_self_mp,
     should_prioritize_self_mp_over_party_heal,
-    should_detect_warrior_transition,
     should_prioritize_follow_distance,
     should_trigger_self_hp_emergency,
     speed_up_delay,
     support_retarget_block_duration,
-    WARRIOR_TRANSITION_JUMP_DISTANCE,
-    is_plausible_transition_coord,
 )
 
 
@@ -238,17 +228,7 @@ class LogicSvc(threading.Thread):
         self._warrior_heewoncheom_interval = 25.0
         self._last_warrior_heewoncheom_time = 0.0
         self._periodic_support_min_mp = 50000
-        self._service_last_warrior_coord: tuple[int, int] | None = None
-        self._service_last_warrior_coord_ts: float = 0.0
-        self._service_last_warrior_fingerprint: str = ""
-        self._service_last_warrior_dir: str | None = None
-        self._service_last_warrior_step_dir: str | None = None
-        self._service_last_warrior_map_sig: tuple[str, str, str, str] | None = None
-        self._service_warrior_trail: list[tuple[int, int, str | None]] = []
-        self._service_last_map_info_change_seq = 0
-        self._service_last_coord_transition_seq = 0
-        self._service_portal_session_cache: dict[tuple[str, str, str, str], dict[str, object]] = {}
-        self._last_portal_immediate_clear_time = 0.0
+        self._last_seen_portal_follow_started_at = 0.0
         self._portal_support_pause_until = 0.0
         self._sulsa_hellfire_interval = 10.5
         self._sulsa_paralyze_interval = 19.0
@@ -2801,186 +2781,23 @@ class LogicSvc(threading.Thread):
             hw.send_force("U:esc")
             humanized_sleep(0.014, variance=0.03)
 
-    def _handle_warrior_transition_immediate_clear(self, support_target: dict | None) -> bool:
-        if not isinstance(support_target, dict):
+    def _handle_warrior_transition_immediate_clear(self, support_target: dict | None = None) -> bool:
+        """RouteSvc detects warrior map transitions and arms portal_follow_* on
+        self.state (it owns the movement side, so it must be the one deciding).
+        This used to run a second, independent copy of that same detection -
+        the two drifted apart on every fix (see git history). Now it just reacts
+        once per new transition, keyed off portal_follow_started_at, to reset
+        LogicSvc's own heal-targeting state."""
+        started_at = float(getattr(self.state, "portal_follow_started_at", 0.0) or 0.0)
+        if started_at <= self._last_seen_portal_follow_started_at:
             return False
-        try:
-            cur_x = int(support_target.get("x", support_target.get("pos_x", 0)) or 0)
-            cur_y = int(support_target.get("y", support_target.get("pos_y", 0)) or 0)
-        except Exception:
-            return False
-
-        prev = self._service_last_warrior_coord
-        prev_dir = normalize_move_dir(self._service_last_warrior_dir)
-        prev_step = normalize_move_dir(self._service_last_warrior_step_dir)
-        dps_dir = normalize_move_dir(support_target.get("last_move_dir", ""))
-        map_sig = (
-            str(support_target.get("map_name", "") or ""),
-            str(support_target.get("map_floor", "") or ""),
-            str(support_target.get("current_map", "") or ""),
-            str(support_target.get("current_floor", "") or ""),
-        )
-        map_info_change_seq = int(support_target.get("map_info_change_seq", 0) or 0)
-        map_info_changed = map_info_change_seq > int(self._service_last_map_info_change_seq or 0)
-        if map_info_changed:
-            self._service_last_map_info_change_seq = map_info_change_seq
-        prev_map_sig = self._service_last_warrior_map_sig
-        cur_ok = is_plausible_map_coord(cur_x, cur_y)
-        event_prev = None
-        event_dir = None
-        event_seq = 0
-        event_age = None
-        event_data = support_target.get("coord_transition")
-        if isinstance(event_data, dict):
-            try:
-                event_seq = int(event_data.get("seq", 0) or support_target.get("coord_transition_seq", 0) or 0)
-                event_ts = float(event_data.get("ts", 0.0) or 0.0)
-                if event_ts > 0.0:
-                    event_age = max(0.0, time.time() - event_ts)
-                event_from = event_data.get("from") or []
-                event_x = int(event_from[0])
-                event_y = int(event_from[1])
-                if (
-                    event_seq > int(self._service_last_coord_transition_seq or 0)
-                    and is_plausible_transition_coord(event_x, event_y)
-                    and (event_age is None or event_age <= 0.75)
-                ):
-                    event_prev = (event_x, event_y)
-                    event_dir = normalize_move_dir(event_data.get("dir") or event_data.get("input_dir"))
-                    self._service_last_coord_transition_seq = event_seq
-            except Exception:
-                event_prev = None
-                event_dir = None
-                event_age = None
-
-        # Already following a portal: keep tracking only, never overwrite target mid-run.
-        if bool(getattr(self.state, "portal_follow_active", False)):
-            if cur_ok:
-                if prev and (prev[0], prev[1]) != (cur_x, cur_y):
-                    step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
-                    if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1 and step:
-                        self._service_last_warrior_step_dir = step
-                    self._service_warrior_trail.append((prev[0], prev[1], prev_step or prev_dir))
-                    if len(self._service_warrior_trail) > 12:
-                        self._service_warrior_trail = self._service_warrior_trail[-12:]
-                self._service_last_warrior_coord = (cur_x, cur_y)
-                self._service_last_warrior_coord_ts = float(support_target.get("_received_at") or 0.0) or time.time()
-                self._service_last_warrior_map_sig = map_sig
-                if dps_dir:
-                    self._service_last_warrior_dir = dps_dir
-                cur_fp = str(support_target.get("map_info_fingerprint", "") or "")
-                if cur_fp:
-                    self._service_last_warrior_fingerprint = cur_fp
-            return False
-
-        # map_name/current_map (OCR text) go stale when text recognition fails on a
-        # given map and just keep the last successful value forever - so text-only
-        # comparison can miss a real map change on maps where OCR doesn't read.
-        # map_info_fingerprint is recomputed every cycle regardless of OCR success,
-        # so use it as a second, independent "did the map actually change" signal.
-        cur_fingerprint = str(support_target.get("map_info_fingerprint", "") or "")
-        prev_fingerprint = self._service_last_warrior_fingerprint
-        fingerprint_changed = bool(
-            prev_fingerprint
-            and cur_fingerprint
-            and fingerprint_hamming_distance(prev_fingerprint, cur_fingerprint) > MAP_FINGERPRINT_SAME_MAX_DISTANCE
-        )
-        if cur_fingerprint:
-            self._service_last_warrior_fingerprint = cur_fingerprint
-
-        map_changed = bool(
-            (prev and prev_map_sig and map_sig != prev_map_sig and any(map_sig))
-            or fingerprint_changed
-        )
-        cur_ok = (
-            is_plausible_map_coord(cur_x, cur_y)
-            or (event_prev is not None and is_plausible_transition_coord(cur_x, cur_y))
-            or (map_changed and is_plausible_transition_coord(cur_x, cur_y))
-        )
-        coord_jumped = bool(
-            prev
-            and is_plausible_map_coord(prev[0], prev[1])
-            and cur_ok
-            and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
-        )
-        if coord_jumped and not map_changed and not map_info_changed and event_prev is None:
-            # No corroborating signal (map didn't change, no explicit transition event) -
-            # a distance jump alone can also mean a telemetry gap swallowed a few normal
-            # walking ticks. Only trust it as a real portal if the implied speed is
-            # something normal walking could never produce.
-            cur_received_at = float(support_target.get("_received_at") or 0.0)
-            prev_ts = float(getattr(self, "_service_last_warrior_coord_ts", 0.0) or 0.0)
-            elapsed = cur_received_at - prev_ts if (cur_received_at > 0.0 and prev_ts > 0.0) else 0.0
-            jump_distance = follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y)
-            coord_jumped = is_implausible_walk_speed(jump_distance, elapsed)
-        transition_prev = event_prev or prev
-        transition = bool(event_prev) or (
-            bool(prev)
-            and is_plausible_map_coord(prev[0], prev[1])
-            and (coord_jumped or map_changed or map_info_changed)
-        )
-
-        if prev and cur_ok and (prev[0], prev[1]) != (cur_x, cur_y):
-            step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
-            if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1 and step:
-                self._service_last_warrior_step_dir = step
-            self._service_warrior_trail.append((prev[0], prev[1], prev_step or prev_dir))
-            if len(self._service_warrior_trail) > 12:
-                self._service_warrior_trail = self._service_warrior_trail[-12:]
-
-        if cur_ok:
-            self._service_last_warrior_coord = (cur_x, cur_y)
-            self._service_last_warrior_coord_ts = float(support_target.get("_received_at") or 0.0) or time.time()
-            self._service_last_warrior_map_sig = map_sig
-            if dps_dir:
-                self._service_last_warrior_dir = dps_dir
-        elif map_changed and prev:
-            # Map changed but new coords are junk — still allow transition using prev.
-            self._service_last_warrior_map_sig = map_sig
-
-        if not transition:
-            return False
-
-        now = time.time()
-        if (now - float(getattr(self, "_last_portal_immediate_clear_time", 0.0) or 0.0)) < 0.8:
-            return False
-        self._last_portal_immediate_clear_time = now
-        self._portal_support_pause_until = now + 3.0
-
-        # Do NOT block movement keys — only pause party heal via portal_follow_active.
-        source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
-        cached_hint = {}
-        if isinstance(getattr(self.state, "portal_session_cache", None), dict):
-            cached_hint = dict(self.state.portal_session_cache.get(source_map_sig, {}) or {})
-        cached_dir = normalize_move_dir(cached_hint.get("enter_dir"))
-        enter_dir = event_dir or prev_step or getattr(self, "_service_last_warrior_step_dir", None) or cached_dir
-        if not enter_dir:
-            if cur_ok:
-                self._service_last_warrior_coord = (cur_x, cur_y)
-                self._service_last_warrior_coord_ts = float(support_target.get("_received_at") or 0.0) or time.time()
-                self._service_last_warrior_map_sig = map_sig
-            print(
-                f"[PortalFollow] transition waiting for stable step dir: "
-                f"now=({cur_x}, {cur_y}) event_age={event_age if event_age is not None else '-'} "
-                f"map={prev_map_sig}->{map_sig}"
-            )
-            return False
-        warrior_last = (int(transition_prev[0]), int(transition_prev[1]))
-        portal_xy = offset_coord_by_dir(warrior_last[0], warrior_last[1], enter_dir)
-        self.state.portal_follow_active = True
-        self.state.portal_follow_retarget_requested = True
-        self.state.portal_follow_started_at = time.time()
-        self.state.portal_follow_finished_at = 0.0
-        self.state.portal_follow_coord = warrior_last
-        self.state.portal_follow_approach = warrior_last
-        self.state.portal_follow_dir = enter_dir
-        try:
-            self.state.red_tab_enabled = False
-        except Exception:
-            pass
+        self._last_seen_portal_follow_started_at = started_at
+        self._portal_support_pause_until = time.time() + 3.0
+        self._force_portal_esc_clear()
         self._party_direct_heal_target_prepared = False
         self._party_direct_heal_verified = False
         self._warrior_redtab_verified = False
+        return True
 
         self._force_portal_esc_clear()
         print(
