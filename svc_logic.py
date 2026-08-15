@@ -224,7 +224,7 @@ class LogicSvc(threading.Thread):
         self._support_party_heal_follow_guard_until = 0.0
         self._support_follow_hold_distance = 1
         self._support_follow_resume_distance = 2
-        self._warrior_heewon_interval = 16.0
+        self._warrior_heewon_interval = 10.0
         self._last_warrior_heewon_time = 0.0
         self._warrior_heewoncheom_interval = 25.0
         self._last_warrior_heewoncheom_time = 0.0
