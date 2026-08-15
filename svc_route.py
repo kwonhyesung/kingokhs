@@ -1119,7 +1119,7 @@ class RouteSvc(threading.Thread):
         warrior_last = self._portal_follow_approach or target
         enter_dir = normalize_move_dir(self._portal_follow_dir)
         fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0)
-        if fail_streak >= 3:
+        if fail_streak >= 2:
             flipped = opposite_move_dir(enter_dir)
             if flipped and flipped != enter_dir:
                 print(f"[PortalFollow] enter_dir={enter_dir} failed {fail_streak}x with no transition; trying opposite={flipped}")
