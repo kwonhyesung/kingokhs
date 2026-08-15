@@ -1126,9 +1126,16 @@ class RouteSvc(threading.Thread):
         candidates = portal_direction_candidates(self._portal_follow_dir)
         dir_index = min(fail_streak // 2, len(candidates) - 1)
         enter_dir = candidates[dir_index]
-        if dir_index > 0 and fail_streak % 2 == 0:
-            print(f"[PortalFollow] no map change after {fail_streak} attempts; trying enter_dir={enter_dir}")
         _, portal_xy = resolve_portal_follow_cells(warrior_last[0], warrior_last[1], enter_dir)
+        if enter_dir != normalize_move_dir(self._portal_follow_dir) or self._portal_follow_coord != portal_xy:
+            # Retarget the actual nav target too - otherwise the outer follow
+            # loop keeps walking back to the tile for the old failed
+            # direction and this candidate never gets a real attempt.
+            print(f"[PortalFollow] no map change after {fail_streak} attempts; retargeting to enter_dir={enter_dir} portal={portal_xy}")
+            self._portal_follow_dir = enter_dir
+            self._portal_follow_coord = portal_xy
+            self.state.portal_follow_dir = enter_dir
+            self.state.portal_follow_coord = portal_xy
         if not should_attempt_portal_enter(
             current_pos[0],
             current_pos[1],
