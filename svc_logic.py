@@ -565,12 +565,12 @@ class LogicSvc(threading.Thread):
             pass
 
         previous_block = float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
-        self.state.support_input_blocked_until = max(previous_block, time.time() + 0.16)
+        self.state.support_input_blocked_until = max(previous_block, time.time() + 0.13)
         self._release_movement_keys_only()
         for press_key in (key, "home", "enter"):
             if not self._press_hw_key(str(press_key), variance=0.06, skip_focus_guard=True):
                 return False
-            self._sleep_ui_gap(0.018)
+            self._sleep_ui_gap(0.012)
         if skill is not None:
             try:
                 skill.last_cast_time = now
@@ -2285,6 +2285,10 @@ class LogicSvc(threading.Thread):
             - hw.humanized_press: ?섎뱶?⑥뼱 ?낅젰
         """
         print("[Buff] 蹂대Т 踰꾪봽 ?쒖쟾 以?(8 -> 9 ?쒖감)...")
+        # home으로 자기 자신을 타겟팅하므로, 격수에게 걸려있던 red_tab을 덮어쓴다.
+        # 이동키가 눌려있으면 대상선택 박스가 캐릭터 대신 움직여 멈추므로 먼저 놓고,
+        # 끝나면 바로 격수 red_tab을 재확보해서 끊긴 시간을 최소화한다.
+        self._release_movement_keys_only()
         for key in ("8", "9"):
             hw.humanized_press(key)
             humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
@@ -2295,6 +2299,7 @@ class LogicSvc(threading.Thread):
                 humanized_sleep(TIMING_CONFIG["bomu_spell_gap"])
         self.state.last_bomu_time = time.time()
         print("[OK] 蹂대Т 踰꾪봽 ?꾨즺.")
+        self._reacquire_warrior_red_tab_after_emergency(moving_follow=True)
 
     # ----------------------------------------------------------
     # ?? 吏?ν삎 ?붾쾭???ㅼ틪 ????????????????????????????????????
