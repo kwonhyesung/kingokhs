@@ -230,6 +230,7 @@ class LogicSvc(threading.Thread):
         self._last_warrior_heewoncheom_time = 0.0
         self._periodic_support_min_mp = 50000
         self._last_seen_portal_follow_started_at = 0.0
+        self._portal_retarget_attempt_count = 0
         self._portal_support_pause_until = 0.0
         self._sulsa_hellfire_interval = 10.5
         self._sulsa_paralyze_interval = 19.0
@@ -3070,6 +3071,7 @@ class LogicSvc(threading.Thread):
 
         if portal_follow_active:
             self._invalidate_warrior_redtab_verification()
+            self._portal_retarget_attempt_count = 0
             self._log_dosa_f2_idle_reason(
                 f"portal_follow_active defer_warrior_support distance={warrior_distance}",
                 interval=0.5,
@@ -3087,6 +3089,18 @@ class LogicSvc(threading.Thread):
                 self._pace_service_loop("active")
                 return True
             self._invalidate_warrior_redtab_verification()
+            attempt_count = int(getattr(self, "_portal_retarget_attempt_count", 0) or 0)
+            if attempt_count >= 2:
+                # Cap red_tab retarget attempts after a portal move at 2 -
+                # after that, drop it and let the normal heal cycle retarget
+                # on its own instead of looping the esc->tab->tab sequence
+                # indefinitely.
+                print(f"[PortalFollow] red_tab retarget gave up after {attempt_count} attempts")
+                self.state.portal_follow_retarget_requested = False
+                self._party_direct_heal_target_prepared = False
+                self._pace_service_loop("active")
+                return True
+            self._portal_retarget_attempt_count = attempt_count + 1
             if not self._prepare_direct_tab_heal_target():
                 self._log_dosa_f2_idle_reason("portal_retarget_prepare_failed", interval=0.6)
                 self._pace_service_loop("active")
@@ -3094,13 +3108,14 @@ class LogicSvc(threading.Thread):
             red_tab_now = bool(getattr(self.state, "red_tab_enabled", False))
             print(
                 f"[PortalFollow] warrior red_tab restored after portal: "
-                f"distance={warrior_distance}, red_tab={red_tab_now}"
+                f"distance={warrior_distance}, red_tab={red_tab_now}, "
+                f"attempt={self._portal_retarget_attempt_count}"
             )
             # _prepare_direct_tab_heal_target() already waited for a lock hit
             # before returning True, but state can flicker between then and
             # here - re-verify before trusting it, and keep the retarget flag
-            # set so the next cycle retries instead of silently moving on
-            # without a real tab lock.
+            # set so the next cycle retries (up to the cap above) instead of
+            # silently moving on without a real tab lock.
             if not red_tab_now:
                 self._log_dosa_f2_idle_reason("portal_retarget_redtab_not_active_yet", interval=0.5)
                 self._pace_service_loop("active")
@@ -3108,6 +3123,7 @@ class LogicSvc(threading.Thread):
             self._last_party_hp_support_time = 0.0
             self.state.portal_follow_retarget_requested = False
             self._party_direct_heal_target_prepared = True
+            self._portal_retarget_attempt_count = 0
 
         if needs_hp:
             if follow_distance_risk and int(support_target.get("hp", 0) or 0) > 30000:
