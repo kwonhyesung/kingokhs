@@ -273,6 +273,7 @@ class RouteSvc(threading.Thread):
         self._last_portal_follow_log_time = 0.0
         self._last_self_portal_coord: tuple[int, int] | None = None
         self._portal_enter_fail_streak = 0
+        self._portal_enter_attempted = False
         self.state.portal_follow_active = False
         self.state.portal_follow_retarget_requested = False
         self.state.portal_follow_coord = None
@@ -785,6 +786,7 @@ class RouteSvc(threading.Thread):
         self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
         self._portal_follow_started_at = started
         self._portal_enter_fail_streak = 0
+        self._portal_enter_attempted = False
         self._last_self_portal_coord = (int(self.state.x), int(self.state.y))
         self._blocked_cells_until.clear()
         self._blocked_cell_hits.clear()
@@ -1049,6 +1051,7 @@ class RouteSvc(threading.Thread):
         self._portal_follow_source_map_sig = None
         self._last_self_portal_coord = None
         self._portal_enter_fail_streak = 0
+        self._portal_enter_attempted = False
         self.state.portal_follow_active = False
         self.state.portal_follow_finished_at = time.time()
         self.state.portal_follow_coord = None
@@ -1130,6 +1133,15 @@ class RouteSvc(threading.Thread):
             return False
         if current_pos != warrior_last:
             return False
+        if getattr(self, "_portal_enter_attempted", False):
+            # Already tapped this key twice for this arm - don't keep
+            # re-tapping every cycle. That just walks the dosa off the tile
+            # and back (looks like aimless left-right jitter) and keeps
+            # heal/red_tab blocked the whole time for no new information.
+            # Wait for a fresh transition (re-arms with new data) or the
+            # overall timeout instead.
+            return True
+        self._portal_enter_attempted = True
 
         print(
             f"[PortalFollow] enter zone: current={current_pos}, warrior_last={warrior_last}, "
