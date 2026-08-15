@@ -1124,7 +1124,7 @@ class RouteSvc(threading.Thread):
         warrior_last = self._portal_follow_approach or target
         fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0)
         candidates = portal_direction_candidates(self._portal_follow_dir)
-        dir_index = min(fail_streak // 2, len(candidates) - 1)
+        dir_index = min(fail_streak, len(candidates) - 1)
         enter_dir = candidates[dir_index]
         _, portal_xy = resolve_portal_follow_cells(warrior_last[0], warrior_last[1], enter_dir)
         if enter_dir != normalize_move_dir(self._portal_follow_dir) or self._portal_follow_coord != portal_xy:
