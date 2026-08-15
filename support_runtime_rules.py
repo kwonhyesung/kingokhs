@@ -364,10 +364,10 @@ def build_f5_hon_sequence(repeat_count: int = 5) -> tuple[str, ...]:
     return tuple(sequence)
 
 
-def should_hold_follow_position(target_x: int, target_y: int, current_x: int, current_y: int) -> bool:
+def should_hold_follow_position(target_x: int, target_y: int, current_x: int, current_y: int, max_gap: int = 1) -> bool:
     return (
-        abs(int(target_x) - int(current_x)) <= 1
-        and abs(int(target_y) - int(current_y)) <= 1
+        abs(int(target_x) - int(current_x)) <= max_gap
+        and abs(int(target_y) - int(current_y)) <= max_gap
     )
 
 

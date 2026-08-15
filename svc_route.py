@@ -1788,7 +1788,7 @@ class RouteSvc(threading.Thread):
                     gap_y = abs(ty - cy)
                     follow_gap = follow_manhattan_gap(tx, ty, cx, cy)
                     hold_follow_gap = 0 if bool(getattr(self, "_portal_follow_active", False)) else int(getattr(self, "_support_follow_hold_distance", 1) or 1)
-                    if should_hold_follow_position(tx, ty, cx, cy):
+                    if should_hold_follow_position(tx, ty, cx, cy, max_gap=hold_follow_gap):
                         # [FIX] Follow range ?덉뿉???湲???Stuck ??대㉧ 由ъ뀑 (?대룞 ???대룄 Stuck???꾨떂)
                         self._nav_attempt_pos = None
                         self._nav_attempt_started_at = 0.0

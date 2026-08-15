@@ -205,6 +205,13 @@ def test_follow_hold_position_allows_one_tile_axis_error():
     assert should_hold_follow_position(10, 10, 11, 11) is True
 
 
+def test_follow_hold_position_max_gap_zero_forces_exact_tile():
+    # Portal-follow passes max_gap=0 so movement doesn't stop 1 tile short
+    # of the exact entry tile should_attempt_portal_enter requires.
+    assert should_hold_follow_position(10, 10, 11, 10, max_gap=0) is False
+    assert should_hold_follow_position(10, 10, 10, 10, max_gap=0) is True
+
+
 def test_support_follow_hold_gap_uses_one_tile_spacing():
     assert should_hold_follow_gap(1, hold_distance=1) is True
     assert should_hold_follow_gap(2, hold_distance=1) is False
