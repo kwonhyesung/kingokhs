@@ -931,6 +931,27 @@ class RouteSvc(threading.Thread):
                         )
                         return
             if cur_ok:
+                if (
+                    getattr(self, "_portal_enter_attempted", False)
+                    and self._portal_follow_coord
+                    and follow_manhattan_gap(
+                        cur_x, cur_y, self._portal_follow_coord[0], self._portal_follow_coord[1]
+                    ) > 6
+                ):
+                    # Our one entry attempt already failed and the warrior is
+                    # just walking further away (ordinary speed, not a jump -
+                    # that's handled above) - they're not using this door.
+                    # Waiting out the full timeout only keeps heal/red_tab
+                    # blocked with nothing left to try.
+                    gap = follow_manhattan_gap(
+                        cur_x, cur_y, self._portal_follow_coord[0], self._portal_follow_coord[1]
+                    )
+                    print(
+                        f"[PortalFollow] warrior walked {gap} tiles from the door after our "
+                        f"entry attempt failed; abandoning, resuming normal follow"
+                    )
+                    self._finish_portal_follow(f"warrior_left_door_gap_{gap}")
+                    return
                 if prev and (prev[0], prev[1]) != (cur_x, cur_y):
                     if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1:
                         step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
