@@ -26,6 +26,7 @@ from support_runtime_rules import (
     follow_manhattan_gap,
     is_plausible_map_coord,
     normalize_move_dir,
+    opposite_move_dir,
     resolve_portal_follow_cells,
     should_allow_follow_navigation,
     should_attempt_portal_enter,
@@ -1117,6 +1118,12 @@ class RouteSvc(threading.Thread):
         current_pos = (int(self.state.x), int(self.state.y))
         warrior_last = self._portal_follow_approach or target
         enter_dir = normalize_move_dir(self._portal_follow_dir)
+        fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0)
+        if fail_streak >= 3:
+            flipped = opposite_move_dir(enter_dir)
+            if flipped and flipped != enter_dir:
+                print(f"[PortalFollow] enter_dir={enter_dir} failed {fail_streak}x with no transition; trying opposite={flipped}")
+                enter_dir = flipped
         _, portal_xy = resolve_portal_follow_cells(warrior_last[0], warrior_last[1], enter_dir)
         if not should_attempt_portal_enter(
             current_pos[0],
