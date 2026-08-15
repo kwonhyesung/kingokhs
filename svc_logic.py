@@ -910,7 +910,7 @@ class LogicSvc(threading.Thread):
                         self._party_heal_blocked_until = time.time() + 0.15
                     print("[Recovery] post-MP self HP recovery re-synced. Follow remains active.")
                     return True
-            if self.state.role != "도사" or not bool(getattr(self.state, "service_active", False)):
+            if self.state.role not in ("도사", "도사1", "도사2") or not bool(getattr(self.state, "service_active", False)):
                 return True
             if support_target is None:
                 support_target = self._get_support_target_data()
