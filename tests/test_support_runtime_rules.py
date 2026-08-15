@@ -15,15 +15,11 @@ from support_runtime_rules import (
     is_confirmed_zero_hp_state,
     next_zero_hp_count,
     normalize_move_dir,
-    offset_coord_by_dir,
     pick_portal_enter_dir,
     portal_cache_key,
-    portal_direction_candidates,
     is_plausible_transition_coord,
-    resolve_portal_follow_cells,
     should_allow_party_support_cast,
     should_allow_follow_navigation,
-    should_attempt_portal_enter,
     should_block_party_heal,
     should_cast_periodic_heewon,
     should_clear_target_box_after_support_stuck,
@@ -207,12 +203,6 @@ def test_follow_hold_position_allows_one_tile_axis_error():
     assert should_hold_follow_position(10, 10, 11, 11) is True
 
 
-def test_portal_direction_candidates_covers_all_4_starting_with_guess_then_opposite():
-    assert portal_direction_candidates("up") == ["up", "down", "left", "right"]
-    assert portal_direction_candidates("left") == ["left", "right", "up", "down"]
-    assert set(portal_direction_candidates(None)) == {"up", "down", "left", "right"}
-
-
 def test_portal_cache_key_discriminates_nearby_but_different_portals():
     map_sig = ("map", "1", "floor")
     assert portal_cache_key(map_sig, 30, 48) == portal_cache_key(map_sig, 31, 49)
@@ -221,7 +211,7 @@ def test_portal_cache_key_discriminates_nearby_but_different_portals():
 
 def test_follow_hold_position_max_gap_zero_forces_exact_tile():
     # Portal-follow passes max_gap=0 so movement doesn't stop 1 tile short
-    # of the exact entry tile should_attempt_portal_enter requires.
+    # of the warrior's exact last tile.
     assert should_hold_follow_position(10, 10, 11, 10, max_gap=0) is False
     assert should_hold_follow_position(10, 10, 10, 10, max_gap=0) is True
 
@@ -287,11 +277,7 @@ def test_warrior_transition_detects_small_portal_jumps():
 
 
 def test_portal_follow_uses_exact_warrior_last_tile():
-    # Warrior last seen at 17.11 — target is exact 17.11 (not invented 18.11)
-    approach, portal = resolve_portal_follow_cells(17, 11, "right")
-    assert approach == (17, 11)
-    assert portal == (18, 11)
-    assert offset_coord_by_dir(17, 11, "right") == (18, 11)
+    # Nav target is the warrior's own last tile - no invented offset tile.
     assert dir_between_coords(17, 11, 18, 11) == "right"
     assert normalize_move_dir("RIGHT") == "right"
     assert infer_dir_from_trail([(16, 11, None), (17, 11, "right")]) == "right"
@@ -377,14 +363,6 @@ def test_game_state_emits_portal_edge_transition_at_zero_coord():
     assert payload["coord_transition"]["to"] == [0, 4]
     assert payload["coord_transition"]["dir"] == "left"
     assert payload["coord_transition"]["input_dir"] is None
-
-
-def test_portal_enter_zone_is_exact_warrior_last_tile_only():
-    assert should_attempt_portal_enter(31, 1, 31, 1, enter_dir="up") is True
-    assert should_attempt_portal_enter(31, 0, 31, 1, enter_dir="up") is True
-    assert should_attempt_portal_enter(27, 3, 31, 1, enter_dir="up") is False
-    assert should_attempt_portal_enter(32, 1, 31, 1, enter_dir="right") is True
-    assert should_attempt_portal_enter(31, 1, 31, 1, None, 31, 1) is True
 
 
 def test_follow_target_stays_anchored_to_intended_target():

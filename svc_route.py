@@ -27,10 +27,7 @@ from support_runtime_rules import (
     is_plausible_map_coord,
     normalize_move_dir,
     portal_cache_key,
-    portal_direction_candidates,
-    resolve_portal_follow_cells,
     should_allow_follow_navigation,
-    should_attempt_portal_enter,
     should_clear_target_box_after_support_stuck,
     should_defer_stuck_escape_for_support,
     should_hold_follow_gap,
@@ -270,7 +267,6 @@ class RouteSvc(threading.Thread):
         self._portal_follow_coord: tuple[int, int] | None = None
         self._portal_follow_approach: tuple[int, int] | None = None
         self._portal_follow_dir: str | None = None
-        self._portal_follow_primary_dir: str | None = None
         self._portal_follow_source_map_sig: tuple[str, str, str, str] | None = None
         self._portal_follow_started_at = 0.0
         self._portal_follow_timeout = 25.0
@@ -779,13 +775,13 @@ class RouteSvc(threading.Thread):
     ) -> None:
         warrior_xy = (int(warrior_last[0]), int(warrior_last[1]))
         dir_norm = normalize_move_dir(enter_dir)
-        warrior_xy, portal_xy = resolve_portal_follow_cells(warrior_xy[0], warrior_xy[1], dir_norm)
         started = float(started_at if started_at is not None else time.time())
         self._portal_follow_active = True
+        # Nav target is the warrior's own last tile, not an offset guess one
+        # tile past it - walk there, then tap the same key they used.
         self._portal_follow_approach = warrior_xy
-        self._portal_follow_coord = portal_xy
+        self._portal_follow_coord = warrior_xy
         self._portal_follow_dir = dir_norm
-        self._portal_follow_primary_dir = dir_norm
         self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
         self._portal_follow_started_at = started
         self._portal_enter_fail_streak = 0
@@ -802,7 +798,7 @@ class RouteSvc(threading.Thread):
         self.state.portal_follow_retarget_requested = True
         self.state.portal_follow_started_at = started
         self.state.portal_follow_finished_at = 0.0
-        self.state.portal_follow_coord = portal_xy
+        self.state.portal_follow_coord = warrior_xy
         self.state.portal_follow_approach = warrior_xy
         self.state.portal_follow_dir = dir_norm
         try:
@@ -813,7 +809,7 @@ class RouteSvc(threading.Thread):
             self._clear_target_for_portal_follow()
         portal_arm_line = (
             f"[PortalFollow] {log_prefix}: warrior_last={warrior_xy}, "
-            f"portal={portal_xy}, enter_dir={dir_norm or '-'}"
+            f"enter_dir={dir_norm or '-'}"
         )
         print(portal_arm_line)
         discord_notify(portal_arm_line)
@@ -1050,7 +1046,6 @@ class RouteSvc(threading.Thread):
         self._portal_follow_coord = None
         self._portal_follow_approach = None
         self._portal_follow_dir = None
-        self._portal_follow_primary_dir = None
         self._portal_follow_source_map_sig = None
         self._last_self_portal_coord = None
         self._portal_enter_fail_streak = 0
@@ -1120,93 +1115,46 @@ class RouteSvc(threading.Thread):
         return self._portal_follow_coord
 
     def _complete_portal_follow_if_arrived(self) -> bool:
+        """Walk to the warrior's own pre-jump tile, then tap the single
+        direction key they used - not a different tile per guessed
+        direction. Retries the same key once more on failure; nothing
+        smarter than that, since a portal's entrance is normally one fixed
+        direction and guessing sideways just makes the dosa wander."""
         target = self._get_portal_follow_target()
         if not target:
             return False
         current_pos = (int(self.state.x), int(self.state.y))
         warrior_last = self._portal_follow_approach or target
-        fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0)
-        candidates = portal_direction_candidates(self._portal_follow_primary_dir)
-        dir_index = min(fail_streak, len(candidates) - 1)
-        enter_dir = candidates[dir_index]
-        _, portal_xy = resolve_portal_follow_cells(warrior_last[0], warrior_last[1], enter_dir)
-        if enter_dir != normalize_move_dir(self._portal_follow_dir) or self._portal_follow_coord != portal_xy:
-            # Retarget the actual nav target too - otherwise the outer follow
-            # loop keeps walking back to the tile for the old failed
-            # direction and this candidate never gets a real attempt.
-            print(f"[PortalFollow] no map change after {fail_streak} attempts; retargeting to enter_dir={enter_dir} portal={portal_xy}")
-            self._portal_follow_dir = enter_dir
-            self._portal_follow_coord = portal_xy
-            self.state.portal_follow_dir = enter_dir
-            self.state.portal_follow_coord = portal_xy
-        if not should_attempt_portal_enter(
-            current_pos[0],
-            current_pos[1],
-            warrior_last[0],
-            warrior_last[1],
-            enter_dir=enter_dir,
-            portal_x=portal_xy[0],
-            portal_y=portal_xy[1],
-        ):
+        enter_dir = normalize_move_dir(self._portal_follow_dir)
+        if not enter_dir:
+            return False
+        if current_pos != warrior_last:
             return False
 
-        before_pos = current_pos
         print(
             f"[PortalFollow] enter zone: current={current_pos}, warrior_last={warrior_last}, "
-            f"enter_dir={enter_dir or '-'}"
+            f"enter_dir={enter_dir}"
         )
-        if not enter_dir:
-            print("[PortalFollow] enter_dir missing; waiting on warrior last tile")
-            return True
-
-        # Force-hold the entry key on the exact warrior last tile (ignore support input block).
         try:
             self.state.support_input_blocked_until = 0.0
         except Exception:
             pass
-        # Own map identity right before holding the entry key. A raw coordinate
-        # jump is NOT a reliable "did we warp" signal here: holding a direction
-        # for 1+ seconds covers 4+ tiles of ordinary walking too, which falsely
-        # looked like a transition and ended portal-follow while still on the
-        # same map. Compare actual map identity instead.
+        # Own map identity right before tapping the entry key. A raw
+        # coordinate jump is NOT a reliable "did we warp" signal here -
+        # compare actual map identity instead (same fingerprint tolerance
+        # classify_map_sync already uses elsewhere).
         before_own_map_sig = (
             str(getattr(self.state, "map_name", "") or ""),
             str(getattr(self.state, "map_floor", "") or ""),
             str(getattr(self.state, "current_map", "") or ""),
         )
         before_own_fp = str(getattr(self.state, "map_info_fingerprint", "") or "")
-        hold_sec = max(1.0, float(TIMING_CONFIG.get("entry_hold", 1.0) or 1.0))
-        warped = False
-        for attempt in range(3):
-            if current_pos != warrior_last and current_pos != portal_xy:
-                approach_dir = dir_between_coords(current_pos[0], current_pos[1], warrior_last[0], warrior_last[1])
-                if approach_dir:
-                    print(
-                        f"[PortalFollow] re-approach warrior_last={warrior_last} "
-                        f"from {current_pos} via {approach_dir}"
-                    )
-                    hw.hold_move(approach_dir, "move_hold", duration=0.18, force=True)
-                    humanized_sleep(0.08, variance=0.02)
-                    current_pos = (
-                        int(getattr(self.state, "x", 0) or 0),
-                        int(getattr(self.state, "y", 0) or 0),
-                    )
-                    if current_pos != warrior_last:
-                        break
 
-            before_pos = current_pos
-            hw.hold_move(
-                enter_dir,
-                "entry_hold",
-                duration=random.uniform(hold_sec, hold_sec + 0.35),
-                force=True,
-            )
+        entered = False
+        for attempt in range(2):
+            hw.force_press(enter_dir)
             self.state.last_move_dir = enter_dir
-            humanized_sleep(0.12, variance=0.04)
-            after_pos = (
-                int(getattr(self.state, "x", 0) or 0),
-                int(getattr(self.state, "y", 0) or 0),
-            )
+            humanized_sleep(0.35, variance=0.15)
             after_own_map_sig = (
                 str(getattr(self.state, "map_name", "") or ""),
                 str(getattr(self.state, "map_floor", "") or ""),
@@ -1220,7 +1168,7 @@ class RouteSvc(threading.Thread):
                 and fingerprint_hamming_distance(before_own_fp, after_own_fp) > MAP_FINGERPRINT_SAME_MAX_DISTANCE
             )
             if map_sig_changed or fp_changed:
-                warped = True
+                entered = True
                 cache_key = portal_cache_key(
                     self._portal_follow_source_map_sig or before_own_map_sig,
                     warrior_last[0],
@@ -1231,30 +1179,24 @@ class RouteSvc(threading.Thread):
                     cache[cache_key] = {
                         "enter_dir": enter_dir,
                         "approach": [int(warrior_last[0]), int(warrior_last[1])],
-                        "portal": [int(portal_xy[0]), int(portal_xy[1])],
                         "confirmed_at": time.time(),
                         "source": "runtime_success",
                     }
                 self._finish_portal_follow(
                     f"entered map_changed={map_sig_changed} fp_changed={fp_changed} "
-                    f"before={before_pos}, after={after_pos}, attempt={attempt + 1}"
+                    f"enter_dir={enter_dir} tap={attempt + 1}"
                 )
                 break
-            current_pos = after_pos
-            if current_pos != warrior_last:
-                print(
-                    f"[PortalFollow] left warrior_last tile while holding {enter_dir}: "
-                    f"{before_pos} -> {current_pos}"
-                )
+            print(f"[PortalFollow] tap {attempt + 1}/2 enter_dir={enter_dir}: no map change yet")
 
-        if warped:
+        if entered:
             return True
 
         self._portal_enter_fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0) + 1
-        self._last_self_portal_coord = current_pos
         print(
             f"[PortalFollow] portal enter pending: current={current_pos}, "
-            f"warrior_last={warrior_last}, fail_streak={self._portal_enter_fail_streak}"
+            f"warrior_last={warrior_last}, enter_dir={enter_dir}, "
+            f"fail_streak={self._portal_enter_fail_streak}"
         )
         # Stay in portal mode so we keep retrying instead of normal follow.
         return True

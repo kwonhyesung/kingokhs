@@ -193,13 +193,6 @@ PORTAL_DIR_DELTA = {
 }
 
 
-def offset_coord_by_dir(x: int, y: int, direction: str | None) -> tuple[int, int]:
-    delta = PORTAL_DIR_DELTA.get(str(direction or "").strip().lower())
-    if not delta:
-        return int(x), int(y)
-    return int(x) + int(delta[0]), int(y) + int(delta[1])
-
-
 def dir_between_coords(from_x: int, from_y: int, to_x: int, to_y: int) -> str | None:
     dx = int(to_x) - int(from_x)
     dy = int(to_y) - int(from_y)
@@ -213,35 +206,6 @@ def dir_between_coords(from_x: int, from_y: int, to_x: int, to_y: int) -> str | 
 def normalize_move_dir(direction: str | None) -> str | None:
     d = str(direction or "").strip().lower()
     return d if d in PORTAL_DIR_DELTA else None
-
-
-def opposite_move_dir(direction: str | None) -> str | None:
-    return {
-        "up": "down",
-        "down": "up",
-        "left": "right",
-        "right": "left",
-    }.get(normalize_move_dir(direction) or "", None)
-
-
-ALL_MOVE_DIRS = ("up", "down", "left", "right")
-
-
-def portal_direction_candidates(primary: str | None) -> list[str]:
-    """All 4 directions, ordered: primary guess, its opposite, then the two
-    perpendiculars - so a wrong guess still finds the real entrance instead
-    of retrying the same failing direction forever."""
-    primary = normalize_move_dir(primary)
-    ordered: list[str] = []
-    if primary:
-        ordered.append(primary)
-        opp = opposite_move_dir(primary)
-        if opp:
-            ordered.append(opp)
-    for d in ALL_MOVE_DIRS:
-        if d not in ordered:
-            ordered.append(d)
-    return ordered
 
 
 def portal_cache_key(map_sig: tuple, x: int, y: int, bucket: int = 8) -> tuple:
@@ -279,45 +243,6 @@ def is_plausible_transition_coord(x: int, y: int) -> bool:
     if xi == 0 and yi == 0:
         return False
     return True
-
-
-def resolve_portal_follow_cells(
-    warrior_x: int,
-    warrior_y: int,
-    enter_dir: str | None,
-) -> tuple[tuple[int, int], tuple[int, int]]:
-    """
-    Return (approach tile, portal tile).
-    Approach is the warrior's last visible tile.
-    Portal is the adjacent tile in the entry direction.
-    """
-    approach = (int(warrior_x), int(warrior_y))
-    portal = offset_coord_by_dir(approach[0], approach[1], enter_dir)
-    return approach, portal
-
-
-def should_attempt_portal_enter(
-    current_x: int,
-    current_y: int,
-    warrior_x: int,
-    warrior_y: int,
-    enter_dir: str | None = None,
-    portal_x: int | None = None,
-    portal_y: int | None = None,
-) -> bool:
-    """Enter while standing on the warrior's last visible tile or its portal tile."""
-    current = (int(current_x), int(current_y))
-    warrior = (int(warrior_x), int(warrior_y))
-    portal = None
-    if portal_x is not None and portal_y is not None:
-        portal = (int(portal_x), int(portal_y))
-    elif enter_dir:
-        portal = offset_coord_by_dir(warrior[0], warrior[1], enter_dir)
-    if current == warrior:
-        return True
-    if portal is not None and current == portal:
-        return True
-    return False
 
 
 def infer_dir_from_trail(trail: list) -> str | None:
