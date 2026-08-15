@@ -151,6 +151,7 @@ class LogicSvc(threading.Thread):
         self._service_loop_no_target_sleep = 0.0100
         self._self_status_scan_window_sec = 1.30
         self._last_self_redtab_clear_time = 0.0
+        self._redtab_reacquire_pending = False
         self._redtab_clear_cooldown_sec = 1.0
         self._last_party_hp_support_time = 0.0
         self._last_party_hp_value = 0
@@ -1625,10 +1626,19 @@ class LogicSvc(threading.Thread):
             return False
         self._invalidate_warrior_redtab_verification()
         self._last_self_redtab_clear_time = now
+        # ESC로 격수 red_tab을 끊었으니, 이 자가시전이 끝나면 반드시 다시 잡아야 한다
+        # - 호출자(geumgang/bomu 자버프 사이클)가 완료 시점에 소비한다.
+        self._redtab_reacquire_pending = True
         self._sleep_self_buff_gap()
         if bool(getattr(self.state, "red_tab_enabled", False)):
             print("[Buff] red_tab detector still ON after ESC. Continue self buff cast anyway.")
         return True
+
+    def _reacquire_red_tab_if_pending(self) -> None:
+        if not bool(getattr(self, "_redtab_reacquire_pending", False)):
+            return
+        self._redtab_reacquire_pending = False
+        self._reacquire_warrior_red_tab_after_emergency(moving_follow=True)
 
     def _execute_self_geumgang_cycle(self, skip_refresh: bool = False, force_cast: bool = False) -> bool:
         current_time = time.time()
@@ -1655,29 +1665,32 @@ class LogicSvc(threading.Thread):
         if not self._clear_red_tab_for_self_cast():
             return False
 
-        attempt_count = random.randint(2, 3)
-        print(f"[Buff] self gg missing. Cast 0 x{attempt_count}.")
-        for attempt in range(attempt_count):
-            if self._should_abort_self_support_buff():
-                return attempt > 0
-            self._press_hw_key("0", variance=0.10)
-            self.state.last_self_gg_cast_time = time.time()
-            if attempt < attempt_count - 1:
-                self._sleep_self_buff_gap()
+        try:
+            attempt_count = random.randint(2, 3)
+            print(f"[Buff] self gg missing. Cast 0 x{attempt_count}.")
+            for attempt in range(attempt_count):
+                if self._should_abort_self_support_buff():
+                    return attempt > 0
+                self._press_hw_key("0", variance=0.10)
+                self.state.last_self_gg_cast_time = time.time()
+                if attempt < attempt_count - 1:
+                    self._sleep_self_buff_gap()
 
-        cast_refresh_start = time.time()
-        self._wait_for_self_cooltime_scan(cast_refresh_start, timeout=self._self_gg_verify_timeout)
-        deadline = time.time() + self._self_gg_verify_timeout
-        while time.time() < deadline:
-            if bool(getattr(self.state, "self_gg_detected", False)):
-                print("[Buff] self gg detected after cast burst.")
-                self._self_gg_retry_cooldown_until = 0.0
-                return True
-            time.sleep(0.03)
+            cast_refresh_start = time.time()
+            self._wait_for_self_cooltime_scan(cast_refresh_start, timeout=self._self_gg_verify_timeout)
+            deadline = time.time() + self._self_gg_verify_timeout
+            while time.time() < deadline:
+                if bool(getattr(self.state, "self_gg_detected", False)):
+                    print("[Buff] self gg detected after cast burst.")
+                    self._self_gg_retry_cooldown_until = 0.0
+                    return True
+                time.sleep(0.03)
 
-        print("[Buff] self gg still missing after cast burst.")
-        self._self_gg_retry_cooldown_until = time.time() + self._self_gg_retry_cooldown_sec
-        return True
+            print("[Buff] self gg still missing after cast burst.")
+            self._self_gg_retry_cooldown_until = time.time() + self._self_gg_retry_cooldown_sec
+            return True
+        finally:
+            self._reacquire_red_tab_if_pending()
 
     def _execute_self_bomu_cycle(self, skip_refresh: bool = False, force_cast: bool = False) -> bool:
         current_time = time.time()
@@ -1708,21 +1721,24 @@ class LogicSvc(threading.Thread):
         if not self._clear_red_tab_for_self_cast():
             return False
 
-        print("[Buff] self bm missing. Cast 8 -> HOME -> ENTER, 9 -> HOME -> ENTER")
-
-        for key in ("8", "9"):
-            if self._should_abort_self_support_buff():
-                return key != "8"
-            self._press_hw_key(key, variance=0.10)
-            self._sleep_self_buff_gap()
-            self._press_hw_key("home", variance=0.10)
-            self._sleep_self_buff_gap()
-            self._press_hw_key("enter", variance=0.10)
-            if key == "8":
+        try:
+            print("[Buff] self bm missing. Cast 8 -> HOME -> ENTER, 9 -> HOME -> ENTER")
+            self._release_movement_keys_only()
+            for key in ("8", "9"):
+                if self._should_abort_self_support_buff():
+                    return key != "8"
+                self._press_hw_key(key, variance=0.10)
                 self._sleep_self_buff_gap()
-        self.state.last_self_buff_time = current_time
-        self._self_bm_retry_cooldown_until = time.time() + 8.0
-        return True
+                self._press_hw_key("home", variance=0.10)
+                self._sleep_self_buff_gap()
+                self._press_hw_key("enter", variance=0.10)
+                if key == "8":
+                    self._sleep_self_buff_gap()
+            self.state.last_self_buff_time = current_time
+            self._self_bm_retry_cooldown_until = time.time() + 8.0
+            return True
+        finally:
+            self._reacquire_red_tab_if_pending()
 
     def _execute_self_support_buffs_cycle(self) -> bool:
         current_time = time.time()
@@ -1744,57 +1760,61 @@ class LogicSvc(threading.Thread):
         if not self._clear_red_tab_for_self_cast():
             return False
 
-        acted = False
-        gg_ready_for_cycle = bool(getattr(self.state, "self_gg_detected", False))
-        if current_time < float(getattr(self, "_self_gg_retry_cooldown_until", 0.0) or 0.0):
-            gg_ready_for_cycle = True
-        if not gg_ready_for_cycle:
-            attempt_count = random.randint(2, 3)
-            print(f"[Buff] self gg missing. Cast 0 x{attempt_count}.")
-            for attempt in range(attempt_count):
-                if self._should_abort_self_support_buff():
-                    return acted
-                self._press_hw_key("0", variance=0.10, skip_focus_guard=True)
-                self.state.last_self_gg_cast_time = time.time()
-                if attempt < attempt_count - 1:
-                    self._sleep_geumgang_gap_fast()
-            acted = True
-
-            cast_refresh_start = time.time()
-            self._wait_for_self_cooltime_scan(cast_refresh_start, timeout=0.15)
-            deadline = time.time() + 0.15
-            while time.time() < deadline:
-                if bool(getattr(self.state, "self_gg_detected", False)):
-                    print("[Buff] self gg detected after cast burst.")
-                    self._self_gg_retry_cooldown_until = 0.0
-                    gg_ready_for_cycle = True
-                    break
-                time.sleep(0.015)
-
+        try:
+            self._release_movement_keys_only()
+            acted = False
+            gg_ready_for_cycle = bool(getattr(self.state, "self_gg_detected", False))
+            if current_time < float(getattr(self, "_self_gg_retry_cooldown_until", 0.0) or 0.0):
+                gg_ready_for_cycle = True
             if not gg_ready_for_cycle:
-                print("[Buff] self gg still missing after cast burst. Retry deferred.")
-                self._self_gg_retry_cooldown_until = time.time() + self._self_gg_retry_cooldown_sec
-                return acted
+                attempt_count = random.randint(2, 3)
+                print(f"[Buff] self gg missing. Cast 0 x{attempt_count}.")
+                for attempt in range(attempt_count):
+                    if self._should_abort_self_support_buff():
+                        return acted
+                    self._press_hw_key("0", variance=0.10, skip_focus_guard=True)
+                    self.state.last_self_gg_cast_time = time.time()
+                    if attempt < attempt_count - 1:
+                        self._sleep_geumgang_gap_fast()
+                acted = True
 
-        last_buff_time = float(getattr(self.state, "last_self_buff_time", 0.0) or 0.0)
-        bm_retry_locked = current_time < float(getattr(self, "_self_bm_retry_cooldown_until", 0.0) or 0.0)
-        if gg_ready_for_cycle and not bm_retry_locked and not bool(getattr(self.state, "self_bm_detected", False)) and (time.time() - last_buff_time) >= 3.0:
-            print("[Buff] self bm missing. Cast 8 -> HOME -> ENTER, 9 -> HOME -> ENTER")
-            for key in ("8", "9"):
-                if self._should_abort_self_support_buff():
+                cast_refresh_start = time.time()
+                self._wait_for_self_cooltime_scan(cast_refresh_start, timeout=0.15)
+                deadline = time.time() + 0.15
+                while time.time() < deadline:
+                    if bool(getattr(self.state, "self_gg_detected", False)):
+                        print("[Buff] self gg detected after cast burst.")
+                        self._self_gg_retry_cooldown_until = 0.0
+                        gg_ready_for_cycle = True
+                        break
+                    time.sleep(0.015)
+
+                if not gg_ready_for_cycle:
+                    print("[Buff] self gg still missing after cast burst. Retry deferred.")
+                    self._self_gg_retry_cooldown_until = time.time() + self._self_gg_retry_cooldown_sec
                     return acted
-                self._press_hw_key(key, variance=0.10, skip_focus_guard=True)
-                self._sleep_self_buff_gap_fast()
-                self._press_hw_key("home", variance=0.10, skip_focus_guard=True)
-                self._sleep_self_buff_gap_fast()
-                self._press_hw_key("enter", variance=0.10, skip_focus_guard=True)
-                if key == "8":
-                    self._sleep_self_buff_gap_fast()
-            self.state.last_self_buff_time = time.time()
-            self._self_bm_retry_cooldown_until = time.time() + 8.0
-            acted = True
 
-        return acted
+            last_buff_time = float(getattr(self.state, "last_self_buff_time", 0.0) or 0.0)
+            bm_retry_locked = current_time < float(getattr(self, "_self_bm_retry_cooldown_until", 0.0) or 0.0)
+            if gg_ready_for_cycle and not bm_retry_locked and not bool(getattr(self.state, "self_bm_detected", False)) and (time.time() - last_buff_time) >= 3.0:
+                print("[Buff] self bm missing. Cast 8 -> HOME -> ENTER, 9 -> HOME -> ENTER")
+                for key in ("8", "9"):
+                    if self._should_abort_self_support_buff():
+                        return acted
+                    self._press_hw_key(key, variance=0.10, skip_focus_guard=True)
+                    self._sleep_self_buff_gap_fast()
+                    self._press_hw_key("home", variance=0.10, skip_focus_guard=True)
+                    self._sleep_self_buff_gap_fast()
+                    self._press_hw_key("enter", variance=0.10, skip_focus_guard=True)
+                    if key == "8":
+                        self._sleep_self_buff_gap_fast()
+                self.state.last_self_buff_time = time.time()
+                self._self_bm_retry_cooldown_until = time.time() + 8.0
+                acted = True
+
+            return acted
+        finally:
+            self._reacquire_red_tab_if_pending()
 
     def _execute_warrior_bomu_cycle(self, snapshot: dict | None) -> bool:
         if not snapshot:
