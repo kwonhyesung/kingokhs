@@ -26,7 +26,8 @@ from support_runtime_rules import (
     follow_manhattan_gap,
     is_plausible_map_coord,
     normalize_move_dir,
-    opposite_move_dir,
+    portal_cache_key,
+    portal_direction_candidates,
     resolve_portal_follow_cells,
     should_allow_follow_navigation,
     should_attempt_portal_enter,
@@ -1001,10 +1002,14 @@ class RouteSvc(threading.Thread):
         ):
             source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
             cached_hint = {}
-            if isinstance(getattr(self.state, "portal_session_cache", None), dict):
-                cached_hint = dict(self.state.portal_session_cache.get(source_map_sig, {}) or {})
+            if isinstance(getattr(self.state, "portal_session_cache", None), dict) and transition_prev:
+                cache_key = portal_cache_key(source_map_sig, transition_prev[0], transition_prev[1])
+                cached_hint = dict(self.state.portal_session_cache.get(cache_key, {}) or {})
             cached_dir = normalize_move_dir(cached_hint.get("enter_dir"))
-            enter_dir = event_dir or prev_step or self._last_warrior_step_dir or cached_dir
+            # A direction confirmed at this exact portal beats a guess from
+            # noisy/stale telemetry (warrior's self-reported last_move_dir can
+            # lag the actual key held at the moment of transition).
+            enter_dir = cached_dir or event_dir or prev_step or self._last_warrior_step_dir
             if not enter_dir:
                 if cur_ok:
                     self._last_warrior_coord = (cur_x, cur_y)
@@ -1117,13 +1122,12 @@ class RouteSvc(threading.Thread):
             return False
         current_pos = (int(self.state.x), int(self.state.y))
         warrior_last = self._portal_follow_approach or target
-        enter_dir = normalize_move_dir(self._portal_follow_dir)
         fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0)
-        if fail_streak >= 2:
-            flipped = opposite_move_dir(enter_dir)
-            if flipped and flipped != enter_dir:
-                print(f"[PortalFollow] enter_dir={enter_dir} failed {fail_streak}x with no transition; trying opposite={flipped}")
-                enter_dir = flipped
+        candidates = portal_direction_candidates(self._portal_follow_dir)
+        dir_index = min(fail_streak // 2, len(candidates) - 1)
+        enter_dir = candidates[dir_index]
+        if dir_index > 0 and fail_streak % 2 == 0:
+            print(f"[PortalFollow] no map change after {fail_streak} attempts; trying enter_dir={enter_dir}")
         _, portal_xy = resolve_portal_follow_cells(warrior_last[0], warrior_last[1], enter_dir)
         if not should_attempt_portal_enter(
             current_pos[0],
@@ -1150,6 +1154,17 @@ class RouteSvc(threading.Thread):
             self.state.support_input_blocked_until = 0.0
         except Exception:
             pass
+        # Own map identity right before holding the entry key. A raw coordinate
+        # jump is NOT a reliable "did we warp" signal here: holding a direction
+        # for 1+ seconds covers 4+ tiles of ordinary walking too, which falsely
+        # looked like a transition and ended portal-follow while still on the
+        # same map. Compare actual map identity instead.
+        before_own_map_sig = (
+            str(getattr(self.state, "map_name", "") or ""),
+            str(getattr(self.state, "map_floor", "") or ""),
+            str(getattr(self.state, "current_map", "") or ""),
+        )
+        before_own_fp = str(getattr(self.state, "map_info_fingerprint", "") or "")
         hold_sec = max(1.0, float(TIMING_CONFIG.get("entry_hold", 1.0) or 1.0))
         warped = False
         for attempt in range(3):
@@ -1182,22 +1197,25 @@ class RouteSvc(threading.Thread):
                 int(getattr(self.state, "x", 0) or 0),
                 int(getattr(self.state, "y", 0) or 0),
             )
-            if should_detect_warrior_transition(
-                before_pos[0],
-                before_pos[1],
-                after_pos[0],
-                after_pos[1],
-                jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE,
-            ):
+            after_own_map_sig = (
+                str(getattr(self.state, "map_name", "") or ""),
+                str(getattr(self.state, "map_floor", "") or ""),
+                str(getattr(self.state, "current_map", "") or ""),
+            )
+            after_own_fp = str(getattr(self.state, "map_info_fingerprint", "") or "")
+            map_sig_changed = bool(after_own_map_sig != before_own_map_sig and any(after_own_map_sig))
+            fp_changed = bool(
+                before_own_fp
+                and after_own_fp
+                and fingerprint_hamming_distance(before_own_fp, after_own_fp) > MAP_FINGERPRINT_SAME_MAX_DISTANCE
+            )
+            if map_sig_changed or fp_changed:
                 warped = True
-                cache_key = self._portal_follow_source_map_sig
-                if cache_key is None:
-                    cache_key = (
-                        str(getattr(self.state, "map_name", "") or ""),
-                        str(getattr(self.state, "map_floor", "") or ""),
-                        str(getattr(self.state, "current_map", "") or ""),
-                        str(getattr(self.state, "current_floor", "") or ""),
-                    )
+                cache_key = portal_cache_key(
+                    self._portal_follow_source_map_sig or before_own_map_sig,
+                    warrior_last[0],
+                    warrior_last[1],
+                )
                 cache = getattr(self.state, "portal_session_cache", None)
                 if isinstance(cache, dict):
                     cache[cache_key] = {
@@ -1208,7 +1226,8 @@ class RouteSvc(threading.Thread):
                         "source": "runtime_success",
                     }
                 self._finish_portal_follow(
-                    f"entered self_transition before={before_pos}, after={after_pos}, attempt={attempt + 1}"
+                    f"entered map_changed={map_sig_changed} fp_changed={fp_changed} "
+                    f"before={before_pos}, after={after_pos}, attempt={attempt + 1}"
                 )
                 break
             current_pos = after_pos

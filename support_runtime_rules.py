@@ -224,6 +224,33 @@ def opposite_move_dir(direction: str | None) -> str | None:
     }.get(normalize_move_dir(direction) or "", None)
 
 
+ALL_MOVE_DIRS = ("up", "down", "left", "right")
+
+
+def portal_direction_candidates(primary: str | None) -> list[str]:
+    """All 4 directions, ordered: primary guess, its opposite, then the two
+    perpendiculars - so a wrong guess still finds the real entrance instead
+    of retrying the same failing direction forever."""
+    primary = normalize_move_dir(primary)
+    ordered: list[str] = []
+    if primary:
+        ordered.append(primary)
+        opp = opposite_move_dir(primary)
+        if opp:
+            ordered.append(opp)
+    for d in ALL_MOVE_DIRS:
+        if d not in ordered:
+            ordered.append(d)
+    return ordered
+
+
+def portal_cache_key(map_sig: tuple, x: int, y: int, bucket: int = 3) -> tuple:
+    """Different portals on the same map need different cached directions,
+    so key by approach tile (bucketed to tolerate a tile or two of position
+    noise), not just the map signature."""
+    return (*map_sig, int(x) // bucket, int(y) // bucket)
+
+
 def is_plausible_map_coord(x: int, y: int) -> bool:
     """Reject OCR/telemetry noise that breaks portal follow (e.g. x=0 spikes)."""
     try:

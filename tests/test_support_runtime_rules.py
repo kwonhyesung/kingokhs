@@ -17,6 +17,8 @@ from support_runtime_rules import (
     normalize_move_dir,
     offset_coord_by_dir,
     pick_portal_enter_dir,
+    portal_cache_key,
+    portal_direction_candidates,
     is_plausible_transition_coord,
     resolve_portal_follow_cells,
     should_allow_party_support_cast,
@@ -203,6 +205,18 @@ def test_follow_hold_position_allows_one_tile_axis_error():
     assert should_hold_follow_position(10, 10, 11, 10) is True
     assert should_hold_follow_position(10, 10, 10, 11) is True
     assert should_hold_follow_position(10, 10, 11, 11) is True
+
+
+def test_portal_direction_candidates_covers_all_4_starting_with_guess_then_opposite():
+    assert portal_direction_candidates("up") == ["up", "down", "left", "right"]
+    assert portal_direction_candidates("left") == ["left", "right", "up", "down"]
+    assert set(portal_direction_candidates(None)) == {"up", "down", "left", "right"}
+
+
+def test_portal_cache_key_discriminates_nearby_but_different_portals():
+    map_sig = ("map", "1", "floor")
+    assert portal_cache_key(map_sig, 30, 48) == portal_cache_key(map_sig, 31, 49)
+    assert portal_cache_key(map_sig, 30, 48) != portal_cache_key(map_sig, 30, 80)
 
 
 def test_follow_hold_position_max_gap_zero_forces_exact_tile():
