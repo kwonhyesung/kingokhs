@@ -272,7 +272,6 @@ class RouteSvc(threading.Thread):
         self._portal_follow_timeout = 25.0
         self._last_portal_follow_log_time = 0.0
         self._last_self_portal_coord: tuple[int, int] | None = None
-        self._portal_enter_fail_streak = 0
         self._portal_enter_attempted = False
         self.state.portal_follow_active = False
         self.state.portal_follow_retarget_requested = False
@@ -785,7 +784,6 @@ class RouteSvc(threading.Thread):
         self._portal_follow_dir = dir_norm
         self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
         self._portal_follow_started_at = started
-        self._portal_enter_fail_streak = 0
         self._portal_enter_attempted = False
         self._last_self_portal_coord = (int(self.state.x), int(self.state.y))
         self._blocked_cells_until.clear()
@@ -931,27 +929,6 @@ class RouteSvc(threading.Thread):
                         )
                         return
             if cur_ok:
-                if (
-                    getattr(self, "_portal_enter_attempted", False)
-                    and self._portal_follow_coord
-                    and follow_manhattan_gap(
-                        cur_x, cur_y, self._portal_follow_coord[0], self._portal_follow_coord[1]
-                    ) > 6
-                ):
-                    # Our one entry attempt already failed and the warrior is
-                    # just walking further away (ordinary speed, not a jump -
-                    # that's handled above) - they're not using this door.
-                    # Waiting out the full timeout only keeps heal/red_tab
-                    # blocked with nothing left to try.
-                    gap = follow_manhattan_gap(
-                        cur_x, cur_y, self._portal_follow_coord[0], self._portal_follow_coord[1]
-                    )
-                    print(
-                        f"[PortalFollow] warrior walked {gap} tiles from the door after our "
-                        f"entry attempt failed; abandoning, resuming normal follow"
-                    )
-                    self._finish_portal_follow(f"warrior_left_door_gap_{gap}")
-                    return
                 if prev and (prev[0], prev[1]) != (cur_x, cur_y):
                     if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1:
                         step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
@@ -1071,7 +1048,6 @@ class RouteSvc(threading.Thread):
         self._portal_follow_dir = None
         self._portal_follow_source_map_sig = None
         self._last_self_portal_coord = None
-        self._portal_enter_fail_streak = 0
         self._portal_enter_attempted = False
         self.state.portal_follow_active = False
         self.state.portal_follow_finished_at = time.time()
@@ -1251,13 +1227,15 @@ class RouteSvc(threading.Thread):
         if entered:
             return True
 
-        self._portal_enter_fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0) + 1
+        # Both taps failed - nothing changes by sitting here longer, and
+        # continuing to wait just keeps heal/red_tab blocked for no reason.
+        # Give up on this door now; normal follow picks the warrior back up,
+        # and a fresh transition (if they use a different door) re-arms.
         print(
-            f"[PortalFollow] portal enter pending: current={current_pos}, "
-            f"warrior_last={warrior_last}, enter_dir={enter_dir}, "
-            f"fail_streak={self._portal_enter_fail_streak}"
+            f"[PortalFollow] portal enter failed: current={current_pos}, "
+            f"warrior_last={warrior_last}, enter_dir={enter_dir}"
         )
-        # Stay in portal mode so we keep retrying instead of normal follow.
+        self._finish_portal_follow(f"enter_failed enter_dir={enter_dir}")
         return True
 
     # ----------------------------------------------------------
