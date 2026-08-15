@@ -244,10 +244,14 @@ def portal_direction_candidates(primary: str | None) -> list[str]:
     return ordered
 
 
-def portal_cache_key(map_sig: tuple, x: int, y: int, bucket: int = 3) -> tuple:
+def portal_cache_key(map_sig: tuple, x: int, y: int, bucket: int = 8) -> tuple:
     """Different portals on the same map need different cached directions,
-    so key by approach tile (bucketed to tolerate a tile or two of position
-    noise), not just the map signature."""
+    so key by approach tile (bucketed to tolerate a few tiles of position
+    noise - the warrior doesn't stop on the exact same tile every time
+    before triggering the same door), not just the map signature.
+    ponytail: division-bucket, not a true tolerance search, so an approach
+    right on a bucket edge can still miss - widen bucket or switch to a
+    nearest-match scan if that shows up in practice."""
     return (*map_sig, int(x) // bucket, int(y) // bucket)
 
 
