@@ -867,6 +867,67 @@ class RouteSvc(threading.Thread):
                 event_age = None
 
         if self._portal_follow_active:
+            if event_prev is not None:
+                # Warrior sent another explicit transition while we were still en
+                # route to the last one (e.g. two portals back-to-back). Confirmed
+                # live: staying locked onto the stale target left the dosa walking
+                # toward a portal the warrior was no longer anywhere near. Re-arm
+                # to the new one instead of silently tracking a target we've given
+                # up reaching.
+                print(
+                    f"[PortalFollow] new transition while still following previous one "
+                    f"(event_seq={event_seq}): re-arming to warrior_last={event_prev}"
+                )
+                self._finish_portal_follow(f"superseded_by_event_seq_{event_seq}")
+                enter_dir = event_dir or normalize_move_dir(remote_data.get("last_move_dir", ""))
+                if enter_dir:
+                    source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
+                    self._arm_portal_follow(
+                        event_prev,
+                        enter_dir,
+                        started_at=time.time(),
+                        clear_target=True,
+                        source_map_sig=source_map_sig,
+                        log_prefix=(
+                            f"warrior transition detected now=({cur_x}, {cur_y}) "
+                            f"(superseding stale portal-follow) event_seq={event_seq or '-'}"
+                        ),
+                    )
+                    return
+            if (
+                cur_ok
+                and prev
+                and is_plausible_map_coord(prev[0], prev[1])
+                and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
+            ):
+                # No explicit event this time, but the raw coordinate jumped a lot
+                # from where we last tracked the warrior while already
+                # portal-following - same "moved on without us" case as above,
+                # just without a coord_transition packet to key off. Gate on
+                # implied speed like the normal detector so an ordinary telemetry
+                # gap doesn't churn a false re-arm.
+                jump_distance = follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y)
+                cur_received_at = float(remote_data.get("_received_at") or 0.0)
+                prev_ts = float(getattr(self, "_last_warrior_coord_ts", 0.0) or 0.0)
+                elapsed = cur_received_at - prev_ts if (cur_received_at > 0.0 and prev_ts > 0.0) else 0.0
+                if is_implausible_walk_speed(jump_distance, elapsed):
+                    enter_dir = dps_dir or normalize_move_dir(remote_data.get("last_move_dir", ""))
+                    print(
+                        f"[PortalFollow] warrior coordinate jumped {jump_distance} tiles "
+                        f"while still following a previous transition: re-arming to ({cur_x}, {cur_y})"
+                    )
+                    self._finish_portal_follow(f"superseded_by_coord_jump_{jump_distance}")
+                    if enter_dir:
+                        source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
+                        self._arm_portal_follow(
+                            (cur_x, cur_y),
+                            enter_dir,
+                            started_at=time.time(),
+                            clear_target=True,
+                            source_map_sig=source_map_sig,
+                            log_prefix="warrior coord jump superseding stale portal-follow",
+                        )
+                        return
             if cur_ok:
                 if prev and (prev[0], prev[1]) != (cur_x, cur_y):
                     if follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y) == 1:
