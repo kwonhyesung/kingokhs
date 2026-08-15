@@ -270,6 +270,7 @@ class RouteSvc(threading.Thread):
         self._portal_follow_coord: tuple[int, int] | None = None
         self._portal_follow_approach: tuple[int, int] | None = None
         self._portal_follow_dir: str | None = None
+        self._portal_follow_primary_dir: str | None = None
         self._portal_follow_source_map_sig: tuple[str, str, str, str] | None = None
         self._portal_follow_started_at = 0.0
         self._portal_follow_timeout = 25.0
@@ -784,6 +785,7 @@ class RouteSvc(threading.Thread):
         self._portal_follow_approach = warrior_xy
         self._portal_follow_coord = portal_xy
         self._portal_follow_dir = dir_norm
+        self._portal_follow_primary_dir = dir_norm
         self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
         self._portal_follow_started_at = started
         self._portal_enter_fail_streak = 0
@@ -1048,6 +1050,7 @@ class RouteSvc(threading.Thread):
         self._portal_follow_coord = None
         self._portal_follow_approach = None
         self._portal_follow_dir = None
+        self._portal_follow_primary_dir = None
         self._portal_follow_source_map_sig = None
         self._last_self_portal_coord = None
         self._portal_enter_fail_streak = 0
@@ -1123,7 +1126,7 @@ class RouteSvc(threading.Thread):
         current_pos = (int(self.state.x), int(self.state.y))
         warrior_last = self._portal_follow_approach or target
         fail_streak = int(getattr(self, "_portal_enter_fail_streak", 0) or 0)
-        candidates = portal_direction_candidates(self._portal_follow_dir)
+        candidates = portal_direction_candidates(self._portal_follow_primary_dir)
         dir_index = min(fail_streak, len(candidates) - 1)
         enter_dir = candidates[dir_index]
         _, portal_xy = resolve_portal_follow_cells(warrior_last[0], warrior_last[1], enter_dir)
