@@ -2868,14 +2868,29 @@ class LogicSvc(threading.Thread):
             return True
 
         if bool(getattr(self.state, "portal_follow_active", False)):
-            self._portal_support_pause_until = max(
-                float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0),
-                time.time() + 0.4,
+            # Portal-follow can legitimately take up to _portal_follow_timeout (25s)
+            # to resolve. Confirmed live: warrior HP dropped 839664 -> 147045 fully
+            # unhealed during one such stretch. Don't let "still portal-following"
+            # override "warrior is about to die" - fall through to normal heal
+            # handling once HP is critically low, even mid portal-follow.
+            warrior_critical = bool(
+                isinstance(support_target, dict)
+                and int(support_target.get("hp", 0) or 0) > 0
+                and int(support_target.get("hp", 0) or 0) <= max(10000, int(self._get_party_good_hp_threshold(support_target) * 0.3))
             )
-            self._invalidate_warrior_redtab_verification()
-            self._log_dosa_f2_idle_reason("portal_follow_active stop_party_heal", interval=0.4)
-            self._pace_service_loop("active")
-            return True
+            if not warrior_critical:
+                self._portal_support_pause_until = max(
+                    float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0),
+                    time.time() + 0.4,
+                )
+                self._invalidate_warrior_redtab_verification()
+                self._log_dosa_f2_idle_reason("portal_follow_active stop_party_heal", interval=0.4)
+                self._pace_service_loop("active")
+                return True
+            self._log_dosa_f2_idle_reason(
+                f"portal_follow_active BUT warrior_critical hp={support_target.get('hp')}: heal anyway",
+                interval=0.4,
+            )
 
         if isinstance(support_target, dict):
             map_sync_status = classify_map_sync(self.state.get_all(), support_target, now=time.time())
