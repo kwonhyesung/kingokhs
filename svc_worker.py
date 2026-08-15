@@ -355,6 +355,19 @@ def main(
                 )
                 print("[DEBUG] F6 핫키 등록 완료")
 
+                # 실제 물리 방향키 입력 추적 (수동 조작 시 portal enter_dir 판정용).
+                # last_move_dir은 이 PC 자체 자동이동 로직도 같이 쓰므로 덮어쓰면 안 됨.
+                def _record_physical_move_dir(direction):
+                    state.physical_last_move_dir = direction
+                    state.physical_last_move_dir_ts = time.time()
+
+                for _dir_key in ("up", "down", "left", "right"):
+                    HOTKEY_HANDLES[f"move_{_dir_key}"] = keyboard.on_press_key(
+                        _dir_key,
+                        lambda _event, d=_dir_key: _record_physical_move_dir(d),
+                    )
+                print("[DEBUG] 방향키 물리 입력 감지 등록 완료")
+
                 # [TEST] ` 키로 JSON 등록 패턴과 user_info 상태를 함께 점검
                 def test_patterns():
                     frame = reader_thread.last_frame

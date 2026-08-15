@@ -317,6 +317,39 @@ def test_game_state_shares_coord_transition_without_map_ocr():
     assert second["coord_transition"]["dir"] == "up"
 
 
+def test_game_state_prefers_fresh_physical_key_over_stale_bot_move_dir():
+    # A manually-piloted warrior's real arrow-key press should win over this
+    # PC's own last bot-issued auto-nav direction, which can be stale by the
+    # time a human steps through a portal.
+    state = GameState()
+    state.x = 31
+    state.y = 1
+    state.last_move_dir = "left"
+    state.physical_last_move_dir = "up"
+    state.physical_last_move_dir_ts = time.time()
+    state.build_share_payload()
+
+    state.x = 27
+    state.y = 3
+    payload = state.build_share_payload()["status"]
+    assert payload["coord_transition"]["input_dir"] == "up"
+
+
+def test_game_state_ignores_stale_physical_key():
+    state = GameState()
+    state.x = 31
+    state.y = 1
+    state.last_move_dir = "left"
+    state.physical_last_move_dir = "up"
+    state.physical_last_move_dir_ts = time.time() - 10.0
+    state.build_share_payload()
+
+    state.x = 27
+    state.y = 3
+    payload = state.build_share_payload()["status"]
+    assert payload["coord_transition"]["input_dir"] == "left"
+
+
 def test_game_state_shares_map_info_text_for_cross_pc_map_compare():
     state = GameState()
     state.map_info_text = "선비족입구"

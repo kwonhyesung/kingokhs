@@ -473,6 +473,14 @@ class GameState:
     safe_zone_detected: bool = False
     sentinel_enabled: bool = False
     last_move_dir: Optional[str] = None
+    # Real physical arrow-key state (see keyboard.on_press_key hooks in
+    # svc_worker.py), separate from last_move_dir - that field is also
+    # written by this PC's own auto-nav for its own stuck-recovery/movement
+    # logic, so folding raw key taps into it would corrupt that. This is
+    # what tells us which direction a manually-piloted character (the
+    # warrior) actually pressed when it stepped through a portal.
+    physical_last_move_dir: Optional[str] = None
+    physical_last_move_dir_ts: float = 0.0
     last_coord_transition_seq: int = 0
     last_coord_transition: Optional[Dict[str, Any]] = None
     _share_last_coord: Optional[Tuple[int, int]] = field(default=None, init=False, repr=False)
@@ -761,7 +769,16 @@ class GameState:
                 map_changed = bool(prev_map_sig and map_sig != prev_map_sig and any(map_sig))
                 edge_shift = gap == 1 and ((cur[0] == 0) ^ (cur[1] == 0))
                 if gap >= 4 or map_changed or edge_shift:
-                    input_dir = normalize_move_dir(self.last_move_dir)
+                    phys_dir = normalize_move_dir(self.physical_last_move_dir)
+                    phys_fresh = bool(
+                        phys_dir
+                        and (time.time() - float(self.physical_last_move_dir_ts or 0.0)) <= 3.0
+                    )
+                    # A manually-piloted character's actual key press beats
+                    # this PC's own last bot-issued move direction, which
+                    # can be stale if the human took over just before the
+                    # portal (see last_move_dir's docstring above).
+                    input_dir = phys_dir if phys_fresh else normalize_move_dir(self.last_move_dir)
                     delta_dir = dir_between_coords(prev[0], prev[1], cur[0], cur[1])
                     self.last_coord_transition_seq += 1
                     self.last_coord_transition = {
