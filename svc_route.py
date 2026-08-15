@@ -1169,6 +1169,32 @@ class RouteSvc(threading.Thread):
             )
             if map_sig_changed or fp_changed:
                 entered = True
+                # Cross-check against the warrior's own post-portal coordinate
+                # (their telemetry already reflects wherever they landed) -
+                # confirms we warped to the SAME place, not just some map.
+                after_pos = (
+                    int(getattr(self.state, "x", 0) or 0),
+                    int(getattr(self.state, "y", 0) or 0),
+                )
+                warrior_snapshot = self._get_remote_warrior_snapshot()
+                warrior_now = None
+                warrior_gap = None
+                if warrior_snapshot:
+                    try:
+                        warrior_now = (
+                            int(warrior_snapshot.get("x", warrior_snapshot.get("pos_x", 0)) or 0),
+                            int(warrior_snapshot.get("y", warrior_snapshot.get("pos_y", 0)) or 0),
+                        )
+                        warrior_gap = follow_manhattan_gap(
+                            after_pos[0], after_pos[1], warrior_now[0], warrior_now[1]
+                        )
+                    except Exception:
+                        warrior_now = None
+                        warrior_gap = None
+                print(
+                    f"[PortalFollow] entry confirmed: dosa_now={after_pos}, "
+                    f"warrior_now={warrior_now}, distance={warrior_gap if warrior_gap is not None else '-'}"
+                )
                 cache_key = portal_cache_key(
                     self._portal_follow_source_map_sig or before_own_map_sig,
                     warrior_last[0],
