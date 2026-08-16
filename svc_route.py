@@ -1204,7 +1204,16 @@ class RouteSvc(threading.Thread):
         )
         before_own_fp = str(getattr(self.state, "map_info_fingerprint", "") or "")
 
-        hw.force_press(enter_dir)
+        # force_press() sends a single instant "K,<key>" hardware packet.
+        # Live logs show this door (and every other one this session) never
+        # once triggers from it - not even a delayed transition, and one
+        # attempt reported the dosa's own position actually moving BACKWARD
+        # after the tap. But normal following crosses the exact same door
+        # fine via hold_move() (down, held, up) - confirmed live via
+        # "self_transition" completions. Use the same real held keypress
+        # here instead of a synthetic tap, since that's what this game
+        # actually recognizes as a step.
+        hw.hold_move(enter_dir, "move_hold", duration=TIMING_CONFIG.get("move_hold", 0.09))
         self.state.last_move_dir = enter_dir
 
         entered = False
