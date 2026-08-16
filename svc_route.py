@@ -1489,8 +1489,13 @@ class RouteSvc(threading.Thread):
 
         base_hold = TIMING_CONFIG["move_hold"]
         hold_time = base_hold
-        if follow_mode:
-            # 2D/鍮꾨?媛??대룞 + ??2移??듬줈 湲곗?: follow?먯꽌 異??대룞???뺤떎??諛잙룄濡?hold瑜?媛蹂 ?뺤옣.
+        if follow_mode and not portal_follow:
+            # follow gap based hold-time scaling (move faster when far behind).
+            # Portal-follow must NOT use this: at gap>=4 hold stretches to 0.145s,
+            # long enough that stepping onto a door tile carries residual motion
+            # into the destination map for the rest of that hold - reported as
+            # "only 1 tile should move but it moved several". Portal-follow always
+            # uses the minimum base hold instead, below.
             if gap >= 4:
                 hold_time = max(hold_time, 0.145)
             elif gap >= 3:
