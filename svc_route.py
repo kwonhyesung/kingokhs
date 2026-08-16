@@ -1158,9 +1158,13 @@ class RouteSvc(threading.Thread):
     def _complete_portal_follow_if_arrived(self) -> bool:
         """Walk to the warrior's own pre-jump tile, then tap the single
         direction key they used - not a different tile per guessed
-        direction. Retries the same key once more on failure; nothing
-        smarter than that, since a portal's entrance is normally one fixed
-        direction and guessing sideways just makes the dosa wander."""
+        direction. Taps once and polls for the map change instead of a
+        fixed sleep-then-check, and does NOT auto-retry the same key on a
+        no-change read: on doors where the same key also triggers the
+        return trip on the other side, a blind second tap can undo a
+        transition that actually succeeded but was detected late - live
+        logs showed exactly this (tap 1 and tap 2 both read "no change"
+        even though the dosa was standing right on the door)."""
         target = self._get_portal_follow_target()
         if not target:
             return False
@@ -1200,11 +1204,14 @@ class RouteSvc(threading.Thread):
         )
         before_own_fp = str(getattr(self.state, "map_info_fingerprint", "") or "")
 
+        hw.force_press(enter_dir)
+        self.state.last_move_dir = enter_dir
+
         entered = False
-        for attempt in range(2):
-            hw.force_press(enter_dir)
-            self.state.last_move_dir = enter_dir
-            humanized_sleep(0.35, variance=0.15)
+        map_sig_changed = False
+        fp_changed = False
+        deadline = time.time() + 0.70
+        while time.time() < deadline:
             after_own_map_sig = (
                 str(getattr(self.state, "map_name", "") or ""),
                 str(getattr(self.state, "map_floor", "") or ""),
@@ -1219,59 +1226,60 @@ class RouteSvc(threading.Thread):
             )
             if map_sig_changed or fp_changed:
                 entered = True
-                # Cross-check against the warrior's own post-portal coordinate
-                # (their telemetry already reflects wherever they landed) -
-                # confirms we warped to the SAME place, not just some map.
-                after_pos = (
-                    int(getattr(self.state, "x", 0) or 0),
-                    int(getattr(self.state, "y", 0) or 0),
-                )
-                warrior_snapshot = self._get_remote_warrior_snapshot()
-                warrior_now = None
-                warrior_gap = None
-                if warrior_snapshot:
-                    try:
-                        warrior_now = (
-                            int(warrior_snapshot.get("x", warrior_snapshot.get("pos_x", 0)) or 0),
-                            int(warrior_snapshot.get("y", warrior_snapshot.get("pos_y", 0)) or 0),
-                        )
-                        warrior_gap = follow_manhattan_gap(
-                            after_pos[0], after_pos[1], warrior_now[0], warrior_now[1]
-                        )
-                    except Exception:
-                        warrior_now = None
-                        warrior_gap = None
-                print(
-                    f"[PortalFollow] entry confirmed: dosa_now={after_pos}, "
-                    f"warrior_now={warrior_now}, distance={warrior_gap if warrior_gap is not None else '-'}"
-                )
-                cache_key = portal_cache_key(
-                    self._portal_follow_source_map_sig or before_own_map_sig,
-                    warrior_last[0],
-                    warrior_last[1],
-                )
-                cache = getattr(self.state, "portal_session_cache", None)
-                if isinstance(cache, dict):
-                    cache[cache_key] = {
-                        "enter_dir": enter_dir,
-                        "approach": [int(warrior_last[0]), int(warrior_last[1])],
-                        "confirmed_at": time.time(),
-                        "source": "runtime_success",
-                    }
-                self._finish_portal_follow(
-                    f"entered map_changed={map_sig_changed} fp_changed={fp_changed} "
-                    f"enter_dir={enter_dir} tap={attempt + 1}"
-                )
                 break
-            print(f"[PortalFollow] tap {attempt + 1}/2 enter_dir={enter_dir}: no map change yet")
+            humanized_sleep(0.06, variance=0.10)
 
         if entered:
+            # Cross-check against the warrior's own post-portal coordinate
+            # (their telemetry already reflects wherever they landed) -
+            # confirms we warped to the SAME place, not just some map.
+            after_pos = (
+                int(getattr(self.state, "x", 0) or 0),
+                int(getattr(self.state, "y", 0) or 0),
+            )
+            warrior_snapshot = self._get_remote_warrior_snapshot()
+            warrior_now = None
+            warrior_gap = None
+            if warrior_snapshot:
+                try:
+                    warrior_now = (
+                        int(warrior_snapshot.get("x", warrior_snapshot.get("pos_x", 0)) or 0),
+                        int(warrior_snapshot.get("y", warrior_snapshot.get("pos_y", 0)) or 0),
+                    )
+                    warrior_gap = follow_manhattan_gap(
+                        after_pos[0], after_pos[1], warrior_now[0], warrior_now[1]
+                    )
+                except Exception:
+                    warrior_now = None
+                    warrior_gap = None
+            print(
+                f"[PortalFollow] entry confirmed: dosa_now={after_pos}, "
+                f"warrior_now={warrior_now}, distance={warrior_gap if warrior_gap is not None else '-'}"
+            )
+            cache_key = portal_cache_key(
+                self._portal_follow_source_map_sig or before_own_map_sig,
+                warrior_last[0],
+                warrior_last[1],
+            )
+            cache = getattr(self.state, "portal_session_cache", None)
+            if isinstance(cache, dict):
+                cache[cache_key] = {
+                    "enter_dir": enter_dir,
+                    "approach": [int(warrior_last[0]), int(warrior_last[1])],
+                    "confirmed_at": time.time(),
+                    "source": "runtime_success",
+                }
+            self._finish_portal_follow(
+                f"entered map_changed={map_sig_changed} fp_changed={fp_changed} enter_dir={enter_dir}"
+            )
             return True
 
-        # Both taps failed - nothing changes by sitting here longer, and
-        # continuing to wait just keeps heal/red_tab blocked for no reason.
-        # Give up on this door now; normal follow picks the warrior back up,
-        # and a fresh transition (if they use a different door) re-arms.
+        # No change detected within the poll window - nothing changes by
+        # sitting here longer, and continuing to wait just keeps heal/red_tab
+        # blocked for no reason. Give up on this door now instead of tapping
+        # the same key again (that can undo an already-successful transition
+        # on doors where the same key works both ways); normal follow picks
+        # the warrior back up, and a fresh transition re-arms.
         print(
             f"[PortalFollow] portal enter failed: current={current_pos}, "
             f"warrior_last={warrior_last}, enter_dir={enter_dir}"
