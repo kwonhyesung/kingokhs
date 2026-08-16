@@ -1330,6 +1330,12 @@ class LogicSvc(threading.Thread):
                     print("[Support] red_tab locked onto a monster, not the warrior. Retrying.")
                     self._cancel_ntab_selection()
                     return False
+
+                # "jump" 패턴(격수 ID) 재확인은 껐다 - 라이브 로그 2회 연속
+                # 확인 성공률 0%(user_info 화면 캘리브레이션 미완료로 추정)인데
+                # 실패해도 매번 최대 0.42s를 기다리고 그동안 이동까지 묶어놔서
+                # (support_input_blocked_until 재설정) 실익 없이 이동/힐 속도만
+                # 깎아먹고 있었다. user_info 캘리브레이션을 맞춘 뒤 다시 켤 것.
                 self._party_direct_heal_target_prepared = True
                 return True
             self._cancel_ntab_selection()

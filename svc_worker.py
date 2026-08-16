@@ -41,16 +41,26 @@ class _ClaudeLogTee:
     def __init__(self, stream, log_file):
         self._stream = stream
         self._log_file = log_file
-        self._line_buf = ""
+        # print("msg")는 write("msg")와 write("\n")을 별개 호출로 두 번
+        # 날린다 - 이 프로그램은 여러 스레드(LogicSvc/RouteSvc/MonitorSvc 등)가
+        # 동시에 print()를 호출하므로, 공유 버퍼 하나만 쓰면 스레드 A의
+        # write("msg")와 write("\n") 사이에 스레드 B의 write()가 끼어들어
+        # 두 메시지가 한 줄로 붙어버린다. 스레드별로 버퍼를 따로 둬서
+        # (각 스레드 안에서는 자기 print() 호출이 항상 순서대로 일어나므로)
+        # 이 문제를 원천적으로 피한다. 실제 파일 쓰기만 락으로 보호한다.
+        self._thread_local = threading.local()
+        self._write_lock = threading.Lock()
 
     def write(self, data):
         self._stream.write(data)
         try:
-            self._line_buf += data
-            while "\n" in self._line_buf:
-                line, self._line_buf = self._line_buf.split("\n", 1)
+            buf = getattr(self._thread_local, "buf", "") + data
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
                 if not line.lstrip().startswith(self._DROP_PREFIXES):
-                    self._log_file.write(line + "\n")
+                    with self._write_lock:
+                        self._log_file.write(line + "\n")
+            self._thread_local.buf = buf
         except Exception:
             pass
         return len(data)

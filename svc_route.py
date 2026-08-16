@@ -1501,7 +1501,21 @@ class RouteSvc(threading.Thread):
                 hold_time = max(hold_time, 0.090)
 
         hold_time = max(0.050, min(0.180, random.gauss(hold_time, 0.007)))
-        if self._is_in_combat() or time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0):
+        in_combat = self._is_in_combat()
+        input_blocked = time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
+        if in_combat or input_blocked:
+            # Live logs showed the dosa freeze completely for many seconds
+            # while portal_follow_active with no further clue why - this
+            # pins down which of the two gates (ordinary combat targeting a
+            # monster vs. a lingering support_input_blocked_until) is
+            # actually responsible next time it happens, instead of guessing.
+            if portal_follow and (time.time() - float(getattr(self, "_last_portal_move_block_log_time", 0.0) or 0.0)) >= 1.0:
+                print(
+                    f"[NavBlock] portal-follow movement withheld: in_combat={in_combat} "
+                    f"target_locked={bool(getattr(self.state, 'target_locked', False))} "
+                    f"input_blocked={input_blocked}"
+                )
+                self._last_portal_move_block_log_time = time.time()
             return False
         hw.hold_move(step_dir, "move_hold", duration=hold_time)
         self.state.last_move_dir = step_dir
