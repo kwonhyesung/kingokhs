@@ -777,10 +777,21 @@ class RouteSvc(threading.Thread):
         dir_norm = normalize_move_dir(enter_dir)
         started = float(started_at if started_at is not None else time.time())
         self._portal_follow_active = True
-        # Nav target is the warrior's own last tile, not an offset guess one
-        # tile past it - walk there, then tap the same key they used.
+        # Nav target is one tile PAST the door in enter_dir, not the door
+        # tile itself. The old approach walked to warrior_xy, stopped, then
+        # had _complete_portal_follow_if_arrived tap enter_dir from a
+        # standstill - confirmed live across many attempts (with both
+        # force_press and a real held hold_move) that this specific door
+        # never once triggers from a standing tap; it visibly walks the
+        # dosa BACKWARD instead. Every successful crossing of that same
+        # door this session happened via ordinary follow movement landing
+        # on/through it mid-step (self_transition). Extending the nav
+        # target keeps _move_toward() walking straight through instead of
+        # ever stopping on the door tile to begin with.
         self._portal_follow_approach = warrior_xy
-        self._portal_follow_coord = warrior_xy
+        self._portal_follow_coord = (
+            _nav_step_from_dir(warrior_xy[0], warrior_xy[1], dir_norm) if dir_norm else warrior_xy
+        )
         self._portal_follow_dir = dir_norm
         self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
         self._portal_follow_started_at = started
