@@ -1913,9 +1913,16 @@ class RouteSvc(threading.Thread):
             if follow_navigation_active and not warrior_route_priority:
                 follow_target = current_follow_target or self._calc_follow_target()
                 if follow_target:
-                    if self._complete_portal_follow_if_arrived():
-                        humanized_sleep(max(0.001, float(TIMING_CONFIG["nav_loop"]) * 0.25))
-                        continue
+                    # _complete_portal_follow_if_arrived() used to run here
+                    # first: stop exactly on the door tile, then tap
+                    # enter_dir from a standstill. Confirmed live it never
+                    # once triggers this game's portals (walks backward
+                    # instead) - and since _arm_portal_follow now targets
+                    # one tile PAST the door, the dosa passes through the
+                    # exact door tile on its way there, which would still
+                    # hand off to this broken stop-and-tap every time.
+                    # Removed so normal walking (_move_toward below) carries
+                    # it straight through instead, uninterrupted.
                     self._set_nav_context("follow")
                     tx, ty = follow_target
                     cx, cy = self.state.x, self.state.y
