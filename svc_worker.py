@@ -27,11 +27,12 @@ except Exception:
 class _ClaudeLogTee:
     """print() 등 콘솔 출력을 원래 스트림과 로그 파일에 동시에 쓴다.
     콘솔은 그대로 두고(사용자용), 파일 쪽은 Claude가 나중에 빠르게 읽을 수
-    있도록 매 틱 반복되는 저가치 라인(FollowROI/CycleDBG/F2Idle/Signal/
-    Nav arrived)은 걸러내서 용량과 토큰을 아낀다."""
+    있도록 매 틱 반복되는 저가치 라인은 걸러내서 용량과 토큰을 아낀다.
+    FollowROI는 원래 여기서도 걸렀었는데, 그게 하필 포탈 추적 멈춤 진단에
+    필요한 "도사 자신이 실제로 움직였는지" 정보라 못 찾아냈다 - 소스 쪽에서
+    이미 1.25~2초 간격으로 자체 rate-limit돼 있어 양도 적으니 남긴다."""
 
     _DROP_PREFIXES = (
-        "[FollowROI]",
         "[CycleDBG]",
         "[F2Idle]",
         "[Signal]",
