@@ -201,6 +201,15 @@ class LogicSvc(threading.Thread):
         self._party_heal_blocked_until = 0.0
         self._direct_heal_prepare_requested = False
         self._party_direct_heal_fail_count = 0
+        self._party_direct_heal_fail_cap = 2
+        self._party_heal_stagnant_streak = 0
+        # 몬스터 종류가 너무 많아 이름표 이미지로 "몬스터를 잡았는지"를 다
+        # 걸러낼 수 없다 - 결국 격수가 직접 보고하는 실제 HP가 오르는지가
+        # 유일한 범용 증거다. 데미지 한 틱 정도로 안 오르는 건 봐주되,
+        # 이 이상 연속으로 안 오르면(오검출로 몬스터를 잡았을 가능성 포함)
+        # 바로 재확인한다. 5(≈1초)는 너무 느슨해서 몬스터를 오래 붙잡고
+        # 있을 수 있어 2(≈0.4초)로 낮췄다.
+        self._party_heal_stagnant_cap = 2
         self._warrior_redtab_verified = False
         self._warrior_redtab_verified_hp = 0
         self.state.support_input_blocked_until = 0.0
@@ -1132,46 +1141,79 @@ class LogicSvc(threading.Thread):
         before_hp = max(0, int(snapshot.get("hp", 0) or 0))
         if self._is_party_heal_blocked():
             return False
-        red_tab_confirmed = bool(getattr(self.state, "red_tab_enabled", False))
-        if self._party_direct_heal_verified and should_allow_party_support_cast(
-            red_tab_confirmed,
-            self._party_direct_heal_target_prepared,
-        ):
-            if not self._cast_party_direct_heal(snapshot):
+
+        if not self._party_direct_heal_verified:
+            if not self._party_direct_heal_target_prepared and not self._prepare_direct_tab_heal_target():
+                now = time.time()
+                if (now - float(self._last_warrior_redtab_skip_log_time or 0.0)) >= 0.8:
+                    print("[Support] HP heal skipped: direct target prepare failed.")
+                    self._last_warrior_redtab_skip_log_time = now
+                self._register_direct_heal_prepare_failure()
                 return False
-            self._last_party_hp_value = before_hp
-            return True
-        if self._party_direct_heal_verified:
-            self._party_direct_heal_verified = False
-            self._party_direct_heal_target_prepared = False
-
-        if not self._party_direct_heal_target_prepared and not self._prepare_direct_tab_heal_target():
-            now = time.time()
-            if (now - float(self._last_warrior_redtab_skip_log_time or 0.0)) >= 0.8:
-                print("[Support] HP heal skipped: direct target prepare failed.")
-                self._last_warrior_redtab_skip_log_time = now
-            return False
-        if not self._party_direct_heal_target_prepared:
-            print("[Support] direct heal target prepared: esc -> tab -> tab")
-            self._party_direct_heal_target_prepared = True
-
-        if not should_allow_party_support_cast(
-            bool(getattr(self.state, "red_tab_enabled", False)),
-            self._party_direct_heal_target_prepared,
-        ):
-            self._cancel_ntab_selection()
-            self._party_direct_heal_target_prepared = False
-            self._party_heal_blocked_until = time.time() + 0.12
-            return False
+            if not self._party_direct_heal_target_prepared:
+                print("[Support] direct heal target prepared: esc -> tab -> tab")
+                self._party_direct_heal_target_prepared = True
 
         if not self._cast_party_direct_heal(snapshot):
+            self._register_direct_heal_prepare_failure()
             return False
 
-        self._party_direct_heal_verified = True
-        self._party_direct_heal_target_prepared = True
-        self._party_direct_heal_fail_count = 0
+        if self._is_monster_target_selected():
+            # HP정체 스트릭(최대 5틱)까지 기다릴 필요 없이, 대상이 몬스터로
+            # 바뀐 건 확실한 신호라 즉시 재확인으로 넘어간다 - 몬스터한테
+            # 계속 3키를 날리며 격수는 안 낫는 낭비를 막는다.
+            print("[Support] target drifted to a monster mid-heal. Retargeting.")
+            self._party_heal_stagnant_streak = 0
+            self._party_direct_heal_verified = False
+            self._party_direct_heal_target_prepared = False
+            self._register_direct_heal_prepare_failure()
+            return False
+
+        # 힐은 초당 5틱까지 낼 수 있으므로 캐스트마다 HP상승을 기다려서는
+        # 안 된다(그 자체로 다음 틱들을 잡아먹는다). 대신 직전 캐스트 시점
+        # HP와 이번 HP를 비교해서 "연속으로 안 오르는" 스트릭만 센다.
+        # 격수가 힐과 동시에 크게 맞아서 한두 틱 안 오르는 건 정상이라
+        # 무시하고, 스트릭이 cap을 넘을 때만(=한동안 계속 정체) 진짜
+        # 타겟을 잃은 것으로 보고 재확인한다.
+        if self._last_party_hp_value > 0 and before_hp <= self._last_party_hp_value:
+            self._party_heal_stagnant_streak += 1
+        else:
+            self._party_heal_stagnant_streak = 0
         self._last_party_hp_value = before_hp
+
+        self._party_direct_heal_verified = True
+        self._party_direct_heal_fail_count = 0
+
+        if self._party_heal_stagnant_streak >= self._party_heal_stagnant_cap:
+            self._party_heal_stagnant_streak = 0
+            self._party_direct_heal_verified = False
+            self._party_direct_heal_target_prepared = False
+            self._register_direct_heal_prepare_failure()
+            return False
+
+        self._party_direct_heal_target_prepared = True
         return True
+
+    def _register_direct_heal_prepare_failure(self):
+        """esc->tab->tab 타겟 준비가 계속 실패하면(주로 red_tab OCR 순간 flicker로
+        prepare 직후 재확인에서 걸림) fail_count만 쌓이고 실제로 재시도를 막는 데
+        쓰이지 않아서, 준비 시도마다 support_input_blocked_until(0.75s)이 계속
+        재무장되어 이동(추적/포탈 따라가기)이 영원히 멈추는 문제가 있었다.
+        cap을 넘기면 잠깐 물러나 이동이 진행될 틈을 준다."""
+        self._party_direct_heal_fail_count += 1
+        if self._party_direct_heal_fail_count < self._party_direct_heal_fail_cap:
+            return
+        print(
+            "[Support] direct heal target prepare gave up after "
+            f"{self._party_direct_heal_fail_count} attempts. Backing off to let follow move."
+        )
+        self._party_direct_heal_fail_count = 0
+        self._party_direct_heal_target_prepared = False
+        self._party_heal_blocked_until = time.time() + 0.8
+        self.state.support_input_blocked_until = min(
+            float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0),
+            time.time() + 0.02,
+        )
 
     def _roll_party_hp_tick_interval(self, rapid_heal: bool = False) -> float:
         if rapid_heal:
@@ -1207,6 +1249,7 @@ class LogicSvc(threading.Thread):
         self._party_direct_heal_verified = False
         self._party_direct_heal_target_prepared = False
         self._party_direct_heal_fail_count = 0
+        self._party_heal_stagnant_streak = 0
 
     def request_initial_direct_heal_target_prepare(self):
         self._invalidate_warrior_redtab_verification()
@@ -1279,6 +1322,14 @@ class LogicSvc(threading.Thread):
                     return False
                 self._sleep_ui_gap(delay)
             if self._wait_for_red_tab_lock(timeout=0.28, min_hits=1):
+                # tab은 근처의 아무 대상(몬스터 포함)이나 잡을 수 있다 - red_tab이
+                # 켜졌다는 건 "뭔가 선택됐다"는 뜻일 뿐 "격수가 선택됐다"는 보장이
+                # 아니다. target_kind/target_info_text는 같은 OCR 프레임에서 이미
+                # 공짜로 계산돼 있으니 추가 키입력 없이 바로 확인한다.
+                if self._is_monster_target_selected():
+                    print("[Support] red_tab locked onto a monster, not the warrior. Retrying.")
+                    self._cancel_ntab_selection()
+                    return False
                 self._party_direct_heal_target_prepared = True
                 return True
             self._cancel_ntab_selection()
@@ -1299,7 +1350,11 @@ class LogicSvc(threading.Thread):
             return False
         if not self._is_hw_ready():
             return False
-        if not should_allow_party_support_cast(
+        # 아직 HP상승으로 검증된 적이 없으면(첫 캐스팅) red_tab OCR로
+        # 한 번은 확인한다. 이미 검증됐으면(_party_direct_heal_verified)
+        # OCR 순간 flicker에 막히지 않고 그냥 쏜다 - 실제로 타겟을 잃었는지는
+        # 호출부(_recover_party_hp)가 캐스팅 후 HP상승 여부로 판단한다.
+        if not self._party_direct_heal_verified and not should_allow_party_support_cast(
             bool(getattr(self.state, "red_tab_enabled", False)),
             self._party_direct_heal_target_prepared,
         ):

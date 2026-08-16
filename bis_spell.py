@@ -78,9 +78,16 @@ class SpellCaster:
         humanized_sleep(0.05, variance=0.40) # 0.05초 대기
         self.hardware.release_key(spell_char.lower()) # 단축키를 뗗니다.
         
-    def _release_movement_keys(self):
+    def _release_movement_keys(self, block_duration: float = 0.9):
         """방향키가 눌려있으면 타겟선택 박스(Home/화살표 확정)가 캐릭터 대신 그
-        박스를 움직여서 이동이 멈춰버린다. 대상선택형 시전 전엔 항상 놓는다."""
+        박스를 움직여서 이동이 멈춰버린다. 대상선택형 시전 전엔 항상 놓고,
+        박스가 떠있는 동안 이동 스레드(RouteSvc)가 방향키를 다시 못 누르도록
+        support_input_blocked_until을 함께 세워 잠근다."""
+        state = getattr(self.hardware, "state", None)
+        if state is not None:
+            until = time.time() + block_duration
+            current = float(getattr(state, "support_input_blocked_until", 0.0) or 0.0)
+            state.support_input_blocked_until = max(current, until)
         for direction in ("up", "down", "left", "right"):
             try:
                 self.hardware.release_key(direction)
@@ -240,6 +247,8 @@ class RecoveryManager:
         arrow: str = "up",
     ) -> str:
         mode = cast_function if cast_function in {"SpellEnter", "SpellHomeEnter", "SpellArrowEnter"} else "SpellEnter"
+        if mode in {"SpellHomeEnter", "SpellArrowEnter"}:
+            self.caster._release_movement_keys()
         self.caster._press_fast(key)
         humanized_sleep(TIMING_CONFIG["spell_cast_gap"])
 
