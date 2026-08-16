@@ -2868,17 +2868,23 @@ class LogicSvc(threading.Thread):
             self._pace_service_loop("active")
             return True
 
+        # Computed once and reused by every portal_follow_active check in this
+        # cycle - this used to be recomputed ad hoc at each check, and the
+        # later one (now further down) didn't have it at all, so "heal
+        # anyway" from this first check got silently re-blocked by the
+        # second one moments later. Confirmed live: warrior HP dropped
+        # 839664 -> 147045 (and again 246575 -> 239850) fully unhealed while
+        # the two checks disagreed.
+        warrior_critical = bool(
+            isinstance(support_target, dict)
+            and int(support_target.get("hp", 0) or 0) > 0
+            and int(support_target.get("hp", 0) or 0) <= max(10000, int(self._get_party_good_hp_threshold(support_target) * 0.3))
+        )
         if bool(getattr(self.state, "portal_follow_active", False)):
             # Portal-follow can legitimately take up to _portal_follow_timeout (25s)
-            # to resolve. Confirmed live: warrior HP dropped 839664 -> 147045 fully
-            # unhealed during one such stretch. Don't let "still portal-following"
-            # override "warrior is about to die" - fall through to normal heal
-            # handling once HP is critically low, even mid portal-follow.
-            warrior_critical = bool(
-                isinstance(support_target, dict)
-                and int(support_target.get("hp", 0) or 0) > 0
-                and int(support_target.get("hp", 0) or 0) <= max(10000, int(self._get_party_good_hp_threshold(support_target) * 0.3))
-            )
+            # to resolve. Don't let "still portal-following" override "warrior
+            # is about to die" - fall through to normal heal handling once HP
+            # is critically low, even mid portal-follow.
             if not warrior_critical:
                 self._portal_support_pause_until = max(
                     float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0),
@@ -3069,7 +3075,7 @@ class LogicSvc(threading.Thread):
         portal_follow_active = bool(getattr(self.state, "portal_follow_active", False))
         portal_retarget_requested = bool(getattr(self.state, "portal_follow_retarget_requested", False))
 
-        if portal_follow_active:
+        if portal_follow_active and not warrior_critical:
             self._invalidate_warrior_redtab_verification()
             self._portal_retarget_attempt_count = 0
             self._log_dosa_f2_idle_reason(
