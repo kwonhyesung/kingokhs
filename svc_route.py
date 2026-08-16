@@ -1377,6 +1377,18 @@ class RouteSvc(threading.Thread):
             return False
         if time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0):
             return False
+        if bool(getattr(self, "_portal_follow_active", False)) and time.time() < float(
+            getattr(self, "_portal_move_settle_until", 0.0) or 0.0
+        ):
+            # A portal warp doesn't update state.x/y (OCR-based position
+            # tracking) instantly. Confirmed live: dosa warped
+            # 23,1 -up-> 23,0 -> (new map) 18,25, and before that landing
+            # was detected, ANOTHER "up" fired using the still-stale
+            # pre-warp target and walked it to 18,24 - which happened to be
+            # this door's own return trigger, sending it straight back to
+            # 23,1. Give position tracking a short window to catch up after
+            # every portal-follow step before allowing the next one.
+            return False
 
         cx, cy = self.state.x, self.state.y
         dx, dy = tx - cx, ty - cy
@@ -1551,6 +1563,8 @@ class RouteSvc(threading.Thread):
         hw.hold_move(step_dir, "move_hold", duration=hold_time)
         self.state.last_move_dir = step_dir
         self._mark_nav_attempt()
+        if portal_follow:
+            self._portal_move_settle_until = time.time() + 0.20
 
         arrived = abs(dx) <= 1 and abs(dy) <= 1
         if arrived:
