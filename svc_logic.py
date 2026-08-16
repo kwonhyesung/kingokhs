@@ -3162,12 +3162,21 @@ class LogicSvc(threading.Thread):
                 return True
             self._invalidate_warrior_redtab_verification()
             attempt_count = int(getattr(self, "_portal_retarget_attempt_count", 0) or 0)
-            if attempt_count >= 2:
-                # Cap red_tab retarget attempts after a portal move at 2 -
-                # after that, drop it and let the normal heal cycle retarget
-                # on its own instead of looping the esc->tab->tab sequence
-                # indefinitely.
-                print(f"[PortalFollow] red_tab retarget gave up after {attempt_count} attempts")
+            if attempt_count >= 4:
+                # Cap red_tab retarget attempts after a portal move - after
+                # that, drop it and let the normal heal cycle retarget on
+                # its own instead of looping the esc->tab->tab sequence
+                # indefinitely. Was capped at 2, which live logs show
+                # exhausting (leaving red_tab off entirely) when the
+                # warrior keeps moving through a chain of portals right
+                # after landing - by the time attempt 2's esc->tab->tab
+                # finishes (~0.5s), the distance<=4 window that let it
+                # start can already be gone. Raised to 4 to give a moving
+                # warrior more chances to be caught during a stable window.
+                print(
+                    f"[PortalFollow] red_tab retarget gave up after {attempt_count} "
+                    f"attempts (distance={warrior_distance})"
+                )
                 self.state.portal_follow_retarget_requested = False
                 self._party_direct_heal_target_prepared = False
                 self._pace_service_loop("active")

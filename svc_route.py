@@ -1080,6 +1080,7 @@ class RouteSvc(threading.Thread):
                 log_prefix=(
                     f"warrior transition detected now=({cur_x}, {cur_y}) "
                     f"coord_jump={coord_jumped} map_changed={map_changed} "
+                    f"map_info_changed={map_info_changed} event_prev={'yes' if event_prev else 'no'} "
                     f"event_seq={event_seq or '-'} step_dir={prev_step or '-'}"
                 ),
             )
