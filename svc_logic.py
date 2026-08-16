@@ -791,6 +791,12 @@ class LogicSvc(threading.Thread):
         self.state.support_targeting_active = True
         if not moving_follow:
             self._stop_support_movement_inputs()
+        else:
+            # See _prepare_direct_tab_heal_target for why this is needed even
+            # while following: support_input_blocked_until only stops future
+            # movement, not a key already physically held from a step
+            # RouteSvc issued just before this function started.
+            self._release_movement_keys_only()
         humanized_sleep(0.025, variance=0.08)
         for attempt in range(3):
             wait_between_tabs = random.uniform(
@@ -1311,6 +1317,19 @@ class LogicSvc(threading.Thread):
         self._set_support_input_block(0.75 if moving_follow else support_retarget_block_duration(False))
         if not moving_follow:
             self._stop_support_movement_inputs()
+        else:
+            # support_input_blocked_until only stops FUTURE hold_move() calls
+            # from starting - it does nothing about a direction key that's
+            # already physically down mid-hold from a step RouteSvc issued
+            # just before this ran (hold_move sleeps through its full
+            # duration in its own thread regardless of what this thread does
+            # concurrently). If that overlaps with esc/tab opening the
+            # target-select box below, the still-held key drives the box
+            # instead of the character and the red_tab lock never completes
+            # cleanly. Release just the arrow keys (not esc/enter/etc, unlike
+            # the full stop_all_inputs used in the non-follow branch above)
+            # so normal following isn't otherwise disrupted.
+            self._release_movement_keys_only()
         self._support_lock_search_until = time.time() + 0.60
         self.state.red_tab_promotion_active = False
         self.state.red_tab_promotion_until = 0.0
