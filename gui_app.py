@@ -3200,6 +3200,11 @@ class AppView:
         self._apply_control_mode(normalized)
         if normalized in {"FOLLOW_SERVICE", "F2"}:
             self._last_follow_service_activation_time = time.time()
+            try:
+                import svc_worker
+                svc_worker.rotate_claude_log()
+            except Exception:
+                pass
         print(f"[Hotkey] {label}: ON")
         self.show_toast(f"{label}: ON")
 

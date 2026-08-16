@@ -23,6 +23,112 @@ try:
 except Exception:
     pass
 
+
+class _ClaudeLogTee:
+    """print() 등 콘솔 출력을 원래 스트림과 로그 파일에 동시에 쓴다.
+    콘솔은 그대로 두고(사용자용), 파일 쪽은 Claude가 나중에 빠르게 읽을 수
+    있도록 매 틱 반복되는 저가치 라인(FollowROI/CycleDBG/F2Idle/Signal/
+    Nav arrived)은 걸러내서 용량과 토큰을 아낀다."""
+
+    _DROP_PREFIXES = (
+        "[FollowROI]",
+        "[CycleDBG]",
+        "[F2Idle]",
+        "[Signal]",
+        "[Nav] arrived",
+    )
+
+    def __init__(self, stream, log_file):
+        self._stream = stream
+        self._log_file = log_file
+        self._line_buf = ""
+
+    def write(self, data):
+        self._stream.write(data)
+        try:
+            self._line_buf += data
+            while "\n" in self._line_buf:
+                line, self._line_buf = self._line_buf.split("\n", 1)
+                if not line.lstrip().startswith(self._DROP_PREFIXES):
+                    self._log_file.write(line + "\n")
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        self._stream.flush()
+        try:
+            self._log_file.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+_claude_log_file = None
+_claude_log_tee_stdout = None
+_claude_log_tee_stderr = None
+_CLAUDE_LOG_KEEP = 10  # 오래된 세션 로그는 이 개수만 남기고 정리한다.
+
+
+def _open_new_claude_log_file():
+    from datetime import datetime as _dt
+
+    logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_path = os.path.join(logs_dir, f"claude_debug_{stamp}.log")
+    log_file = open(log_path, "w", encoding="utf-8", buffering=1)
+    try:
+        existing = sorted(
+            name for name in os.listdir(logs_dir)
+            if name.startswith("claude_debug_") and name.endswith(".log")
+        )
+        for stale_name in existing[:-_CLAUDE_LOG_KEEP]:
+            try:
+                os.remove(os.path.join(logs_dir, stale_name))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return log_file
+
+
+def _install_claude_log_tee():
+    """이번 실행부터의 콘솔 출력을 logs/claude_debug_<시각>.log에 남긴다.
+    콘솔 표시는 그대로 유지되고, 이 파일만 Claude가 나중에 직접 읽는 용도다."""
+    global _claude_log_file, _claude_log_tee_stdout, _claude_log_tee_stderr
+    try:
+        _claude_log_file = _open_new_claude_log_file()
+        _claude_log_tee_stdout = _ClaudeLogTee(sys.stdout, _claude_log_file)
+        _claude_log_tee_stderr = _ClaudeLogTee(sys.stderr, _claude_log_file)
+        sys.stdout = _claude_log_tee_stdout
+        sys.stderr = _claude_log_tee_stderr
+    except Exception:
+        pass
+
+
+def rotate_claude_log():
+    """F2(Follow+Service)가 켜질 때마다 이번 세션 전용 로그 파일로 새로 넘어간다
+    - Claude가 로그를 확인할 땐 항상 가장 최근 파일 하나만 읽으면 된다."""
+    global _claude_log_file
+    old_file = _claude_log_file
+    try:
+        new_file = _open_new_claude_log_file()
+    except Exception:
+        return
+    _claude_log_file = new_file
+    if _claude_log_tee_stdout is not None:
+        _claude_log_tee_stdout._log_file = new_file
+    if _claude_log_tee_stderr is not None:
+        _claude_log_tee_stderr._log_file = new_file
+    if old_file is not None:
+        try:
+            old_file.close()
+        except Exception:
+            pass
+
 from typing import Dict, Any, Optional, Tuple
 
 try:
@@ -178,6 +284,8 @@ def main(
     preset_network_role: Optional[str] = None,
     preset_auto_hunt: Optional[bool] = None,
 ):
+    _install_claude_log_tee()
+
     # 0. Validate config.json first.
     print("[Config] Validating config.json...")
     config_file = os.path.join(os.path.dirname(__file__), "config.json")
