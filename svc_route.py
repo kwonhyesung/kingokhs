@@ -1280,9 +1280,20 @@ class RouteSvc(threading.Thread):
         # the same key again (that can undo an already-successful transition
         # on doors where the same key works both ways); normal follow picks
         # the warrior back up, and a fresh transition re-arms.
+        after_pos_on_fail = (
+            int(getattr(self.state, "x", 0) or 0),
+            int(getattr(self.state, "y", 0) or 0),
+        )
+        # Same door/direction has now failed identically across several live
+        # sessions - this distinguishes two very different root causes for
+        # next time: if pos_after == pos_before, the keypress plausibly never
+        # reached the game at all (focus/hardware); if it moved but no map
+        # change followed, enter_dir or the approach tile is wrong for this
+        # specific door.
         print(
             f"[PortalFollow] portal enter failed: current={current_pos}, "
-            f"warrior_last={warrior_last}, enter_dir={enter_dir}"
+            f"warrior_last={warrior_last}, enter_dir={enter_dir}, "
+            f"pos_after_tap={after_pos_on_fail} moved={after_pos_on_fail != current_pos}"
         )
         self._finish_portal_follow(f"enter_failed enter_dir={enter_dir}")
         return True
