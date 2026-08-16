@@ -814,6 +814,21 @@ class RouteSvc(threading.Thread):
         print(portal_arm_line)
         discord_notify(portal_arm_line)
 
+    def _remember_warrior_coord(self, cur_x: int, cur_y: int, map_sig, dps_dir, remote_data: dict) -> None:
+        """Record where we last saw the warrior. Every exit point of
+        _update_portal_follow_state must call this - skipping it leaves
+        _last_warrior_coord frozen, which makes the next call's distance
+        checks compare against a stale point instead of the real last-seen
+        position (this is what caused the coord-jump re-arm loop)."""
+        self._last_warrior_coord = (cur_x, cur_y)
+        self._last_warrior_coord_ts = float(remote_data.get("_received_at") or 0.0) or time.time()
+        self._last_warrior_map_sig = map_sig
+        if dps_dir:
+            self._last_warrior_dir = dps_dir
+        cur_fp = str(remote_data.get("map_info_fingerprint", "") or "")
+        if cur_fp:
+            self._last_warrior_fingerprint = cur_fp
+
     def _update_portal_follow_state(self, remote_data: dict | None) -> None:
         if not isinstance(remote_data, dict):
             return
@@ -895,6 +910,13 @@ class RouteSvc(threading.Thread):
                             f"(superseding stale portal-follow) event_seq={event_seq or '-'}"
                         ),
                     )
+                    # _last_warrior_coord must move up to (cur_x, cur_y) here too -
+                    # leaving it stale (as before) made every later call keep
+                    # comparing against this same pre-transition point, so an
+                    # unrelated coordinate-jump check further down kept firing
+                    # on distance that was really just "how far we drifted since
+                    # we stopped updating this", not a new jump.
+                    self._remember_warrior_coord(cur_x, cur_y, map_sig, dps_dir, remote_data)
                     return
             if (
                 cur_ok
@@ -929,6 +951,13 @@ class RouteSvc(threading.Thread):
                             source_map_sig=source_map_sig,
                             log_prefix="warrior coord jump superseding stale portal-follow",
                         )
+                        # Same fix as the event_seq branch above: without this,
+                        # _last_warrior_coord stayed frozen at the pre-jump spot,
+                        # so the very next signal recomputed the same huge
+                        # "jump_distance" from that same stale point and re-armed
+                        # to the same (cur_x, cur_y) again - live logs showed this
+                        # looping several times in a row on an unchanged target.
+                        self._remember_warrior_coord(cur_x, cur_y, map_sig, dps_dir, remote_data)
                         return
             if cur_ok:
                 if prev and (prev[0], prev[1]) != (cur_x, cur_y):
@@ -936,14 +965,7 @@ class RouteSvc(threading.Thread):
                         step = dir_between_coords(prev[0], prev[1], cur_x, cur_y)
                         if step:
                             self._last_warrior_step_dir = step
-                self._last_warrior_coord = (cur_x, cur_y)
-                self._last_warrior_coord_ts = float(remote_data.get("_received_at") or 0.0) or time.time()
-                self._last_warrior_map_sig = map_sig
-                if dps_dir:
-                    self._last_warrior_dir = dps_dir
-                cur_fp = str(remote_data.get("map_info_fingerprint", "") or "")
-                if cur_fp:
-                    self._last_warrior_fingerprint = cur_fp
+                self._remember_warrior_coord(cur_x, cur_y, map_sig, dps_dir, remote_data)
             return
 
         # Same fallback as LogicSvc's _handle_warrior_transition_immediate_clear
