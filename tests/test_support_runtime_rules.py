@@ -336,6 +336,32 @@ def test_game_state_ignores_stale_physical_key():
     assert payload["coord_transition"]["input_dir"] == "left"
 
 
+def test_game_state_marks_from_confidence_high_only_with_fresh_key_press():
+    state = GameState()
+    state.x = 31
+    state.y = 1
+    state.physical_last_move_dir = "up"
+    state.physical_last_move_dir_ts = time.time()
+    state.build_share_payload()
+
+    state.x = 27
+    state.y = 3
+    payload = state.build_share_payload()["status"]
+    assert payload["coord_transition"]["from_confidence"] == "high"
+
+
+def test_game_state_marks_from_confidence_low_without_key_press():
+    state = GameState()
+    state.x = 31
+    state.y = 1
+    state.build_share_payload()
+
+    state.x = 27
+    state.y = 3
+    payload = state.build_share_payload()["status"]
+    assert payload["coord_transition"]["from_confidence"] == "low"
+
+
 def test_game_state_shares_map_info_text_for_cross_pc_map_compare():
     state = GameState()
     state.map_info_text = "선비족입구"

@@ -843,6 +843,7 @@ class RouteSvc(threading.Thread):
         event_dir = None
         event_seq = 0
         event_age = None
+        event_from_confidence = "low"
         event_data = remote_data.get("coord_transition")
         if isinstance(event_data, dict):
             try:
@@ -860,6 +861,7 @@ class RouteSvc(threading.Thread):
                 ):
                     event_prev = (event_x, event_y)
                     event_dir = normalize_move_dir(event_data.get("dir") or event_data.get("input_dir"))
+                    event_from_confidence = str(event_data.get("from_confidence") or "low")
                     self._last_coord_transition_seq = event_seq
             except Exception:
                 event_prev = None
@@ -1004,6 +1006,23 @@ class RouteSvc(threading.Thread):
                 cache_key = portal_cache_key(source_map_sig, transition_prev[0], transition_prev[1])
                 cached_hint = dict(self.state.portal_session_cache.get(cache_key, {}) or {})
             cached_dir = normalize_move_dir(cached_hint.get("enter_dir"))
+            if event_prev is not None and not cached_dir and event_from_confidence == "low":
+                # A jump this big is still trusted as a real portal, but
+                # without a fresh key-press timestamp corroborating it, the
+                # captured "from" tile itself might already be a step or two
+                # past the actual door (a capture hiccup right at the
+                # crossing instant). Standing at the wrong tile and tapping
+                # a direction does nothing useful - just keep following the
+                # warrior's live position instead of arming a door-tap.
+                if cur_ok:
+                    self._last_warrior_coord = (cur_x, cur_y)
+                    self._last_warrior_coord_ts = float(remote_data.get("_received_at") or 0.0) or time.time()
+                    self._last_warrior_map_sig = map_sig
+                print(
+                    f"[PortalFollow] transition from={transition_prev} low confidence "
+                    f"(no fresh key press near capture); following warrior directly instead of arming door tap"
+                )
+                return False
             # A direction confirmed at this exact portal beats a guess from
             # noisy/stale telemetry (warrior's self-reported last_move_dir can
             # lag the actual key held at the moment of transition).

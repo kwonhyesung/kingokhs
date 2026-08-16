@@ -1404,15 +1404,20 @@ class LogicSvc(threading.Thread):
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
         previous_follow = bool(getattr(self.state, "nav_follow_enabled", False))
-        estimated_duration = 0.35 + (max(1, int(repeat_count or 1)) * 0.22)
-        self._pause_follow_for_action(duration=max(1.6, estimated_duration + 0.8))
-        self._set_support_input_block(1.8)
+        # tick_interval below was 0.20s/rep with only ~0.13s of actual key
+        # delay - the rest was pure padding. Tightened to 0.14s (still above
+        # the raw key-press floor as a safety margin); these durations scale
+        # with it so follow-pause/input-block don't stay slower than the
+        # cast itself.
+        estimated_duration = 0.30 + (max(1, int(repeat_count or 1)) * 0.16)
+        self._pause_follow_for_action(duration=max(1.1, estimated_duration + 0.5))
+        self._set_support_input_block(1.3)
         self._stop_support_movement_inputs()
         previous_busy = bool(getattr(self.state, "is_combat_busy", False))
         self._set_combat_busy(True)
         try:
             print("[Hon] follow paused. Cast ESC>6>UP>ENTER.")
-            tick_interval = 0.20
+            tick_interval = 0.14
             sequence = build_f5_hon_sequence(repeat_count=repeat_count)
             for idx in range(0, len(sequence), 4):
                 tick_started = time.perf_counter()

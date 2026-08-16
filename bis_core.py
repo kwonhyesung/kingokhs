@@ -780,6 +780,19 @@ class GameState:
                     # portal (see last_move_dir's docstring above).
                     input_dir = phys_dir if phys_fresh else normalize_move_dir(self.last_move_dir)
                     delta_dir = dir_between_coords(prev[0], prev[1], cur[0], cur[1])
+                    # "from" is whatever coordinate our own OCR last captured
+                    # before this jump - usually accurate, but a capture
+                    # hiccup exactly at the portal-crossing instant can leave
+                    # it already a step or two into the new area. A real key
+                    # press timestamped right around now is decent evidence
+                    # the capture kept up; without one, the receiver should
+                    # treat "from" as low-confidence (a place to walk toward,
+                    # not a precise door tile to tap a direction from).
+                    key_gap = (
+                        abs(time.time() - float(self.physical_last_move_dir_ts or 0.0))
+                        if self.physical_last_move_dir_ts else None
+                    )
+                    from_confidence = "high" if (phys_fresh and key_gap is not None and key_gap <= 1.0) else "low"
                     self.last_coord_transition_seq += 1
                     self.last_coord_transition = {
                         "seq": self.last_coord_transition_seq,
@@ -789,6 +802,7 @@ class GameState:
                         "dir": input_dir or delta_dir,
                         "input_dir": input_dir,
                         "delta_dir": delta_dir,
+                        "from_confidence": from_confidence,
                         "map_changed": map_changed,
                         "map_sig": list(map_sig),
                         "ts": time.time(),
