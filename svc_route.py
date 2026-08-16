@@ -1527,17 +1527,24 @@ class RouteSvc(threading.Thread):
         hold_time = max(0.050, min(0.180, random.gauss(hold_time, 0.007)))
         in_combat = self._is_in_combat()
         input_blocked = time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0)
-        if in_combat or input_blocked:
-            # Live logs showed the dosa freeze completely for many seconds
-            # while portal_follow_active with no further clue why - this
-            # pins down which of the two gates (ordinary combat targeting a
-            # monster vs. a lingering support_input_blocked_until) is
-            # actually responsible next time it happens, instead of guessing.
+        # hw.hold_move() itself (bis_core.py) also silently no-ops on
+        # support_targeting_active / red_tab_promotion_active / is_combat_busy
+        # - the original diagnostic only checked two of these four gates, so
+        # a freeze caused by an in-progress red_tab retarget (e.g. the
+        # "heal anyway" critical-HP override that can fire mid portal-follow)
+        # would sail through this check and call hold_move anyway, which
+        # would then silently do nothing with no explanation in the log.
+        support_targeting = bool(getattr(self.state, "support_targeting_active", False)) or bool(
+            getattr(self.state, "red_tab_promotion_active", False)
+        )
+        hw_combat_busy = bool(getattr(self.state, "is_combat_busy", False))
+        if in_combat or input_blocked or support_targeting or hw_combat_busy:
             if portal_follow and (time.time() - float(getattr(self, "_last_portal_move_block_log_time", 0.0) or 0.0)) >= 1.0:
                 print(
                     f"[NavBlock] portal-follow movement withheld: in_combat={in_combat} "
                     f"target_locked={bool(getattr(self.state, 'target_locked', False))} "
-                    f"input_blocked={input_blocked}"
+                    f"input_blocked={input_blocked} support_targeting={support_targeting} "
+                    f"is_combat_busy={hw_combat_busy}"
                 )
                 self._last_portal_move_block_log_time = time.time()
             return False
