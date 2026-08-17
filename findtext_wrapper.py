@@ -1,7 +1,9 @@
 """
 FindText 라이브러리 Python 포팅
-ft.ahk의 핵심 기능을 Python으로 구현
+ft.ahk의 핵심 기능을 Python으로 구현 (mode 2: Gray Threshold만 지원 — 이 저장소의
+모든 패턴 데이터가 mode 2이므로 다른 모드는 포팅하지 않음. 상세: FINDTEXT_PORT_DESIGN.md)
 """
+import re
 import cv2
 import numpy as np
 import subprocess
@@ -14,6 +16,9 @@ try:
     from ahk_engine import AHKEngine
 except ImportError:
     AHKEngine = None
+
+# ft.ahk 전용 base64 문자셋 (표준 base64와 순서가 다름)
+AHK_CHARS = "0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 
 class FindText:
@@ -71,14 +76,150 @@ class FindText:
                 result += char_to_bits[c]
         
         # 0과 1이 아닌 문자 제거
-        import re
         result = re.sub(r'[^01]', '', result)
         # 끝의 "10*" 패턴 제거
         result = re.sub(r'10*$', '', result)
-        
+
         return result
-    
-    def find_text(self, 
+
+    def bit2base64(self, bits: str) -> str:
+        """
+        비트 문자열('0'/'1')을 ft.ahk base64 문자열로 인코딩 (base64tobit의 역함수).
+        ft.ahk bit2base64()와 동일: 6의 배수로 맞추기 위해 "100000"에서 필요한
+        만큼(1~6자)을 뒤에 붙인 뒤(정지비트) 6비트씩 끊어 문자로 변환.
+        """
+        bits = re.sub(r'[^01]', '', bits)
+        pad = 6 - (len(bits) % 6)
+        bits += "100000"[:pad]
+        return "".join(AHK_CHARS[int(bits[i:i+6], 2)] for i in range(0, len(bits), 6))
+
+    def auto_threshold(self, roi_bgr: np.ndarray) -> int:
+        """
+        ft.ahk 캡처 도구의 자동 임계값 탐지(반복 등분 평균법, ft.ahk:1936-1958)를 이식.
+        """
+        gray = roi_bgr[:,:,2].astype(np.int64)*38 + roi_bgr[:,:,1].astype(np.int64)*75 + roi_bgr[:,:,0].astype(np.int64)*15
+        gs = (gray >> 7).clip(0, 255)
+        hist = np.bincount(gs.ravel(), minlength=256)[:256].astype(np.int64)
+        idx = np.arange(256, dtype=np.int64)
+
+        IP0 = int(np.sum(idx * hist))
+        IS0 = int(np.sum(hist))
+        if IS0 == 0:
+            return 127
+        thr = IP0 // IS0
+        for _ in range(20):
+            last = thr
+            IP1 = int(np.sum(idx[:last+1] * hist[:last+1]))
+            IS1 = int(np.sum(hist[:last+1]))
+            IP2, IS2 = IP0 - IP1, IS0 - IS1
+            if IS1 != 0 and IS2 != 0:
+                thr = int((IP1 / IS1 + IP2 / IS2) / 2)
+            if thr == last:
+                break
+        return thr
+
+    def auto_crop_margins(self, bits: str, w: int) -> tuple:
+        """
+        ft.ahk GetTextFromScreen()의 여백 자동 크롭 이식 (ft.ahk:1967-1976, cut=1 기본값).
+        맨 위/아래에서 한 행 전체가 전부 '0'이거나 전부 '1'인 동안 계속 제거한다
+        (배경만 있는 빈 줄이든, 전경으로 꽉 찬 줄이든 상관없이 — ft.ahk 원본과 동일).
+        반환: (잘린 비트열, cut_up 행수, cut_down 행수)
+        """
+        cut_up = cut_down = 0
+        while bits[:w] == "0" * w or bits[:w] == "1" * w:
+            bits = bits[w:]
+            cut_up += 1
+        while bits[-w:] == "0" * w or bits[-w:] == "1" * w:
+            bits = bits[:-w]
+            cut_down += 1
+        return bits, cut_up, cut_down
+
+    def capture_pattern(self, roi_bgr: np.ndarray, threshold: Optional[int] = None,
+                         comment: str = "", cut: bool = True) -> str:
+        """
+        화면 ROI(BGR 이미지)를 ft.ahk 호환 FindText 패턴 문자열로 변환.
+        threshold가 None이면 auto_threshold()로 자동 산출 (ft.ahk 캡처 도구와 동일 동작).
+        cut=True(기본값, ft.ahk의 GetTextFromScreen과 동일)면 위/아래 여백 행을
+        자동으로 잘라낸다 — 완전히 잘려서 빈 문자열이 되면(예: ROI 전체가 단색) 크롭을
+        포기하고 원본을 그대로 쓴다.
+        결과 형식: "|<comment>*threshold$width.base64data"
+        """
+        h, w = roi_bgr.shape[:2]
+        if w < 1 or h < 1:
+            raise ValueError("ROI가 비어 있습니다")
+        if threshold is None:
+            threshold = self.auto_threshold(roi_bgr)
+
+        gray = roi_bgr[:,:,2].astype(np.int64)*38 + roi_bgr[:,:,1].astype(np.int64)*75 + roi_bgr[:,:,0].astype(np.int64)*15
+        gs = gray >> 7
+        bits = "".join("1" if v <= threshold else "0" for v in gs.flatten())
+
+        if cut:
+            cropped, cut_up, cut_down = self.auto_crop_margins(bits, w)
+            if cropped:
+                bits = cropped
+
+        return f"|<{comment}>*{threshold}${w}.{self.bit2base64(bits)}"
+
+    def sample_ink_color(self, roi_bgr: np.ndarray, threshold: Optional[int] = None):
+        """
+        ROI에서 "잉크"(threshold 이하로 어두운) 픽셀들의 평균 RGB를 뽑아준다.
+        색상 모드 패턴을 만들 때 기본 색상 후보를 자동 제안하는 용도.
+        반환: (r, g, b)
+        """
+        if threshold is None:
+            threshold = self.auto_threshold(roi_bgr)
+        gray = roi_bgr[:,:,2].astype(np.int64)*38 + roi_bgr[:,:,1].astype(np.int64)*75 + roi_bgr[:,:,0].astype(np.int64)*15
+        gs = gray >> 7
+        mask = gs <= threshold
+        if not np.any(mask):
+            mask = np.ones(gs.shape, dtype=bool)
+        b = int(roi_bgr[:, :, 0][mask].mean())
+        g = int(roi_bgr[:, :, 1][mask].mean())
+        r = int(roi_bgr[:, :, 2][mask].mean())
+        return r, g, b
+
+    def capture_pattern_color(self, roi_bgr: np.ndarray, colors: List[Any],
+                               threshold: Optional[int] = None, comment: str = "",
+                               cut: bool = True) -> str:
+        """
+        색상 모드 패턴 생성. 모양(shape)은 capture_pattern()과 동일하게 threshold
+        이진화로 추출하고, 색상만 별도로 붙인다 — 같은 모양에 색상만 바꿔가며
+        여러 패턴을 만들 수 있다 ("동일 패턴 + 다른 색상" 멀티서치용).
+
+        colors: [(r,g,b,tol), ...] 또는 [("RRGGBB", tol), ...] 둘 다 허용.
+                여러 개 넣으면 그중 하나라도(OR) 맞으면 매치.
+        결과 형식: "|<comment>@RRGGBB~TOL,...$width.base64shape"
+        """
+        h, w = roi_bgr.shape[:2]
+        if w < 1 or h < 1:
+            raise ValueError("ROI가 비어 있습니다")
+        if not colors:
+            raise ValueError("colors가 비어 있습니다 (색상 후보 최소 1개 필요)")
+        if threshold is None:
+            threshold = self.auto_threshold(roi_bgr)
+
+        gray = roi_bgr[:,:,2].astype(np.int64)*38 + roi_bgr[:,:,1].astype(np.int64)*75 + roi_bgr[:,:,0].astype(np.int64)*15
+        gs = gray >> 7
+        bits = "".join("1" if v <= threshold else "0" for v in gs.flatten())
+
+        if cut:
+            cropped, _, _ = self.auto_crop_margins(bits, w)
+            if cropped:
+                bits = cropped
+
+        tokens = []
+        for c in colors:
+            if len(c) == 2:
+                hexcode, tol = c
+            else:
+                r, g, b, tol = c
+                hexcode = f"{r:02X}{g:02X}{b:02X}"
+            tokens.append(f"{str(hexcode).upper().lstrip('#')}~{int(tol)}")
+
+        return f"|<{comment}>@{','.join(tokens)}${w}.{self.bit2base64(bits)}"
+
+    def find_text(self,
                   text: str,
                   x1: int = 0, y1: int = 0, 
                   x2: int = 0, y2: int = 0,
@@ -109,113 +250,127 @@ class FindText:
             
         results = []
         for p in patterns:
-            res = self._template_match_native(screenshot, p, err1, err0, find_all)
+            if p.get('mode') == 'color':
+                res = self._template_match_color(screenshot, p, err1, find_all)
+            else:
+                res = self._template_match_native(screenshot, p, err1, err0, find_all)
             results.extend(res)
             if not find_all and results:
                 break
-                
+
         return results
 
-    def _template_match_native(self, 
+    def _template_match_native(self,
                              roi_bgr: np.ndarray,
                              p: Dict[str, Any],
-                             err1: float = 0.1, err0: float = 0.1, 
+                             err1: float = 0.1, err0: float = 0.1,
                              find_all: bool = True) -> List[Dict[str, Any]]:
         """
-        ft.ahk Native 방식의 템플릿 매칭 (Python 포팅 - mode=2 Gray Threshold)
-        
+        ft.ahk Native 방식의 템플릿 매칭 (mode=2 Gray Threshold, 픽셀 단위 정확 매칭).
+
+        ft.ahk와 동일한 알고리즘(오차 허용 err1/err0 기반 정확 매칭)이지만, 매칭 위치
+        전체를 cv2.matchTemplate(TM_CCORR) 상관연산 한 번으로 벡터 계산한다 (Python
+        이중 for문 대신). 자세한 유도는 FINDTEXT_PORT_DESIGN.md §3.4 참고.
+
         Args:
             roi_bgr: ROI 영역 (BGR)
             p: 패턴 딕셔너리 {'bitmap': np.ndarray, 'width': int, 'height': int, 'color': int}
             err1: 글자 픽셀 오차 허용율 (0.1 = 10%)
             err0: 배경 픽셀 오차 허용율 (0.1 = 10%)
             find_all: 모든 매칭 반환 여부
-        
+
         Returns:
             매칭 결과 리스트 [{'x': int, 'y': int, 'w': int, 'h': int, 'id': str}, ...]
+            x, y는 매칭된 좌상단 좌표(ROI 기준, ft.ahk의 1,2 필드와 동일)
         """
-        # 1. ft.ahk 방식 이진화 (mode=2: Gray Threshold Mode)
         thr = p.get('color', 127)
         c = (thr + 1) << 7  # ft.ahk: c=(c+1)<<7
-        # ft.ahk: Bmp[2+o]*38+Bmp[1+o]*75+Bmp[o]*15 < c
-        # BGR 순서: B=0, G=1, R=2
+        # ft.ahk: gray = R*38+G*75+B*15 ; BGR 순서이므로 B=0, G=1, R=2
         gray = roi_bgr[:,:,2].astype(np.uint32)*38 + roi_bgr[:,:,1].astype(np.uint32)*75 + roi_bgr[:,:,0].astype(np.uint32)*15
-        screen_bin = (gray < c).astype(np.uint8)
-        
-        # PatternMatcher의 decode_ahk_pattern이 이미 0/1 비트맵을 반환하므로 추가 이진화 제거
-        pattern_bin = p['bitmap'].astype(np.uint8)
+        screen_bin = (gray < c).astype(np.float32)
 
-        # 2. 매칭 좌표 추출 (ft.ahk 원래 방식: '1'이 글자 픽셀)
-        y1_idx, x1_idx = np.where(pattern_bin == 1)  # 글자 픽셀 (1)
-        y0_idx, x0_idx = np.where(pattern_bin == 0)  # 배경 픽셀 (0)
+        pattern_bin = (p['bitmap'] > 0).astype(np.float32)
+        ph, pw = pattern_bin.shape
+        sh, sw = screen_bin.shape
+        if ph > sh or pw > sw:
+            return []
 
-        len1, len0 = len(y1_idx), len(y0_idx)
-        
-        # ft.ahk: err1=(len1*err1)>>10, err0=(len0*err0)>>10
+        len1 = int(np.sum(pattern_bin))
+        len0 = ph * pw - len1
+
         e1_max = (len1 * int(err1 * 1024)) >> 10
         e0_max = (len0 * int(err0 * 1024)) >> 10
-        
-        # ft.ahk: if (err1>=len1) len1=0; if (err0>=len0) len0=0
         if e1_max >= len1:
             len1 = 0
         if e0_max >= len0:
             len0 = 0
 
-        # 디버그: 비활성화 (CPU 부하 감소)
-        # if not hasattr(self, '_debug_match_logged'):
-        #     print(f"[FindText] _template_match_native: screen shape={screen_bin.shape}, pattern shape={pattern_bin.shape}, len1={len1}, len0={len0}, e1_max={e1_max}, e0_max={e0_max}")
-        #     print(f"[FindText] screen_bin sum={np.sum(screen_bin)}, pattern_bin sum={np.sum(pattern_bin)}")
-        #     print(f"[FindText] screen_bin sample: {screen_bin[0:5, 0:5]}")
-        #     print(f"[FindText] pattern_bin sample: {pattern_bin[0:5, 0:5]}")
-        #     self._debug_match_logged = True
+        out_h, out_w = sh - ph + 1, sw - pw + 1
+        ok = np.ones((out_h, out_w), dtype=bool)
 
-        # 실시간 이진화 디버그 저장 (비활성화)
-        # try:
-        #     os.makedirs("ocr_debug", exist_ok=True)
-        #     cv2.imwrite("ocr_debug/current_screen_bin.png", screen_bin * 255)
-        #     print(f"[FindText] Saved screen_bin to ocr_debug/current_screen_bin.png")
-        # except Exception as e:
-        #     print(f"[FindText] Failed to save screen_bin: {e}")
+        if len1 > 0:
+            corr1 = cv2.matchTemplate(screen_bin, pattern_bin, cv2.TM_CCORR)
+            mismatch1 = len1 - np.round(corr1).astype(np.int32)
+            ok &= (mismatch1 <= e1_max)
 
-        sh, sw = screen_bin.shape
+        if len0 > 0:
+            pattern0_mask = 1.0 - pattern_bin
+            corr0 = cv2.matchTemplate(screen_bin, pattern0_mask, cv2.TM_CCORR)
+            mismatch0 = np.round(corr0).astype(np.int32)
+            ok &= (mismatch0 <= e0_max)
+
+        ys, xs = np.where(ok)
+        comment = p.get('comment', '')
+        if not find_all:
+            if len(ys) == 0:
+                return []
+            return [{'x': int(xs[0]), 'y': int(ys[0]), 'w': pw, 'h': ph, 'id': comment}]
+
+        return [{'x': int(x), 'y': int(y), 'w': pw, 'h': ph, 'id': comment}
+                for y, x in zip(ys, xs)]
+
+    def _template_match_color(self, roi_bgr: np.ndarray, p: Dict[str, Any],
+                               err1: float = 0.1, find_all: bool = True) -> List[Dict[str, Any]]:
+        """
+        색상 모드 매칭. p['bitmap']의 '1'(잉크) 위치들이 p['colors']에 나열된 색상
+        중 하나라도(OR, 채널별 절대차 tolerance) 맞으면 그 위치는 매치로 카운트한다.
+        배경(잉크가 아닌) 픽셀의 색은 검사하지 않는다 — 캐릭터/아이콘 뒤 배경 타일이
+        달라도 매치되게 하려는 의도적 설계. err1은 mode2와 동일한 오차 허용
+        방식(허용 가능한 미스매치 잉크 픽셀 개수)을 재사용한다.
+        """
+        pattern_bin = (p['bitmap'] > 0).astype(np.float32)
         ph, pw = pattern_bin.shape
-        
+        sh, sw = roi_bgr.shape[:2]
         if ph > sh or pw > sw:
             return []
 
-        results = []
-        min_mismatch1 = len1
-        min_mismatch0 = len0
+        b = roi_bgr[:, :, 0].astype(np.int16)
+        g = roi_bgr[:, :, 1].astype(np.int16)
+        r = roi_bgr[:, :, 2].astype(np.int16)
 
-        for y in range(sh - ph + 1):
-            for x in range(sw - pw + 1):
-                crop = screen_bin[y:y+ph, x:x+pw]
-                
-                mismatch1 = 0
-                if len1 > 0:
-                    mismatch1 = np.sum(crop[y1_idx, x1_idx] == 0)
-                    min_mismatch1 = min(min_mismatch1, mismatch1)
-                    if mismatch1 > e1_max:
-                        continue
-                
-                mismatch0 = 0
-                if len0 > 0:
-                    mismatch0 = np.sum(crop[y0_idx, x0_idx] == 1)
-                    min_mismatch0 = min(min_mismatch0, mismatch0)
-                    if mismatch0 > e0_max:
-                        continue
-                
-                results.append({'x': x, 'y': y, 'w': pw, 'h': ph, 'id': p.get('comment', '')})
-                if not find_all:
-                    return results
+        color_ok = np.zeros((sh, sw), dtype=bool)
+        for cr, cg, cb, tol in p['colors']:
+            color_ok |= ((np.abs(r - cr) <= tol) & (np.abs(g - cg) <= tol) & (np.abs(b - cb) <= tol))
 
-        # 디버그: 최소 mismatch 로그
-        if not hasattr(self, '_debug_min_mismatch_logged'):
-            print(f"[FindText] Min mismatch: mismatch1={min_mismatch1}/{len1}, mismatch0={min_mismatch0}/{len0}, e1_max={e1_max}, e0_max={e0_max}, results={len(results)}")
-            self._debug_min_mismatch_logged = True
+        len1 = int(np.sum(pattern_bin))
+        if len1 == 0:
+            return []
+        e1_max = (len1 * int(err1 * 1024)) >> 10
 
-        return results
-    
+        corr1 = cv2.matchTemplate(color_ok.astype(np.float32), pattern_bin, cv2.TM_CCORR)
+        mismatch1 = len1 - np.round(corr1).astype(np.int32)
+        match_mask = mismatch1 <= e1_max
+
+        ys, xs = np.where(match_mask)
+        comment = p.get('comment', '')
+        if not find_all:
+            if len(ys) == 0:
+                return []
+            return [{'x': int(xs[0]), 'y': int(ys[0]), 'w': pw, 'h': ph, 'id': comment}]
+
+        return [{'x': int(x), 'y': int(y), 'w': pw, 'h': ph, 'id': comment}
+                for y, x in zip(ys, xs)]
+
     def _parse_text_pattern(self, text: str) -> Optional[Dict[str, Any]]:
         """
         FindText 형식의 텍스트 패턴 파싱
@@ -223,23 +378,24 @@ class FindText:
         :param text: FindText 형식의 텍스트
         :return: {bitmap, width, height, mode, comment} 또는 None
         """
-        import re
-        
         try:
-            # 파이프로 구분된 여러 패턴 처리
-            if '|' in text and not text.startswith('|'):
-                patterns = text.split('|')
-                return [self._parse_single_pattern(p) for p in patterns if p]
-            
-            return self._parse_single_pattern(text)
+            # ft.ahk 관례상 패턴 컬렉션은 항상 선행 '|'로 시작한다
+            # (Text:="|<0>...|<1>...") — AHK의 `Loop Parse, text, "|"`는 그
+            # 선행 구분자가 만드는 빈 첫 토큰을 그냥 건너뛴다. 여기서도 동일하게
+            # 선행 '|'를 제거하고 나서 분리해야, 단일 패턴('|<0>*117$...')의
+            # comment/threshold가 올바르게 파싱된다.
+            body = text[1:] if text.startswith('|') else text
+            if '|' in body:
+                patterns = [self._parse_single_pattern(p) for p in body.split('|') if p]
+                return patterns if len(patterns) > 1 else (patterns[0] if patterns else None)
+
+            return self._parse_single_pattern(body)
         except Exception as e:
             print(f"Pattern parsing error: {e}")
             return None
     
     def _parse_single_pattern(self, text: str) -> Optional[Dict[str, Any]]:
         """단일 FindText 패턴 파싱"""
-        import re
-        
         text = text.strip()
         if not text:
             return None
@@ -258,11 +414,16 @@ class FindText:
         # $로 분리
         if '$' not in text:
             return None
-        
+
         parts = text.split('$', 1)
         color_part = parts[0]
         data_part = parts[1]
-        
+
+        # 색상 모드 (이 엔진 자체 확장 문법, ft.ahk에는 없음 — FINDTEXT_PORT_DESIGN.md §9 참고)
+        # 형식: @RRGGBB~TOL,RRGGBB2~TOL2$width.base64shape
+        if color_part.startswith('@'):
+            return self._parse_color_pattern(color_part, data_part, comment)
+
         # color_part에서 모드 결정 (ft.ahk PicInfo 함수 참조)
         # mode:=InStr(color,"##") ? 5 : InStr(color,"#") ? 4
         #   : InStr(color,"**") ? 3 : InStr(color,"*") ? 2 : 1
@@ -319,8 +480,48 @@ class FindText:
             'comment': comment,
             'color': color_value
         }
-    
-    def _template_match(self, 
+
+    def _parse_color_pattern(self, color_part: str, data_part: str,
+                              comment: str) -> Optional[Dict[str, Any]]:
+        """
+        색상 모드 패턴 파싱: '@RRGGBB~TOL,RRGGBB2~TOL2$width.base64shape'
+        모양(shape)은 흑백 모드와 동일한 0/1 비트맵이다(어떤 픽셀이 "잉크"인지).
+        그 잉크 픽셀들의 실제 화면 RGB가 나열된 색상 후보 중 하나라도(OR) 허용오차
+        내에 들면 매치. 같은 모양을 색상만 바꿔 여러 개 만들면 "동일 패턴 + 다른
+        색상" 멀티서치가 된다 (find_text 텍스트에서 '|'로 이어붙이면 됨).
+        """
+        dot_match = re.match(r'(\d+)\.([\w+/]+)', data_part)
+        if not dot_match:
+            return None
+        width = int(dot_match.group(1))
+        bit_string = self.base64tobit(dot_match.group(2))
+        height = len(bit_string) // width
+        if width < 1 or height < 1:
+            return None
+
+        bitmap = np.zeros((height, width), dtype=np.uint8)
+        for i, bit in enumerate(bit_string[:width * height]):
+            bitmap[i // width, i % width] = 255 if bit == '1' else 0
+
+        colors = []
+        for entry in color_part[1:].split(','):
+            entry = entry.strip()
+            if not entry:
+                continue
+            hexcode, _, tol = entry.partition('~')
+            hexcode = hexcode.strip().lstrip('#')
+            tol = int(tol) if tol else 20
+            r, g, b = int(hexcode[0:2], 16), int(hexcode[2:4], 16), int(hexcode[4:6], 16)
+            colors.append((r, g, b, tol))
+        if not colors:
+            return None
+
+        return {
+            'bitmap': bitmap, 'width': width, 'height': height,
+            'mode': 'color', 'colors': colors, 'comment': comment,
+        }
+
+    def _template_match(self,
                        screen: np.ndarray,
                        pattern_data: Any,
                        err1: float, err0: float,
