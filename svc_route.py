@@ -273,6 +273,7 @@ class RouteSvc(threading.Thread):
         self._last_portal_follow_log_time = 0.0
         self._last_self_portal_coord: tuple[int, int] | None = None
         self._portal_enter_attempted = False
+        self._portal_follow_creep_count = 0
         self.state.portal_follow_active = False
         self.state.portal_follow_retarget_requested = False
         self.state.portal_follow_coord = None
@@ -796,6 +797,7 @@ class RouteSvc(threading.Thread):
         self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
         self._portal_follow_started_at = started
         self._portal_enter_attempted = False
+        self._portal_follow_creep_count = 0
         self._last_self_portal_coord = (int(self.state.x), int(self.state.y))
         self._blocked_cells_until.clear()
         self._blocked_cell_hits.clear()
@@ -1932,6 +1934,31 @@ class RouteSvc(threading.Thread):
                     follow_gap = follow_manhattan_gap(tx, ty, cx, cy)
                     hold_follow_gap = 0 if bool(getattr(self, "_portal_follow_active", False)) else int(getattr(self, "_support_follow_hold_distance", 1) or 1)
                     if should_hold_follow_position(tx, ty, cx, cy, max_gap=hold_follow_gap):
+                        if bool(getattr(self, "_portal_follow_active", False)):
+                            # Reaching the extended nav target does not always mean
+                            # the door actually triggered - one tile past the
+                            # reported approach is not always enough. Confirmed live:
+                            # the dosa sat here at gap=0 printing "within follow
+                            # range" for many seconds while the warrior kept walking
+                            # away, and the door never crossed. Instead of parking
+                            # here indefinitely, creep one more tile forward in the
+                            # same direction and keep trying - capped so a genuinely
+                            # wrong direction does not walk it off forever.
+                            creep_count = int(getattr(self, "_portal_follow_creep_count", 0) or 0)
+                            if self._portal_follow_dir and creep_count < 3:
+                                self._portal_follow_creep_count = creep_count + 1
+                                self._portal_follow_coord = _nav_step_from_dir(
+                                    int(self._portal_follow_coord[0]),
+                                    int(self._portal_follow_coord[1]),
+                                    self._portal_follow_dir,
+                                )
+                                print(
+                                    "[PortalFollow] arrived but no transition yet - creeping "
+                                    f"one more tile {self._portal_follow_dir} to "
+                                    f"{self._portal_follow_coord} (attempt {self._portal_follow_creep_count}/3)"
+                                )
+                                humanized_sleep(max(0.0015, float(TIMING_CONFIG["nav_loop"]) * 0.70))
+                                continue
                         # [FIX] Follow range ?덉뿉???湲???Stuck ??대㉧ 由ъ뀑 (?대룞 ???대룄 Stuck???꾨떂)
                         self._nav_attempt_pos = None
                         self._nav_attempt_started_at = 0.0
