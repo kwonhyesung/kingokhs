@@ -431,7 +431,7 @@ def main(
         return
     
     numeric_scanner = NumericFieldScanner(state, reader_thread.matcher, config_file, reader_thread)  # ?⑥쥙???袁⑹뒠 ??살쟿??
-    sentinel_thread = SentinelThread(state, reader_thread.matcher) # 筌뤣딅뮞???袁⑹뵠???癒? ?袁⑹뒠
+    sentinel_thread = SentinelThread(state, reader_thread.matcher, config_file) # 筌뤣딅뮞???袁⑹뵠???癒? ?袁⑹뒠
     action_thread = LogicSvc(state)  # FSM 嚥≪뮇彛?
     nav_thread = RouteSvc(state)  # ??삵돩野껊슣???
     

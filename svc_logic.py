@@ -29,6 +29,8 @@ Integration:
 """
 
 import time
+import os
+import json
 import threading
 import random
 import win32gui
@@ -65,6 +67,8 @@ from support_runtime_rules import (
     speed_up_delay,
     support_retarget_block_duration,
 )
+
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 
 # ============================================================
@@ -339,6 +343,18 @@ class LogicSvc(threading.Thread):
             float(getattr(self, "_party_heal_blocked_until", 0.0) or 0.0),
         )
 
+    def _require_map_sync_for_heal(self) -> bool:
+        """config.json의 require_map_sync_for_heal (기본 true). 격수 PC가
+        아직 이 저장소랑 다른 맵 이름 체계를 쓰고 있어서 map_sync_status가
+        항상 "different"로 잘못 판정되는 임시 상황 대응용 - false면 맵이
+        달라 보여도 힐을 보류하지 않는다. 격수 PC를 pull해서 맞추면
+        true로 되돌려 안전장치를 복원할 것."""
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return bool(json.load(f).get("require_map_sync_for_heal", True))
+        except Exception:
+            return True
+
     def _should_hold_follow_at_gap(self, gap: int) -> bool:
         hold_distance = 1
         if self._is_support_follow_guard_active():
@@ -454,6 +470,18 @@ class LogicSvc(threading.Thread):
         """도사가 지원해야 할 대상(아군)의 스냅샷 정보 반환 (격수 데이터 최우선)"""
         # role='격수'로 명시되고 freshness 조건(1.5초 이내)을 만족하는 원격 데이터만 사용
         remote = self.state.get_fresh_remote_data_by_role("격수")
+
+        # 진단용: 이 함수가 실제로 호출되는지 + remote를 찾았는지를 짧은
+        # 주기(0.5초)로 무조건 찍는다. 기존 [Signal]/[RemoteLookup]은 각각
+        # 10초/2초 스로틀이라 세션이 짧으면 한 번도 안 찍힐 수 있어서 추가.
+        now_diag = time.time()
+        if now_diag - float(getattr(self, "_last_support_target_diag_time", 0.0) or 0.0) >= 0.5:
+            self._last_support_target_diag_time = now_diag
+            if isinstance(remote, dict) and remote:
+                print(f"[SupportTargetDiag] called, remote 찾음: hp={remote.get('hp')} good_hp={remote.get('good_hp')}")
+            else:
+                print(f"[SupportTargetDiag] called, remote 못 찾음 (get_fresh_remote_data_by_role 결과: {remote!r})")
+
         if not remote:
             return None
         
@@ -2649,6 +2677,7 @@ class LogicSvc(threading.Thread):
                 print(f"[Priority4] ITEM 媛먯? ??猷⑦똿: {item.get('name','')} @ {grid}")
                 self.state.detected_item_grid = grid
                 self.state.detected_item_name = item.get("name", "")
+                self.state.detected_item_world = item.get("world_pos")
             return False
 
         return False
@@ -2850,6 +2879,10 @@ class LogicSvc(threading.Thread):
 
     def _restore_dosa_service_if_follow_autohunt(self) -> bool:
         if not is_support_role(getattr(self.state, "network_role", "") or self.state.role):
+            now_diag = time.time()
+            if now_diag - float(getattr(self, "_last_restore_gate_diag_time", 0.0) or 0.0) >= 0.5:
+                self._last_restore_gate_diag_time = now_diag
+                print(f"[RestoreGateDiag] blocked: not support role (network_role={getattr(self.state, 'network_role', '')!r} role={self.state.role!r})")
             return False
         if bool(getattr(self.state, "service_active", False)):
             return True
@@ -2857,6 +2890,10 @@ class LogicSvc(threading.Thread):
             bool(getattr(self.state, "auto_hunt", False))
             and bool(getattr(self.state, "nav_follow_enabled", False))
         ):
+            now_diag = time.time()
+            if now_diag - float(getattr(self, "_last_restore_gate_diag_time", 0.0) or 0.0) >= 0.5:
+                self._last_restore_gate_diag_time = now_diag
+                print(f"[RestoreGateDiag] blocked: auto_hunt={getattr(self.state, 'auto_hunt', False)} nav_follow_enabled={getattr(self.state, 'nav_follow_enabled', False)}")
             return False
         self.state.service_active = True
         self.state.control_mode = "FOLLOW+SERVICE"
@@ -2938,6 +2975,7 @@ class LogicSvc(threading.Thread):
         self._party_direct_heal_target_prepared = False
         self._party_direct_heal_verified = False
         self._warrior_redtab_verified = False
+        print(f"[PartyHealGateDiag] blocked this cycle: warrior transition immediate clear (started_at={started_at:.2f})")
         return True
 
         self._force_portal_esc_clear()
@@ -2955,7 +2993,18 @@ class LogicSvc(threading.Thread):
         ?? ??? ?? ??.
         ?? ??/?? ??? ?? ????, ?? ?? red_tab ?? ???? ????.
         """
+        now_entry_diag = time.time()
+        if now_entry_diag - float(getattr(self, "_last_cycle_entry_diag_time", 0.0) or 0.0) >= 0.5:
+            self._last_cycle_entry_diag_time = now_entry_diag
+            print(
+                f"[CycleEntryDiag] _run_dosa_service_cycle 진입, support_target={'있음' if support_target else '없음'} "
+                f"service_active={getattr(self.state, 'service_active', None)}"
+            )
+
         if not self._restore_dosa_service_if_follow_autohunt():
+            if now_entry_diag - float(getattr(self, "_last_cycle_entry_fail_diag_time", 0.0) or 0.0) >= 0.5:
+                self._last_cycle_entry_fail_diag_time = now_entry_diag
+                print("[CycleEntryDiag] restore_dosa_service_if_follow_autohunt() 실패 -> return False")
             return False
 
         self._repair_dosa_f2_runtime_state()
@@ -3014,7 +3063,11 @@ class LogicSvc(threading.Thread):
         if isinstance(support_target, dict):
             map_sync_status = classify_map_sync(self.state.get_all(), support_target, now=time.time())
             self.state.map_sync_status = map_sync_status
-            if map_sync_status != "same":
+            # config.json의 require_map_sync_for_heal=false면 이 게이트를 건너뛴다.
+            # 격수 PC가 이 저장소와 다른(구버전) 맵 이름 체계를 쓰고 있어서
+            # map_sync_status가 항상 "different"로 잘못 판정되는 임시 상황 대응용 -
+            # 격수 PC를 pull해서 맵 이름 체계를 맞추면 다시 true로 켜서 안전장치를 복원할 것.
+            if map_sync_status != "same" and self._require_map_sync_for_heal():
                 self._invalidate_warrior_redtab_verification()
                 self._log_dosa_f2_idle_reason(
                     f"map_sync_{map_sync_status}: defer_party_heal",
@@ -3039,10 +3092,19 @@ class LogicSvc(threading.Thread):
             return True
 
         if bool(getattr(self, "_warrior_debuff_active", False)):
+            now_wd_diag = time.time()
+            if now_wd_diag - float(getattr(self, "_last_warrior_debuff_gate_diag_time", 0.0) or 0.0) >= 0.5:
+                self._last_warrior_debuff_gate_diag_time = now_wd_diag
+                print("[PartyHealGateDiag] blocked: _warrior_debuff_active=True (stuck?)")
             self._pace_service_loop("active")
             return True
 
-        if time.time() < float(getattr(self, "_post_debuff_follow_until", 0.0) or 0.0):
+        post_debuff_remaining = float(getattr(self, "_post_debuff_follow_until", 0.0) or 0.0) - time.time()
+        if post_debuff_remaining > 0:
+            now_pd_diag = time.time()
+            if now_pd_diag - float(getattr(self, "_last_post_debuff_gate_diag_time", 0.0) or 0.0) >= 0.5:
+                self._last_post_debuff_gate_diag_time = now_pd_diag
+                print(f"[PartyHealGateDiag] blocked: _post_debuff_follow_until remaining={post_debuff_remaining:.2f}s (stuck?)")
             self._pace_service_loop("active")
             return True
         if bool(getattr(self, "_post_debuff_recover_prepare_pending", False)):
@@ -3052,6 +3114,14 @@ class LogicSvc(threading.Thread):
             return True
 
         if self._update_zero_hp_state():
+            now_zhp_diag = time.time()
+            if now_zhp_diag - float(getattr(self, "_last_zero_hp_gate_diag_time", 0.0) or 0.0) >= 0.5:
+                self._last_zero_hp_gate_diag_time = now_zhp_diag
+                print(
+                    f"[PartyHealGateDiag] blocked: zero_hp_state confirmed (state.hp={getattr(self.state, 'hp', None)!r}, "
+                    f"death_recovery_active={self._death_recovery_active}, hw_ready={self._is_hw_ready()}, "
+                    f"game_window_active={self._is_game_window_active()})"
+                )
             self._handle_zero_hp_recovery()
             self._pace_service_loop("active")
             return True
@@ -3094,6 +3164,19 @@ class LogicSvc(threading.Thread):
             )
             self._pace_service_loop("active")
             return True
+
+        # 진단용: 파티힐 직전 3개 게이트 값을 무조건(0.5초 스로틀) 찍는다.
+        # 여기까지 왔다면 hw_ready/portal/map_sync/초기화 요청/혼캐스팅 게이트는
+        # 전부 통과했다는 뜻 - 이 셋 중 뭐가 막고 있는지 바로 보인다.
+        now_gate_diag = time.time()
+        if now_gate_diag - float(getattr(self, "_last_party_heal_gate_diag_time", 0.0) or 0.0) >= 0.5:
+            self._last_party_heal_gate_diag_time = now_gate_diag
+            print(
+                f"[PartyHealGateDiag] party_hp_needed={party_hp_needed_before_self_recover} "
+                f"self_hp={current_self_hp} emergency_threshold={self._self_hp_emergency_threshold} "
+                f"self_hp>threshold={current_self_hp > self._self_hp_emergency_threshold} "
+                f"party_heal_blocked={self._is_party_heal_blocked()}"
+            )
 
         if (
             party_hp_needed_before_self_recover
@@ -3835,31 +3918,31 @@ class LogicSvc(threading.Thread):
             humanized_sleep(TIMING_CONFIG["action_loop"])
             return
 
-        # ?꾩씠???띾뱷 (?좏쑕 ?곹깭???뚮쭔)
-        if not self.state.target_locked and self.state.detected_item_grid:
-            gx, gy = self.state.detected_item_grid
-            print(f"[Item] ?꾩씠???띾뱷 ?쒕룄: {self.state.detected_item_name} @ Grid({gx}, {gy})")
+        if not self.state.target_locked and self.state.detected_item_world:
+            tx, ty = self.state.detected_item_world
+            self.state.item_pickup_target = (tx, ty)
+            print(f"[Item] 아이템 픽업 시도: {self.state.detected_item_name} @ World({tx}, {ty})")
 
-            while self.state.running and self.state.auto_hunt and self.state.detected_item_grid:
+            # 실제 이동은 RouteSvc가 item_pickup_target을 보고 수행한다
+            # (LogicSvc는 이동 전용 스레드가 아니라서 여기선 목표만 세팅하고
+            # 도착 신호(item_pickup_arrived)를 기다린다).
+            while self.state.running and self.state.auto_hunt and self.state.item_pickup_target:
                 if self.state.target_locked or self._needs_hp_recovery() or self._needs_mp_recovery():
-                    print("[Action] ?띾뱷 以??꾪닾/?꾧툒 ?곹솴 諛쒖깮 -> 猷⑦똿 以묐떒.")
+                    print("[Action] 픽업 중 위협/회복 상황 발생 -> 루프 중단.")
+                    self.state.item_pickup_target = None
                     break
 
-                # ?? ?뚰뵾 ?대룞 (Stuck 媛먯?) ?듯빀 ??
-                if self._check_stuck():
-                    self._escape_stuck(rewind_waypoint=False)
-                    humanized_sleep(TIMING_CONFIG["move_hold"])
-                    continue
-
-                arrived = self._move_toward_grid(gx, gy)
-                if arrived:
-                    print(f"[Point] ?꾩씠?????꾩갑. ?띾뱷 ?쒕룄 (',')")
-                    hw.humanized_press(",") 
+                if self.state.item_pickup_arrived:
+                    print(f"[Point] 아이템 위치 도착. 픽업 시도 (',')")
+                    hw.humanized_press(",")
                     humanized_sleep(TIMING_CONFIG["enter_wait"])
+                    self.state.item_pickup_target = None
+                    self.state.item_pickup_arrived = False
                     self.state.detected_item_grid = None
-                    print("[OK] ?꾩씠???띾뱷 ?꾨즺.")
+                    self.state.detected_item_world = None
+                    print("[OK] 아이템 픽업 완료.")
                     break
-                
+
                 humanized_sleep(TIMING_CONFIG["nav_loop"])
 
         # ?붾쾭???ㅼ틪
@@ -3936,24 +4019,28 @@ class LogicSvc(threading.Thread):
         # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
         # 3. ?꾩씠???띾뱷 (?좏쑕 ?곹깭???뚮쭔)
         # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧
-        if not self.state.target_locked and self.state.detected_item_grid:
-            gx, gy = self.state.detected_item_grid
-            print(f"[Item] ?꾩씠???띾뱷 ?쒕룄: {self.state.detected_item_name} @ Grid({gx}, {gy})")
+        if not self.state.target_locked and self.state.detected_item_world:
+            tx, ty = self.state.detected_item_world
+            self.state.item_pickup_target = (tx, ty)
+            print(f"[Item] 아이템 픽업 시도: {self.state.detected_item_name} @ World({tx}, {ty})")
 
-            while self.state.running and self.state.auto_hunt and self.state.detected_item_grid:
+            while self.state.running and self.state.auto_hunt and self.state.item_pickup_target:
                 if self.state.target_locked or self._needs_hp_recovery() or self._needs_mp_recovery():
-                    print("[Action] ?띾뱷 以??꾪닾/?꾧툒 ?곹솴 諛쒖깮 -> 猷⑦똿 以묐떒.")
+                    print("[Action] 픽업 중 위협/회복 상황 발생 -> 루프 중단.")
+                    self.state.item_pickup_target = None
                     break
 
-                arrived = self._move_toward_grid(gx, gy)
-                if arrived:
-                    print(f"[Point] ?꾩씠?????꾩갑. ?띾뱷 ?쒕룄 (',')")
-                    hw.humanized_press(",") 
+                if self.state.item_pickup_arrived:
+                    print(f"[Point] 아이템 위치 도착. 픽업 시도 (',')")
+                    hw.humanized_press(",")
                     humanized_sleep(TIMING_CONFIG["enter_wait"])
+                    self.state.item_pickup_target = None
+                    self.state.item_pickup_arrived = False
                     self.state.detected_item_grid = None
-                    print("[OK] ?꾩씠???띾뱷 ?꾨즺.")
+                    self.state.detected_item_world = None
+                    print("[OK] 아이템 픽업 완료.")
                     break
-                
+
                 humanized_sleep(TIMING_CONFIG["nav_loop"])
 
         # ?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧?먥븧

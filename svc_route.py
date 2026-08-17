@@ -507,8 +507,21 @@ class RouteSvc(threading.Thread):
                 if (now - float(getattr(self, "_last_portal_follow_log_time", 0.0) or 0.0)) >= 0.8:
                     print(f"[PortalFollow] stuck wait: keep exact portal path pos={current_pos}")
                     self._last_portal_follow_log_time = now
-                self._blocked_cells_until.clear()
-                self._blocked_cell_hits.clear()
+                # Remember the exact cell the last attempt walked into
+                # instead of wiping blocked-cell memory - this was silently
+                # discarding the one signal that could tell "up" apart from
+                # "left" here, so the same blocked direction got retried
+                # forever. 2D game, no diagonals, so the failed step is
+                # always exactly one of the four axis-neighbor cells.
+                # _remember_blocked_cell's hit-count TTL already covers
+                # both cases this can mean: a monster in the way clears
+                # after its short TTL and gets retried; an actual wall
+                # keeps getting hit and its TTL escalates instead of
+                # thrashing on the same blocked step.
+                last_dir = normalize_move_dir(getattr(self.state, "last_move_dir", ""))
+                if last_dir:
+                    bx, by = _nav_step_from_dir(current_pos[0], current_pos[1], last_dir)
+                    self._remember_blocked_cell(bx, by, reason="portal_follow_stuck")
                 self._nav_attempt_pos = None
                 self._nav_attempt_started_at = 0.0
                 self.stuck_count = 0
@@ -896,39 +909,65 @@ class RouteSvc(threading.Thread):
 
         if self._portal_follow_active:
             if event_prev is not None:
-                # Warrior sent another explicit transition while we were still en
-                # route to the last one (e.g. two portals back-to-back). Confirmed
-                # live: staying locked onto the stale target left the dosa walking
-                # toward a portal the warrior was no longer anywhere near. Re-arm
-                # to the new one instead of silently tracking a target we've given
-                # up reaching.
-                print(
-                    f"[PortalFollow] new transition while still following previous one "
-                    f"(event_seq={event_seq}): re-arming to warrior_last={event_prev}"
+                # event_seq increments on every ordinary footstep the warrior
+                # takes, not just real door crossings - confirmed live: a
+                # plain 1-tile walk (23,1)->(23,0) fired a coord_transition
+                # event while already portal-following, which this branch
+                # used to trust unconditionally and re-arm to. The very next
+                # ordinary step then re-armed again to one tile further
+                # (23,-1) - extending the nav target past the door in the
+                # same direction every single step instead of only on an
+                # actual crossing, walking the dosa backward through the
+                # door it was already lined up to use correctly. Require the
+                # same portal-sized jump distance the no-event branch below
+                # already demands before trusting this as a real second
+                # crossing.
+                event_jump_distance = (
+                    follow_manhattan_gap(event_prev[0], event_prev[1], cur_x, cur_y) if cur_ok else None
                 )
-                self._finish_portal_follow(f"superseded_by_event_seq_{event_seq}")
-                enter_dir = event_dir or normalize_move_dir(remote_data.get("last_move_dir", ""))
-                if enter_dir:
-                    source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
-                    self._arm_portal_follow(
-                        event_prev,
-                        enter_dir,
-                        started_at=time.time(),
-                        clear_target=True,
-                        source_map_sig=source_map_sig,
-                        log_prefix=(
-                            f"warrior transition detected now=({cur_x}, {cur_y}) "
-                            f"(superseding stale portal-follow) event_seq={event_seq or '-'}"
-                        ),
+                is_real_crossing = event_jump_distance is None or should_detect_warrior_transition(
+                    event_prev[0], event_prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE
+                )
+                if not is_real_crossing:
+                    print(
+                        f"[PortalFollow] ignoring event_seq={event_seq} while still following "
+                        f"previous one - looks like an ordinary step (jump={event_jump_distance}), "
+                        "not a new crossing"
                     )
-                    # _last_warrior_coord must move up to (cur_x, cur_y) here too -
-                    # leaving it stale (as before) made every later call keep
-                    # comparing against this same pre-transition point, so an
-                    # unrelated coordinate-jump check further down kept firing
-                    # on distance that was really just "how far we drifted since
-                    # we stopped updating this", not a new jump.
-                    self._remember_warrior_coord(cur_x, cur_y, map_sig, dps_dir, remote_data)
-                    return
+                else:
+                    # Warrior sent another explicit transition while we were still en
+                    # route to the last one (e.g. two portals back-to-back). Confirmed
+                    # live: staying locked onto the stale target left the dosa walking
+                    # toward a portal the warrior was no longer anywhere near. Re-arm
+                    # to the new one instead of silently tracking a target we've given
+                    # up reaching.
+                    print(
+                        f"[PortalFollow] new transition while still following previous one "
+                        f"(event_seq={event_seq}): re-arming to warrior_last={event_prev}"
+                    )
+                    self._finish_portal_follow(f"superseded_by_event_seq_{event_seq}")
+                    enter_dir = event_dir or normalize_move_dir(remote_data.get("last_move_dir", ""))
+                    if enter_dir:
+                        source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
+                        self._arm_portal_follow(
+                            event_prev,
+                            enter_dir,
+                            started_at=time.time(),
+                            clear_target=True,
+                            source_map_sig=source_map_sig,
+                            log_prefix=(
+                                f"warrior transition detected now=({cur_x}, {cur_y}) "
+                                f"(superseding stale portal-follow) event_seq={event_seq or '-'}"
+                            ),
+                        )
+                        # _last_warrior_coord must move up to (cur_x, cur_y) here too -
+                        # leaving it stale (as before) made every later call keep
+                        # comparing against this same pre-transition point, so an
+                        # unrelated coordinate-jump check further down kept firing
+                        # on distance that was really just "how far we drifted since
+                        # we stopped updating this", not a new jump.
+                        self._remember_warrior_coord(cur_x, cur_y, map_sig, dps_dir, remote_data)
+                        return
             if (
                 cur_ok
                 and prev
@@ -1034,7 +1073,16 @@ class RouteSvc(threading.Thread):
         # transition event) in that window is more likely leftover noise
         # than a second door. An explicit event or an actual distance jump
         # is still trusted immediately regardless of this cooldown.
-        in_portal_cooldown = time.time() < float(getattr(self, "_portal_follow_cooldown_until", 0.0) or 0.0)
+        # The fixed 1.0s window alone isn't enough: red_tab retarget after a
+        # crossing can silently retry up to 4 times (each a full esc->tab->tab
+        # cycle) and take longer than that, so the timestamp can expire
+        # mid-retry and let a stale map-only signal back in right as the busy
+        # retarget work finally finishes. portal_follow_retarget_requested
+        # stays True for that whole retry span, so hold the cooldown open
+        # for as long as that's set, not just the fixed window.
+        in_portal_cooldown = time.time() < float(
+            getattr(self, "_portal_follow_cooldown_until", 0.0) or 0.0
+        ) or bool(getattr(self.state, "portal_follow_retarget_requested", False))
         map_only_signal = bool((map_changed or map_info_changed) and not coord_jumped and event_prev is None)
         if map_only_signal and in_portal_cooldown and prev and is_plausible_map_coord(prev[0], prev[1]):
             print(
@@ -1415,11 +1463,29 @@ class RouteSvc(threading.Thread):
         cx, cy = int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0)
         return not should_hold_follow_position(tx, ty, cx, cy)
 
+    def _log_portal_move_block(self, reason: str) -> None:
+        # Only the caller-facing gate at the bottom of _move_toward used to
+        # explain why a portal-follow step was withheld - the three early
+        # returns above it (combat, support_input_blocked_until,
+        # portal_move_settle_until) were completely silent, so a stall
+        # caused by one of those looked identical in the log to "not moving
+        # for no reason". Route all of them through the same 1s-throttled
+        # line so a live stall is diagnosable from the log alone.
+        if not bool(getattr(self, "_portal_follow_active", False)):
+            return
+        now = time.time()
+        if now - float(getattr(self, "_last_portal_move_block_log_time", 0.0) or 0.0) < 1.0:
+            return
+        self._last_portal_move_block_log_time = now
+        print(f"[NavBlock] portal-follow movement withheld: {reason}")
+
     def _move_toward(self, tx: int, ty: int) -> bool:
         """Move one step toward a world target, avoiding walls / monsters / users."""
         if self._is_in_combat():
+            self._log_portal_move_block("is_in_combat")
             return False
         if time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0):
+            self._log_portal_move_block("support_input_blocked_until")
             return False
         if bool(getattr(self, "_portal_follow_active", False)) and time.time() < float(
             getattr(self, "_portal_move_settle_until", 0.0) or 0.0
@@ -1432,6 +1498,7 @@ class RouteSvc(threading.Thread):
             # this door's own return trigger, sending it straight back to
             # 23,1. Give position tracking a short window to catch up after
             # every portal-follow step before allowing the next one.
+            self._log_portal_move_block("portal_move_settle_until")
             return False
 
         cx, cy = self.state.x, self.state.y
@@ -1485,12 +1552,25 @@ class RouteSvc(threading.Thread):
                 secondary_dir = ("right" if dx > 0 else "left") if dx != 0 else None
             step_dir = primary_dir
             blocked_cells_roi = self._get_blocked_cells()
+            picked_unblocked = False
             for candidate in (primary_dir, secondary_dir):
                 if candidate is None:
                     continue
                 if _nav_step_from_dir(int(cx), int(cy), candidate) not in blocked_cells_roi:
                     step_dir = candidate
+                    picked_unblocked = True
                     break
+            if not picked_unblocked:
+                # Both candidates are in blocked_cells_roi memory - step_dir
+                # falls back to primary_dir above and this branch still
+                # issues that (possibly-blocked) move below (unlike the
+                # nav_pick_step_direction path, this one never returns
+                # None), so a genuinely stuck cell here looks like ordinary
+                # movement in the log with no explanation for why position
+                # isn't advancing.
+                self._log_portal_move_block(
+                    f"both candidates in blocked_cells_roi: primary={primary_dir} secondary={secondary_dir}"
+                )
             next_grid = (int(cx), int(cy))
             blockers = []
         else:
@@ -1604,7 +1684,17 @@ class RouteSvc(threading.Thread):
                 )
                 self._last_portal_move_block_log_time = time.time()
             return False
-        hw.hold_move(step_dir, "move_hold", duration=hold_time)
+        moved = hw.hold_move(step_dir, "move_hold", duration=hold_time)
+        if not moved:
+            # hold_move can still silently no-op here (its own internal
+            # checks run after simulate_pause's sleep, so state can flip
+            # true in that window even though the checks above just
+            # passed). Don't arm mark_nav_attempt/settle_until on a
+            # keypress that never went out - that was turning every
+            # missed race into a self-renewing 0.2s block loop with no
+            # actual move ever attempted again.
+            self._log_portal_move_block("hold_move_no_op")
+            return False
         self.state.last_move_dir = step_dir
         self._mark_nav_attempt()
         if portal_follow:
@@ -1923,6 +2013,20 @@ class RouteSvc(threading.Thread):
                     else:
                         humanized_sleep(TIMING_CONFIG["nav_loop"])
                     continue
+
+            # 아이템 픽업: LogicSvc가 item_pickup_target(world x,y)을 세팅하면
+            # 여기서 실제로 걸어간다 (LogicSvc는 RouteSvc 전용 이동 메서드에
+            # 접근할 수 없는 별도 스레드라 상태값으로만 요청을 넘긴다).
+            item_pickup_target = getattr(self.state, "item_pickup_target", None)
+            if item_pickup_target and not self.state.nav_route_enabled and not follow_navigation_active:
+                tx, ty = item_pickup_target
+                arrived = self._move_toward(tx, ty)
+                if arrived:
+                    self.state.item_pickup_arrived = True
+                    humanized_sleep(TIMING_CONFIG["idle_sleep"])
+                else:
+                    humanized_sleep(TIMING_CONFIG["nav_loop"])
+                continue
 
             # ?? 2?쒖쐞: Group Follow Mode (is_connected && nav_follow_enabled) ??
             role_name = str(getattr(self.state, "role", "") or "").strip()

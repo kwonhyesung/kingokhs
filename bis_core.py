@@ -923,21 +923,38 @@ class GameState:
             target_role = role_map.get(target_role, target_role)
             best = None
             best_ts = -1.0
+            seen_roles = []
+            stale_gap = None
             for _name, data in self.other_pc_data.items():
                 if not isinstance(data, dict):
                     continue
                 remote_role = str(data.get("role") or data.get("network_role") or "").strip()
                 remote_role = role_map.get(remote_role, remote_role)
                 remote_role = role_map.get(remote_role, remote_role)
+                seen_roles.append((_name, remote_role))
                 if remote_role == target_role or (target_role == "도사1" and remote_role in ("도사", "도사1")):
                     received_at = float(data.get("_received_at") or 0.0)
-                    if (now - received_at) > freshness_limit:
+                    gap = now - received_at
+                    if gap > freshness_limit:
+                        stale_gap = gap if stale_gap is None else min(stale_gap, gap)
                         continue
                     if received_at >= best_ts:
                         best = dict(data)
                         best_ts = received_at
             if best is not None:
                 return best
+            # 진단용: 왜 못 찾았는지 (데이터 자체가 없는지 / role이 안 맞는지 /
+            # 있지만 freshness_limit보다 오래됐는지) 2초에 한 번만 출력.
+            last_fail_log = getattr(self, "_last_remote_lookup_fail_log", {})
+            if now - float(last_fail_log.get(target_role, 0.0) or 0.0) >= 2.0:
+                if not seen_roles:
+                    print(f"[RemoteLookup] role={target_role!r}: other_pc_data가 비어있음 (수신 안 됨)")
+                elif stale_gap is not None:
+                    print(f"[RemoteLookup] role={target_role!r}: 데이터는 있는데 {stale_gap:.2f}s 지남 (freshness_limit={freshness_limit}s)")
+                else:
+                    print(f"[RemoteLookup] role={target_role!r}: 매칭되는 role 없음, 수신된 role들={seen_roles}")
+                last_fail_log[target_role] = now
+                self._last_remote_lookup_fail_log = last_fail_log
         return None
 
     def get_fresh_remote_data_by_role(self, role: str, max_age_sec: float = 1.25) -> Optional[dict]:
@@ -1363,7 +1380,7 @@ class BisHardware:
         self.send("U:all")
 
     def hold_move(self, direction: str, hold_key: str = "move_hold",
-                  variance: float = 0.15, duration: float = None, force: bool = False):
+                  variance: float = 0.15, duration: float = None, force: bool = False) -> bool:
         # HumanBehaviorSimulator로 이동 동작 간 휴식 시간 시뮬레이션
         if not force:
             pause = HumanBehaviorSimulator.simulate_pause('move')
@@ -1375,8 +1392,13 @@ class BisHardware:
                 getattr(self.state, "red_tab_promotion_active", False)
             )
             if support_blocked or support_targeting or bool(getattr(self.state, "is_combat_busy", False)):
-                return
-        
+                # Silent no-op by design (state flipped true during the
+                # simulate_pause sleep above). Must return False - callers
+                # that assume success from a bare call end up re-arming
+                # their own cooldowns around a keypress that never fired,
+                # looping forever with no move and no log.
+                return False
+
         _hw_log(f"[Move] 방향키: {direction}{' (force)' if force else ''}")
         try:
             self.send_force(f"D:{direction}")
@@ -1386,6 +1408,7 @@ class BisHardware:
                 humanized_sleep(TIMING_CONFIG[hold_key], variance)
         finally:
             self.send_force(f"U:{direction}")
+        return True
 
     def click(self, grid_x: int, grid_y: int, grid_manager=None):
         """

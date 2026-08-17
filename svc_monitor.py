@@ -2047,12 +2047,24 @@ class MonitorSvc(threading.Thread):
                     dbg = {}
                     map_signature = ""
                     map_info_changed = False
+                    # ft.py로 저장한 FindText map 패턴을 우선 시도 (사용자가 캡처한 맵이면
+                    # 이걸로 잡힘). 없거나 못 찾으면 기존 선비족 전용 토큰 인식기로 폴백
+                    # (기존에 동작하던 던전은 그대로 유지, 새로 캡처한 맵만 FindText로 확장).
                     try:
-                        map_text = str(self.map_ocr.recognize(crop) or "").strip()
-                        score = float(getattr(self.map_ocr, "last_score", 0.0) or 0.0)
-                        dbg = dict(getattr(self.map_ocr, "last_debug", {}) or {})
+                        ft_map_hits = self.matcher.find_text_scan(crop, category="map", ent_type="MAP")
                     except Exception as e:
-                        print(f"[MapOCR] recognize error: {e}")
+                        ft_map_hits = []
+                        print(f"[MapOCR] find_text_scan error: {e}")
+                    if ft_map_hits:
+                        map_text = str(ft_map_hits[0]["name"]).strip()
+                        score = float(ft_map_hits[0].get("score", 1.0))
+                    else:
+                        try:
+                            map_text = str(self.map_ocr.recognize(crop) or "").strip()
+                            score = float(getattr(self.map_ocr, "last_score", 0.0) or 0.0)
+                            dbg = dict(getattr(self.map_ocr, "last_debug", {}) or {})
+                        except Exception as e:
+                            print(f"[MapOCR] recognize error: {e}")
                     try:
                         map_signature = "|".join(map(str, self._fast_crop_signature(crop)))
                     except Exception:

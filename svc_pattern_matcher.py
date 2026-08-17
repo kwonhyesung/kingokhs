@@ -8,6 +8,9 @@ import cv2
 import numpy as np
 from svc_kernel import GameState
 from svc_monitor_common import _monitor_log
+from findtext_wrapper import get_findtext
+
+FINDTEXT_PATTERNS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "findtext_patterns.json")
 
 
 def imread_unicode(path, flags=cv2.IMREAD_COLOR):
@@ -99,6 +102,57 @@ class PatternMatcher:
         self._load_all(template_root)
         # self._load_digit_templates(template_root) # 이미지 기반 로딩 제거 (오직 AHK 패턴 문자열만 사용)
 
+        # ft.py로 캡처한 FindText 패턴 (findtext_patterns.json, 카테고리: map/item/monster/party)
+        self._ft = get_findtext()
+        self.findtext_patterns: dict[str, dict[str, str]] = {}
+        self._load_findtext_patterns()
+
+    def _load_findtext_patterns(self):
+        self.findtext_patterns = {}
+        if os.path.exists(FINDTEXT_PATTERNS_FILE):
+            try:
+                with open(FINDTEXT_PATTERNS_FILE, "r", encoding="utf-8") as f:
+                    self.findtext_patterns = json.load(f)
+            except Exception as e:
+                _monitor_log(f"[Error] findtext_patterns.json 로드 실패: {e}")
+
+    def find_text_scan(self, play_area_rgb: np.ndarray, category: str, ent_type: str,
+                        err1: float = 0.10, err0: float = 0.10) -> list[dict]:
+        """findtext_patterns.json의 category(map/item/monster/party)에 저장된
+        패턴을 전부 '|'로 결합해 한 번에 스캔한다. 각 패턴에 이미 박혀있는
+        <comment>가 그대로 엔티티 이름(id)이 된다 (ft.py 저장 시 comment=이름
+        으로 강제하기 때문에 여기서 별도 이름 매핑이 필요 없음).
+
+        Returns: findtext_scan()과 동일한 shape의 blob 리스트
+                 [{"name","type","x","y","cx","cy","w","h","score","grid"}, ...]
+        """
+        if play_area_rgb is None or play_area_rgb.size == 0:
+            return []
+        patterns = self.findtext_patterns.get(category, {})
+        if not patterns:
+            return []
+        combined = "".join(patterns.values())
+        matches = self._ft.find_text(combined, screenshot=play_area_rgb,
+                                      err1=err1, err0=err0, find_all=True)
+        results = []
+        for m in matches:
+            w, h = m.get("w", 0), m.get("h", 0)
+            x, y = m.get("x", 0), m.get("y", 0)
+            results.append({
+                "name": m.get("id", ""),
+                "type": ent_type,
+                "x": x, "y": y,
+                "cx": x + w // 2, "cy": y + h // 2,
+                "w": w, "h": h,
+                "score": 1.0,
+                "grid": (0, 0),
+            })
+        # err1/err0 허용오차 때문에 같은 물체가 1~2px 어긋난 위치에서 여러 번
+        # 잡힐 수 있음 - findtext_scan()과 동일한 NMS로 중복 제거.
+        if len(results) > 1:
+            results = self._nms_results(results, overlap_thresh=0.3)
+        return results
+
     # !!----------------------------------------------------------
     def reload(self, root: str):
         """기존 ?플릿을 비우??시 로드"""
@@ -108,6 +162,7 @@ class PatternMatcher:
         self.binary_templates = {f: {} for f in self.FOLDERS}
         self._load_all(root)
         self._load_digit_templates(root)
+        self._load_findtext_patterns()
 
 
     def decode_ahk_pattern(self, ahk_string: str) -> dict:

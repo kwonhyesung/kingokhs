@@ -1,4 +1,5 @@
 {
+    "require_map_sync_for_heal": false,
     "play_area": {
         "sx": 274,
         "sy": 50,
@@ -11,7 +12,9 @@
         "grid_end": [
             0,
             0
-        ]
+        ],
+        "item_radius_tiles": 5,
+        "monster_radius_tiles": 12
     },
     "hp": {
         "sx": 1451,

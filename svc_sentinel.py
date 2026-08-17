@@ -16,10 +16,11 @@ class SentinelThread(threading.Thread):
     몬스터, 아이템, 유저 감지를 전담하여 15 FPS 주기로 수행하는 분리된 스레드.
     Native Resolution (1:1) 매칭을 위해 리사이즈 없이 중심점 기준 크롭 방식을 사용함.
     """
-    def __init__(self, state: GameState, matcher: PatternMatcher, grid_indicator=None):
+    def __init__(self, state: GameState, matcher: PatternMatcher, config_file: str, grid_indicator=None):
         super().__init__(name="SentinelThread", daemon=True)
         self.state = state
         self.matcher = matcher
+        self.config_file = config_file
         self.entity_tracker = EntityTracker(self.state)
         # grid_indicator는 호환성을 위해 유지하지만, GameState에서 값을 참조
         self.grid_indicator = grid_indicator
@@ -28,7 +29,42 @@ class SentinelThread(threading.Thread):
         self._last_overlay_time = 0
         # 디바운싱 로직: 3프레임 연속 감지 시 확정
         self._monster_history = {}  # {grid_key: [frame_count, last_seen_time]}
+        # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (매 프레임 스팸 방지)
+        self._last_announced_item_names = set()
+        self._last_announced_monster_names = set()
+        self._last_announced_party_names = set()
         self._debounce_frames = 3  # 연속 감지 필요 프레임 수
+
+    @staticmethod
+    def _crop_around(image, center, radius_px):
+        """캐릭터 위치(center, play_area 기준 픽셀) 중심으로 image를 잘라서
+        (crop, offset_x, offset_y)를 반환한다. offset은 crop 안의 좌표를 다시
+        원본 image 기준으로 되돌릴 때 더해줄 값. center가 (0,0)이면(=마커
+        인식 실패, 위치 모름) 안전하게 원본 전체를 그대로 반환한다."""
+        cx, cy = center
+        if cx == 0 and cy == 0 or radius_px <= 0:
+            return image, 0, 0
+        h, w = image.shape[:2]
+        r = int(radius_px)
+        x0 = max(0, int(cx) - r)
+        y0 = max(0, int(cy) - r)
+        x1 = min(w, int(cx) + r)
+        y1 = min(h, int(cy) + r)
+        if x1 <= x0 or y1 <= y0:
+            return image, 0, 0
+        return image[y0:y1, x0:x1], x0, y0
+
+    @staticmethod
+    def _offset_results(results, offset_x, offset_y):
+        """crop 기준으로 나온 find_text_scan 결과를 원본 play_area 기준으로 되돌린다."""
+        if offset_x == 0 and offset_y == 0:
+            return results
+        for r in results:
+            r["x"] += offset_x
+            r["y"] += offset_y
+            r["cx"] += offset_x
+            r["cy"] += offset_y
+        return results
 
     def run(self):
         _monitor_log("[Sentinel] Entity scan thread start (FindText XOR mode)")
@@ -48,24 +84,48 @@ class SentinelThread(threading.Thread):
             if play_area_rgb is None or play_area_rgb.size == 0:
                 continue
 
-            # 이전 프레임에서 감지된 몬스터/아이템의 Grid 좌표를 우선 검색 영역으로 설정
-            priority_grids = []
-            for m in self.state.entities.get("monsters", []):
-                g = m.get("grid")
-                if g and g[0] >= 0:
-                    priority_grids.append(g)
-            for i in self.state.entities.get("items", []):
-                g = i.get("grid")
-                if g and g[0] >= 0:
-                    priority_grids.append(g)
+            # config.json에서 grid_size/반경 설정 읽기 (캘리브레이션 슬라이더 + 반경 튜닝값)
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as _cfg_f:
+                    _pa_cfg = json.load(_cfg_f).get("play_area", {})
+                    grid_pixel_size = float(_pa_cfg.get("grid_size", 48.2))
+                    item_radius_tiles = float(_pa_cfg.get("item_radius_tiles", 5))
+                    monster_radius_tiles = float(_pa_cfg.get("monster_radius_tiles", 12))
+            except Exception:
+                grid_pixel_size = 48.2
+                item_radius_tiles = 5
+                monster_radius_tiles = 12
 
-            # FindText 방식 슬라이딩 XOR 매칭 (색상 무시, 모양만 비교)
-            scan_results = self.matcher.findtext_scan(
-                play_area_rgb,
-                folders=["monsters", "items"],
-                threshold=0.90,
-                stride=2,
-                priority_grids=priority_grids if priority_grids else None
+            # 캐릭터 위치(마커 인식 결과) 중심으로 검색 범위를 좁혀서 속도를 올린다.
+            # 마커 인식이 그 프레임에 실패해 (0,0)이면(=위치 모름) 안전하게 전체
+            # play_area를 그대로 스캔한다.
+            my_screen_pos = tuple(getattr(self.state, "my_screen_pos", (0, 0)) or (0, 0))
+            item_crop, item_ox, item_oy = self._crop_around(play_area_rgb, my_screen_pos, item_radius_tiles * grid_pixel_size)
+            monster_crop, monster_ox, monster_oy = self._crop_around(play_area_rgb, my_screen_pos, monster_radius_tiles * grid_pixel_size)
+
+            # 몬스터/아이템: ft.py로 저장한 FindText 패턴(findtext_patterns.json)으로 스캔.
+            # find_text_scan은 카테고리 안의 패턴을 전부 '|'로 결합해 한 번에
+            # 찾으므로(native find_text 자체가 이미지 전체를 벡터 연산 한 번으로
+            # 훑음) findtext_scan()이 쓰던 priority_grids 최적화가 필요 없다.
+            # party는 "USER" 타입을 쓰지 않는다 - USER는 hostile_users/whitelist
+            # 경보 로직으로 들어가서, 파티원(격수/도사/술사)을 적대 유저로
+            # 오인하게 됨. 그래서 별도 타입 "PARTY"로 분리해서 스캔한다.
+            # party는 아직 반경 제한 대상이 아니라(논의 안 됨) 전체 play_area를 그대로 쓴다.
+            # 순차 실행: 스레드풀로 병렬화했다가 되돌림 - cv2 작업이 계속 3개
+            # 스레드에서 거의 쉬지 않고 돌면서 RouteSvc 등 다른 스레드의 CPU
+            # 타임슬라이스를 뺏어, follow 이동 입력이 밀려서 "Stuck" 감지가
+            # 실측 세션당 1회 -> 6~12회로 급증했다 (스캔속도 1.55배 향상보다
+            # 이동 안정성이 훨씬 중요해서 되돌림).
+            scan_results = (
+                self._offset_results(
+                    self.matcher.find_text_scan(monster_crop, category="monster", ent_type="MONSTER"),
+                    monster_ox, monster_oy,
+                )
+                + self._offset_results(
+                    self.matcher.find_text_scan(item_crop, category="item", ent_type="ITEM"),
+                    item_ox, item_oy,
+                )
+                + self.matcher.find_text_scan(play_area_rgb, category="party", ent_type="PARTY")
             )
 
             whitelist = list(getattr(self.state, "whitelist_names", []))
@@ -92,6 +152,7 @@ class SentinelThread(threading.Thread):
             monsters = [e for e in tracked_all if e.get("type") == "MONSTER"]
             items    = [e for e in tracked_all if e.get("type") == "ITEM"]
             users    = [e for e in tracked_all if e.get("type") == "USER"]
+            party    = [e for e in tracked_all if e.get("type") == "PARTY"]
 
             # 중복 감지 방지: 같은 위치(픽셀 좌표)에 있는 엔티티 필터링
             def deduplicate_entities(entities):
@@ -115,6 +176,7 @@ class SentinelThread(threading.Thread):
             monsters = deduplicate_entities(monsters)
             items = deduplicate_entities(items)
             users = deduplicate_entities(users)
+            party = deduplicate_entities(party)
 
             # 디바운싱 로직: 3프레임 연속 감지 시만 확정
             now = time.time()
@@ -155,6 +217,23 @@ class SentinelThread(threading.Thread):
             
             monsters = confirmed_monsters
 
+            # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (테스트 중 눈으로 확인하기 위함)
+            current_item_names = {i["name"] for i in items}
+            if current_item_names != self._last_announced_item_names:
+                if current_item_names:
+                    print(f"[Sentinel] 아이템 감지: {', '.join(sorted(current_item_names))}")
+                self._last_announced_item_names = current_item_names
+            current_monster_names = {m["name"] for m in monsters}
+            if current_monster_names != self._last_announced_monster_names:
+                if current_monster_names:
+                    print(f"[Sentinel] 몬스터 감지: {', '.join(sorted(current_monster_names))}")
+                self._last_announced_monster_names = current_monster_names
+            current_party_names = {p["name"] for p in party}
+            if current_party_names != self._last_announced_party_names:
+                if current_party_names:
+                    print(f"[Sentinel] 파티원 감지: {', '.join(sorted(current_party_names))}")
+                self._last_announced_party_names = current_party_names
+
             # 월드 좌표 역계산 엔진: 픽셀 거리 기반 월드 좌표 계산
             my_screen_x, my_screen_y = self.state.my_screen_pos
             my_world_x, my_world_y = self.state.my_world_pos
@@ -163,15 +242,7 @@ class SentinelThread(threading.Thread):
             if my_screen_x == 0 and my_screen_y == 0:
                 detected_entities = []
             else:
-                # config.json에서 grid_size 읽어오기
-                try:
-                    import json as _cfg_json
-                    _cfg_file = os.path.join(os.path.dirname(self.config_file), "config.json")
-                    with open(_cfg_file, 'r', encoding='utf-8') as _cfg_f:
-                        grid_pixel_size = float(_cfg_json.load(_cfg_f).get("play_area", {}).get("grid_size", 48.2))
-                except Exception:
-                    grid_pixel_size = 48.2
-
+                # grid_pixel_size는 루프 상단에서 이미 읽었음 (재사용)
                 detected_entities = []
                 for e in tracked_all:
                     cx = e.get("cx", 0)
@@ -202,6 +273,7 @@ class SentinelThread(threading.Thread):
                 self.state.entities["monsters"] = monsters
                 self.state.entities["items"] = items
                 self.state.entities["users"] = users
+                self.state.entities["party"] = party
                 self.state.entities["objects"] = tracked_all
                 self.state.detected_entities = detected_entities
                 
@@ -217,9 +289,17 @@ class SentinelThread(threading.Thread):
                 if monsters:
                     self.state.detected_monster_grid = monsters[0]["grid"]
                     self.state.detected_monster_name = monsters[0]["name"]
+                    self.state.detected_monster_world = monsters[0].get("world_pos")
+                # 자동사냥용: 화면에 확정된 몬스터 전체의 world 좌표 목록
+                # (detected_monster_world는 그중 첫 번째만 담는 요약값).
+                self.state.detected_monsters_world = [
+                    {"name": m["name"], "world": m.get("world_pos")}
+                    for m in monsters if m.get("world_pos")
+                ]
                 if items:
                     self.state.detected_item_grid = items[0]["grid"]
                     self.state.detected_item_name = items[0]["name"]
+                    self.state.detected_item_world = items[0].get("world_pos")
 
             # 실패 로그 모니터링 (5회 연속 실패 시 1회 요약 출력) - 비활성화
             # last_err = getattr(self.state, "last_vision_error", "")

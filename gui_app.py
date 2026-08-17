@@ -223,6 +223,8 @@ class AppView:
         row2.pack(fill="x", pady=1)
         self.btn_open_calib = ctk.CTkButton(row2, text="CALIB", height=22, width=50, font=("Inter", 9), command=self.open_calibration_popup)
         self.btn_open_calib.pack(side="left", padx=1)
+        self.btn_findtext = ctk.CTkButton(row2, text="FindText", height=22, width=65, font=("Inter", 9), command=self.launch_findtext_tool)
+        self.btn_findtext.pack(side="left", padx=1)
         self.btn_scale_2x = ctk.CTkButton(row2, text="2x", height=22, width=30, font=("Inter", 9), command=lambda: self.set_game_scale(2.0))
         self.btn_scale_2x.pack(side="left", padx=1)
         self.btn_scale_1x = ctk.CTkButton(row2, text="1x", height=22, width=30, font=("Inter", 9), command=lambda: self.set_game_scale(1.0))
@@ -2596,6 +2598,12 @@ class AppView:
                 self.show_toast("HARDWARE SECURELY CONNECTED")
             else:
                 self.show_toast("CONNECTION FAILED", "#FF5555")
+
+    def launch_findtext_tool(self):
+        try:
+            subprocess.Popen([sys.executable, os.path.join(SCRIPT_DIR, "ft.py")], cwd=SCRIPT_DIR)
+        except Exception as exc:
+            self.show_toast(f"FindText 실행 실패: {exc}", "#FF5555")
 
     def set_role(self, role: str):
         """Toggle F1 route mode."""

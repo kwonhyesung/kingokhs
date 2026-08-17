@@ -303,6 +303,11 @@ class GameState:
         self.char_grid = (0, 0)
         self.detected_item_grid = None
         self.detected_item_name = ""
+        self.detected_item_world = None
+        self.detected_monster_world = None
+        self.detected_monsters_world = []  # [{"name","world":(x,y)}, ...] 자동사냥용 전체 목록
+        self.item_pickup_target = None   # (tx, ty) world 좌표. LogicSvc가 설정, RouteSvc가 이동 실행
+        self.item_pickup_arrived = False  # RouteSvc가 도착 시 True. LogicSvc가 소비 후 리셋
         self.network_role = "도사"
         self.network_server_ip = "192.168.137.1"
         self.network_bind_host = "0.0.0.0"
