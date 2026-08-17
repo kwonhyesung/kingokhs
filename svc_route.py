@@ -1030,10 +1030,25 @@ class RouteSvc(threading.Thread):
                 self._warrior_trail = self._warrior_trail[-12:]
 
         transition_prev = event_prev or prev
+        # Right after finishing a real crossing, the warrior PC's own
+        # map-name OCR can still be settling for a moment - a bare
+        # map_changed/map_info_changed reading (no coord jump, no explicit
+        # transition event) in that window is more likely leftover noise
+        # than a second door. An explicit event or an actual distance jump
+        # is still trusted immediately regardless of this cooldown.
+        in_portal_cooldown = time.time() < float(getattr(self, "_portal_follow_cooldown_until", 0.0) or 0.0)
+        map_only_signal = bool((map_changed or map_info_changed) and not coord_jumped and event_prev is None)
+        if map_only_signal and in_portal_cooldown and prev and is_plausible_map_coord(prev[0], prev[1]):
+            print(
+                f"[PortalFollow] suppressing map-only transition signal during post-crossing "
+                f"cooldown: map_changed={map_changed} map_info_changed={map_info_changed} "
+                f"now=({cur_x}, {cur_y})"
+            )
         if event_prev or (
             prev
             and is_plausible_map_coord(prev[0], prev[1])
             and (coord_jumped or map_changed or map_info_changed)
+            and not (map_only_signal and in_portal_cooldown)
         ):
             source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig
             cached_hint = {}
@@ -1097,6 +1112,14 @@ class RouteSvc(threading.Thread):
             self._last_warrior_map_sig = map_sig
 
     def _finish_portal_follow(self, reason: str) -> None:
+        # The warrior PC's own map-name OCR can take a beat to settle right
+        # after a real crossing - live log showed a second transition arm
+        # immediately after a successful one purely on map_changed=True
+        # (no event_prev, no coord_jump), chasing a door that was never
+        # actually there and never resolving. Give map-name-only signals a
+        # short grace window to stop spurious back-to-back arms; an explicit
+        # coord_transition event is still trusted immediately regardless.
+        self._portal_follow_cooldown_until = time.time() + 1.0
         self._portal_follow_active = False
         self._portal_follow_coord = None
         self._portal_follow_approach = None
