@@ -3207,7 +3207,7 @@ class LogicSvc(threading.Thread):
             recovered = self._recover_self_hp_until_good_hp(
                 reason_log="[Recovery] self low HP sustain recovery.",
                 support_block_duration=1.8,
-                max_attempts=6,
+                max_attempts=8,
             )
             if recovered:
                 self._complete_self_hp_recovery_reengage(
