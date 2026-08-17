@@ -3261,6 +3261,19 @@ class LogicSvc(threading.Thread):
                 self._last_party_hp_check_log_time = now_support
                 cast_mode = "direct 3 verified" if self._party_direct_heal_verified else "esc>tab>tab acquire"
                 print(f"[Support] HP check: {hp_val} / {good_hp_remote} -> {cast_mode}")
+                # "esc>tab>tab acquire" kept printing for a long stretch with
+                # no heal ever landing and no prepare-success/give-up message
+                # either - this exposes exactly which of the 4 pieces
+                # (already-prepared flag, verified flag, fail-count, live
+                # red_tab OCR reading) disagrees each cycle instead of
+                # guessing at another fix blind.
+                print(
+                    f"[Support] HP debug: prepared={self._party_direct_heal_target_prepared} "
+                    f"verified={self._party_direct_heal_verified} "
+                    f"fail_count={self._party_direct_heal_fail_count} "
+                    f"red_tab_enabled={bool(getattr(self.state, 'red_tab_enabled', False))} "
+                    f"portal_follow_active={bool(getattr(self.state, 'portal_follow_active', False))}"
+                )
             self._cast_due_periodic_party_support(support_target, now_support=now_support)
             casted_hp = self._recover_party_hp(support_target)
             if casted_hp:
