@@ -266,9 +266,13 @@ class RecoveryManager:
     # ==========================================================
     # ── 자체 회복(Self Recovery) 로직 (도사 본인 살리기)
     # ==========================================================
-    def execute_self_hp_recovery(self):
+    def execute_self_hp_recovery(self, skip_esc: bool = False):
         """
         자가 HP 회복 스킬 시전 (내 피가 없을 때 나에게 힐)
+
+        skip_esc: 같은 대상(자기 자신)에게 연속으로 다시 시전할 때 True로 넘기면
+        ESC를 생략한다. 대상선택은 이미 Home으로 고정돼있어 ESC가 다시 필요
+        없고, ESC 한 번(딜레이 포함)만큼 시전 속도가 느려지는 걸 막아준다.
         """
         # 프로그램 화면에 등록된 '자가 회복 마법' 단축키를 찾습니다. 없으면 기본 키 '3'번을 씁니다.
         key, skill = self.resolve_recovery_key(getattr(self.state, "recovery_hp_spell", ""), default_key="3")
@@ -283,9 +287,10 @@ class RecoveryManager:
         # Home으로 대상선택 박스가 뜨는 동안엔 방향키가 캐릭터 대신 그 박스를
         # 움직이므로, 이동키가 눌려있으면 캐릭터가 멈춰버린다 - 먼저 놓는다.
         self.caster._release_movement_keys()
-        self.caster._press_fast("esc") # 혹시 열려있는 창이 있을 수 있으니 ESC를 먼저 누릅니다.
-        humanized_sleep(TIMING_CONFIG["key_gap"]) # 사람처럼 약간 기다립니다 (0.05초 등).
-        
+        if not skip_esc:
+            self.caster._press_fast("esc") # 혹시 열려있는 창이 있을 수 있으니 ESC를 먼저 누릅니다.
+            humanized_sleep(TIMING_CONFIG["key_gap"]) # 사람처럼 약간 기다립니다 (0.05초 등).
+
         self.caster._press_fast(key) # 힐 마법 단축키(예: 3)를 누릅니다.
         humanized_sleep(TIMING_CONFIG["spell_cast_gap"]) 
         
@@ -306,8 +311,8 @@ class RecoveryManager:
             repeat_count = random.randint(5, 8)
         repeat_count = max(1, int(repeat_count))
         print(f"[Recovery] ???? ? ?? ??: {repeat_count}?")
-        for _ in range(repeat_count):
-            self.execute_self_hp_recovery()
+        for i in range(repeat_count):
+            self.execute_self_hp_recovery(skip_esc=i > 0)
             humanized_sleep(min(0.08, float(TIMING_CONFIG.get("key_gap", 0.05))), variance=0.10)
 
     def execute_self_mp_recovery(self):

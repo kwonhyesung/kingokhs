@@ -730,7 +730,10 @@ class LogicSvc(threading.Thread):
                     self._self_hp_emergency_threshold,
                 ):
                     return current_hp > 0
-                self.recovery_manager.execute_self_hp_recovery()
+                # 첫 시전만 ESC로 대상선택을 새로 열고, 이후 연타는 이미 Home으로
+                # 고정된 자기 자신 타겟을 그대로 재사용 - ESC 왕복(딜레이 포함)을
+                # 없애서 초당 최대 5틱인 시전 속도에 최대한 붙인다.
+                self.recovery_manager.execute_self_hp_recovery(skip_esc=attempts > 0)
                 attempts += 1
 
             final_hp = int(getattr(self.state, "hp", 0) or 0)
