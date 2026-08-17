@@ -2610,6 +2610,7 @@ class AppView:
         normalized = self._normalize_role_name(role)
         self.state.role = normalized
         self.state.network_role = normalized
+        self.state.apply_role_good_hp(normalized)
         network_thread = getattr(self, "network_thread", None)
         if network_thread is not None:
             try:

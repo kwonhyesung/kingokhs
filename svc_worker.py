@@ -405,6 +405,7 @@ def main(
     network_cfg["role"] = resolved_role
     state.role = resolved_role
     state.network_role = resolved_role
+    state.apply_role_good_hp(resolved_role)
     state.network_server_ip = network_cfg.get("server_ip", state.network_server_ip)
     state.network_bind_host = network_cfg.get("bind_host", state.network_bind_host)
     state.network_telemetry_port = int(network_cfg.get("telemetry_port", state.network_telemetry_port))

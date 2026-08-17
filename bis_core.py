@@ -510,6 +510,31 @@ class GameState:
         except Exception:
             pass
 
+    @staticmethod
+    def _resolve_good_hp_from_combat(combat: dict, role: str, fallback: int) -> int:
+        """combat.good_hp는 역할별 최대체력이 달라(격수 100만대, 도사 10만대 등)
+        role별 dict({"격수": 1100000, ...})로도 쓸 수 있고, 구버전 호환을 위해
+        단일 숫자로도 쓸 수 있다."""
+        good_hp_cfg = combat.get("good_hp", fallback) if isinstance(combat, dict) else fallback
+        if isinstance(good_hp_cfg, dict):
+            v = good_hp_cfg.get(str(role or "").strip())
+            return max(100000, int(v)) if v else fallback
+        return max(100000, int(good_hp_cfg or 0))
+
+    def apply_role_good_hp(self, role: str):
+        """역할이 바뀔 때(GUI R 드롭다운) config.json의 combat.good_hp를 그
+        역할 기준으로 다시 적용. 격수/도사가 같은 config.json을 공유하므로
+        역할별 값이 없으면 기존 good_hp를 그대로 둔다."""
+        try:
+            config_file = os.path.join(os.path.dirname(__file__), "config.json")
+            if not os.path.exists(config_file):
+                return
+            with open(config_file, "r", encoding="utf-8") as f:
+                combat = json.load(f).get("combat", {})
+            self.good_hp = self._resolve_good_hp_from_combat(combat, role, self.good_hp)
+        except Exception:
+            pass
+
     def _load_runtime_settings(self):
         """config.json에서 전투/테스트 관련 런타임 설정 로드"""
         try:
@@ -519,11 +544,17 @@ class GameState:
             with open(config_file, "r", encoding="utf-8") as f:
                 conf = json.load(f)
 
+            network_for_role = conf.get("network", {})
+            role_for_good_hp = str(
+                (network_for_role.get("role") if isinstance(network_for_role, dict) else None)
+                or self.network_role or self.role or ""
+            )
+
             combat = conf.get("combat", {})
             if isinstance(combat, dict):
                 engage_range = combat.get("priest_engage_range", self.priest_engage_range)
                 self.priest_engage_range = max(0, int(engage_range))
-                self.good_hp = max(100000, int(combat.get("good_hp", self.good_hp) or 0))
+                self.good_hp = self._resolve_good_hp_from_combat(combat, role_for_good_hp, self.good_hp)
                 self.good_mp = max(0, int(combat.get("good_mp", self.good_mp) or 0))
 
             priest_test = conf.get("priest_test", {})
