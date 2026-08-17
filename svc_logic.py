@@ -1140,7 +1140,7 @@ class LogicSvc(threading.Thread):
         self.recovery_manager.execute_self_mp_recovery()
 
     def _recover_party_hp(self, snapshot: dict | None) -> bool:
-        if self._is_portal_support_paused():
+        if self._is_portal_support_paused(critical_override=self._is_warrior_critical(snapshot)):
             return False
         if not snapshot or not self._needs_hp_recovery_for(snapshot):
             return False
@@ -1371,7 +1371,7 @@ class LogicSvc(threading.Thread):
             self._set_combat_busy(previous_busy)
 
     def _cast_party_direct_heal(self, snapshot: dict | None = None) -> bool:
-        if self._is_portal_support_paused():
+        if self._is_portal_support_paused(critical_override=self._is_warrior_critical(snapshot)):
             return False
         if not self._is_hw_ready():
             return False
@@ -1400,7 +1400,7 @@ class LogicSvc(threading.Thread):
         return True
 
     def _cast_party_heewon(self, snapshot: dict | None = None) -> bool:
-        if self._is_portal_support_paused():
+        if self._is_portal_support_paused(critical_override=self._is_warrior_critical(snapshot)):
             return False
         if not self._is_hw_ready():
             return False
@@ -1427,7 +1427,7 @@ class LogicSvc(threading.Thread):
         return True
 
     def _cast_party_heewoncheom(self, snapshot: dict | None = None) -> bool:
-        if self._is_portal_support_paused():
+        if self._is_portal_support_paused(critical_override=self._is_warrior_critical(snapshot)):
             return False
         if not self._is_hw_ready():
             return False
@@ -2881,7 +2881,31 @@ class LogicSvc(threading.Thread):
             f"block_left={max(0.0, float(getattr(self.state, 'support_input_blocked_until', 0.0) or 0.0) - time.time()):.2f}s"
         )
 
-    def _is_portal_support_paused(self) -> bool:
+    def _is_warrior_critical(self, snapshot: dict | None) -> bool:
+        if not isinstance(snapshot, dict):
+            return False
+        hp_val = int(snapshot.get("hp", 0) or 0)
+        if hp_val <= 0:
+            return False
+        return hp_val <= max(10000, int(self._get_party_good_hp_threshold(snapshot) * 0.3))
+
+    def _is_portal_support_paused(self, critical_override: bool = False) -> bool:
+        # _run_dosa_service_cycle already lets a critical-HP warrior "heal
+        # anyway" through its own portal_follow_active check - but every
+        # heal-casting function below (_recover_party_hp,
+        # _cast_party_direct_heal, _cast_party_heewon,
+        # _cast_party_heewoncheom) independently re-checks
+        # portal_follow_active via this same function with no way to say
+        # "already cleared, this one's critical". Confirmed live: HP debug
+        # showed prepared=True, red_tab_enabled=True, portal_follow_active=True
+        # for 4+ consecutive cycles at 74609/1100000 HP - a fully unblocked
+        # target that never got healed purely because this second,
+        # uncoordinated gate silently overrode the outer "heal anyway"
+        # decision. critical_override lets a caller that already confirmed
+        # criticality skip only the portal_follow_active half; the
+        # short timed pause (_portal_support_pause_until) still applies.
+        if critical_override:
+            return time.time() < float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0)
         return (
             bool(getattr(self.state, "portal_follow_active", False))
             or time.time() < float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0)
@@ -2959,12 +2983,15 @@ class LogicSvc(threading.Thread):
         # anyway" from this first check got silently re-blocked by the
         # second one moments later. Confirmed live: warrior HP dropped
         # 839664 -> 147045 (and again 246575 -> 239850) fully unhealed while
-        # the two checks disagreed.
-        warrior_critical = bool(
-            isinstance(support_target, dict)
-            and int(support_target.get("hp", 0) or 0) > 0
-            and int(support_target.get("hp", 0) or 0) <= max(10000, int(self._get_party_good_hp_threshold(support_target) * 0.3))
-        )
+        # the two checks disagreed. _is_warrior_critical() is also passed
+        # into _is_portal_support_paused() by every heal-casting function
+        # further downstream - a THIRD independent portal_follow_active
+        # check used to live there with no way to know this was already
+        # cleared, silently overriding this decision yet again (confirmed
+        # live: HP debug showed prepared=True, red_tab_enabled=True,
+        # portal_follow_active=True for 4+ cycles at 74609/1100000, never
+        # healed).
+        warrior_critical = self._is_warrior_critical(support_target)
         if bool(getattr(self.state, "portal_follow_active", False)):
             # Portal-follow can legitimately take up to _portal_follow_timeout (25s)
             # to resolve. Don't let "still portal-following" override "warrior
