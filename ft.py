@@ -11,6 +11,7 @@ ft.ahk의 캡처 도구(Gui "Show")를 대체하는 Tkinter 버전. 매칭 엔�
 """
 import json
 import os
+import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -252,6 +253,7 @@ class FindTextGUI:
         ttk.Button(saved_btn_row, text="새로고침", command=self.on_refresh_saved_patterns).pack(side="left", padx=4)
         ttk.Button(saved_btn_row, text="선택 불러오기", command=self.on_load_saved_pattern).pack(side="left", padx=4)
         ttk.Button(saved_btn_row, text="선택 삭제", command=self.on_delete_saved_pattern).pack(side="left", padx=4)
+        ttk.Button(saved_btn_row, text="Git 저장(commit+push)", command=self.on_git_sync_patterns).pack(side="left", padx=10)
         self.saved_listbox = tk.Listbox(saved_frame, height=8)
         self.saved_listbox.pack(fill="x", pady=4)
         self._saved_pattern_index: list = []  # listbox row -> (category, name)
@@ -492,6 +494,27 @@ class FindTextGUI:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         self.on_refresh_saved_patterns()
         self.result_label.config(text=f"삭제됨: [{category}] '{name}'")
+
+    def on_git_sync_patterns(self):
+        """findtext_patterns.json만 골라서 commit + push.
+        여러 PC가 각자 패턴을 추가하는 구조라 pull(rebase)로 먼저 남의 패턴을
+        받아온 뒤 올려야 서로 덮어쓰지 않는다."""
+        try:
+            status = subprocess.run(
+                ["git", "status", "--porcelain", "findtext_patterns.json"],
+                cwd=SCRIPT_DIR, capture_output=True, text=True, check=True,
+            )
+            if not status.stdout.strip():
+                self.result_label.config(text="Git: 패턴 변경사항 없음 (이미 최신)")
+                return
+            subprocess.run(["git", "add", "findtext_patterns.json"], cwd=SCRIPT_DIR, check=True)
+            subprocess.run(["git", "commit", "-m", "Update findtext patterns"], cwd=SCRIPT_DIR, check=True)
+            subprocess.run(["git", "pull", "--rebase"], cwd=SCRIPT_DIR, check=True)
+            subprocess.run(["git", "push"], cwd=SCRIPT_DIR, check=True)
+        except subprocess.CalledProcessError as e:
+            messagebox.showerror("Git 오류", f"패턴 저장(git) 실패:\n{e}\n\n직접 git으로 충돌을 해결해야 할 수 있습니다.")
+            return
+        self.result_label.config(text="Git: 패턴 commit + push 완료")
 
     # ---------------------------------------------------------- 매칭 모드 / 색상 후보
     def _on_mode_change(self):
