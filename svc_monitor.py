@@ -11,6 +11,7 @@ import time
 import threading
 import os
 import json
+import re
 import cv2
 import numpy as np
 import win32gui
@@ -165,6 +166,36 @@ class MonitorSvc(threading.Thread):
             return False
         self._roi_last_processed_at[region_name] = now_ts
         return True
+
+    @staticmethod
+    def _compose_map_text_with_floor_digits(hits: list[dict]) -> tuple[str, float]:
+        """도삭산처럼 층 수가 너무 많아 층별로 통짜 패턴을 다 못 찍는 던전은,
+        기본 이름("도삭산") 패턴 하나 + 숫자 글리프 패턴("도삭산_0" ~ "도삭산_9")
+        여러 개를 조합해서 층 번호를 만든다 - 화면에 실제로 보이는 자릿수만큼만
+        (1~3자리) 왼쪽부터 이어붙이고, 앞에 없는 0은 안 붙인다(정수 형태).
+        일반 던전(패턴 하나가 전체 이름+층수를 통짜로 담음, 예: "흉가1")은
+        digit-suffix 패턴이 아예 없으니 그대로 첫 히트를 쓴다."""
+        digit_suffix = re.compile(r"^(.+)_(\d)$")
+        base_hits = [h for h in hits if not digit_suffix.match(str(h.get("name", "")))]
+        digit_hits = [h for h in hits if digit_suffix.match(str(h.get("name", "")))]
+
+        if base_hits:
+            base_name = str(base_hits[0]["name"]).strip()
+            score = float(base_hits[0].get("score", 1.0))
+            own_digits = [h for h in digit_hits if digit_suffix.match(str(h["name"])).group(1) == base_name]
+            if own_digits:
+                own_digits.sort(key=lambda h: h.get("x", 0))
+                floor = "".join(digit_suffix.match(str(h["name"])).group(2) for h in own_digits[:3])
+                return f"{base_name}{floor}", score
+            return base_name, score
+
+        if digit_hits:
+            digit_hits.sort(key=lambda h: h.get("x", 0))
+            base_name = digit_suffix.match(str(digit_hits[0]["name"])).group(1)
+            floor = "".join(digit_suffix.match(str(h["name"])).group(2) for h in digit_hits[:3])
+            return f"{base_name}{floor}", 1.0
+
+        return "", 0.0
 
     @staticmethod
     def _fast_crop_signature(crop: np.ndarray) -> tuple:
@@ -2056,8 +2087,7 @@ class MonitorSvc(threading.Thread):
                         ft_map_hits = []
                         print(f"[MapOCR] find_text_scan error: {e}")
                     if ft_map_hits:
-                        map_text = str(ft_map_hits[0]["name"]).strip()
-                        score = float(ft_map_hits[0].get("score", 1.0))
+                        map_text, score = self._compose_map_text_with_floor_digits(ft_map_hits)
                     else:
                         try:
                             map_text = str(self.map_ocr.recognize(crop) or "").strip()
