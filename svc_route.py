@@ -1271,18 +1271,12 @@ class RouteSvc(threading.Thread):
         enter_dir = normalize_move_dir(self._portal_follow_dir)
         if not enter_dir:
             return False
-        # Exact-tile match essentially never happens with polled/async
-        # coordinate updates - live logs across every recent portal
-        # crossing show "enter zone" (this deliberate tap) firing zero
-        # times, while _complete_portal_follow_on_self_transition's passive
-        # coordinate-jump fallback completed all of them instead, some from
-        # tiles still far from warrior_last (one case 8 tiles off, mid a
-        # stuck-recovery detour). That fallback doesn't check position at
-        # all, so it can credit a jump that happened somewhere else
-        # entirely as "the crossing succeeded". Accepting a 1-tile gap here
-        # lets this deliberate, position-checked tap actually be the one
-        # that fires in the normal case.
-        if max(abs(current_pos[0] - warrior_last[0]), abs(current_pos[1] - warrior_last[1])) > 1:
+        # Arrival must be an exact tile match, not "close enough" - the
+        # approach move below is a short single-tile tap (base move_hold,
+        # never the gap-scaled longer hold - see the portal_follow
+        # exemption further down in _move_toward), so landing exactly on
+        # warrior_last is what that short tap is for.
+        if current_pos != warrior_last:
             return False
         if getattr(self, "_portal_enter_attempted", False):
             # Already tapped this key twice for this arm - don't keep
