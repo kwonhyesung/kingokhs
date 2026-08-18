@@ -1047,9 +1047,20 @@ class RouteSvc(threading.Thread):
             and cur_ok
             and should_detect_warrior_transition(prev[0], prev[1], cur_x, cur_y, jump_distance=WARRIOR_TRANSITION_JUMP_DISTANCE)
         )
-        if coord_jumped and not map_changed and not map_info_changed and event_prev is None:
-            # No corroborating signal - only trust a bare distance jump as a real
-            # portal if the implied speed is faster than normal walking can produce.
+        if coord_jumped and not map_changed and event_prev is None:
+            # map_info_changed is a raw pixel-diff of the map-name crop (see
+            # svc_monitor.py's map_signature) - it flips on any visual noise
+            # in that region (text flicker, an overlay passing over it), not
+            # just real map changes. map_changed (recognized map name/
+            # fingerprint) is the trustworthy version of "the map changed";
+            # map_info_changed alone must not skip the speed check below, or
+            # ordinary fast walking + a stray pixel flicker gets misread as
+            # a portal crossing.
+            cur_received_at = float(remote_data.get("_received_at") or 0.0)
+            prev_ts = float(getattr(self, "_last_warrior_coord_ts", 0.0) or 0.0)
+            elapsed = cur_received_at - prev_ts if (cur_received_at > 0.0 and prev_ts > 0.0) else 0.0
+            jump_distance = follow_manhattan_gap(prev[0], prev[1], cur_x, cur_y)
+            coord_jumped = is_implausible_walk_speed(jump_distance, elapsed)
             cur_received_at = float(remote_data.get("_received_at") or 0.0)
             prev_ts = float(getattr(self, "_last_warrior_coord_ts", 0.0) or 0.0)
             elapsed = cur_received_at - prev_ts if (cur_received_at > 0.0 and prev_ts > 0.0) else 0.0
@@ -1093,7 +1104,11 @@ class RouteSvc(threading.Thread):
         if event_prev or (
             prev
             and is_plausible_map_coord(prev[0], prev[1])
-            and (coord_jumped or map_changed or map_info_changed)
+            # map_info_changed dropped from this OR: it's raw crop-pixel
+            # noise (see comment above) and shouldn't be able to arm a
+            # portal-follow by itself with zero coordinate or map-name
+            # evidence backing it up.
+            and (coord_jumped or map_changed)
             and not (map_only_signal and in_portal_cooldown)
         ):
             source_map_sig = prev_map_sig if prev_map_sig and any(prev_map_sig) else map_sig

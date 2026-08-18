@@ -2991,16 +2991,6 @@ class LogicSvc(threading.Thread):
         print(f"[PartyHealGateDiag] blocked this cycle: warrior transition immediate clear (started_at={started_at:.2f})")
         return True
 
-        self._force_portal_esc_clear()
-        print(
-            "[PortalFollow] immediate clear on warrior transition: "
-            f"warrior_last={warrior_last}, portal={portal_xy}, now=({cur_x}, {cur_y}), "
-            f"dir={enter_dir or '-'}, step_dir={prev_step or '-'}, "
-            f"coord_jump={coord_jumped}, map_changed={map_changed}, "
-            f"event_seq={event_seq or '-'}, map={prev_map_sig}->{map_sig}"
-        )
-        return True
-
     def _run_dosa_service_cycle(self, support_target: dict | None) -> bool:
         """
         ?? ??? ?? ??.
