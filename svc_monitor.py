@@ -2088,6 +2088,10 @@ class MonitorSvc(threading.Thread):
                         print(f"[MapOCR] find_text_scan error: {e}")
                     if ft_map_hits:
                         map_text, score = self._compose_map_text_with_floor_digits(ft_map_hits)
+                        if now_map - float(getattr(self, "_last_map_hits_log_time", 0.0) or 0.0) >= 1.0:
+                            self._last_map_hits_log_time = now_map
+                            hit_names = [str(h.get("name", "")) for h in ft_map_hits]
+                            print(f"[MapOCR] hits={hit_names} -> composed={map_text!r}")
                     else:
                         try:
                             map_text = str(self.map_ocr.recognize(crop) or "").strip()
