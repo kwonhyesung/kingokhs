@@ -1579,7 +1579,17 @@ class RouteSvc(threading.Thread):
             step_dir = primary_dir
             blocked_cells_roi = self._get_blocked_cells()
             picked_unblocked = False
-            for candidate in (primary_dir, secondary_dir):
+            # Toward-target axes first (primary, then secondary), but if
+            # both of those are walled off, try the other two directions
+            # too before giving up - this used to stop at 2 candidates, so
+            # a cell blocked on both toward-target sides had no escape and
+            # just kept re-issuing the same known-blocked primary move
+            # every cycle (confirmed live: dosa stuck 8 tiles from a portal
+            # target for several seconds with only one blocked cell ever
+            # recorded, going nowhere until an unrelated coordinate jump
+            # ended portal-follow early).
+            fallback_dirs = [d for d in ("up", "down", "left", "right") if d not in (primary_dir, secondary_dir)]
+            for candidate in (primary_dir, secondary_dir, *fallback_dirs):
                 if candidate is None:
                     continue
                 if _nav_step_from_dir(int(cx), int(cy), candidate) not in blocked_cells_roi:
@@ -1587,15 +1597,15 @@ class RouteSvc(threading.Thread):
                     picked_unblocked = True
                     break
             if not picked_unblocked:
-                # Both candidates are in blocked_cells_roi memory - step_dir
-                # falls back to primary_dir above and this branch still
-                # issues that (possibly-blocked) move below (unlike the
-                # nav_pick_step_direction path, this one never returns
+                # All 4 neighbor cells are in blocked_cells_roi memory -
+                # step_dir falls back to primary_dir above and this branch
+                # still issues that (possibly-blocked) move below (unlike
+                # the nav_pick_step_direction path, this one never returns
                 # None), so a genuinely stuck cell here looks like ordinary
                 # movement in the log with no explanation for why position
                 # isn't advancing.
                 self._log_portal_move_block(
-                    f"both candidates in blocked_cells_roi: primary={primary_dir} secondary={secondary_dir}"
+                    f"all 4 directions in blocked_cells_roi: primary={primary_dir} secondary={secondary_dir}"
                 )
             next_grid = (int(cx), int(cy))
             blockers = []
