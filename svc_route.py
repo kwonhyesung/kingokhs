@@ -1520,6 +1520,24 @@ class RouteSvc(threading.Thread):
             # every portal-follow step before allowing the next one.
             self._log_portal_move_block("portal_move_settle_until")
             return False
+        if not bool(getattr(self, "_portal_follow_active", False)) and time.time() < float(
+            getattr(self, "_portal_follow_cooldown_until", 0.0) or 0.0
+        ):
+            # _finish_portal_follow() already gives new transition DETECTION
+            # a grace window via this same timer, but ordinary follow
+            # movement wasn't respecting it - confirmed live: right after
+            # "arrived_no_transition" gave up on a crossing that may have
+            # actually landed, self.state.x/y and current_map alternated
+            # between the pre- and post-crossing values every single cycle
+            # (12,0/도삭산804 <-> 26,28/도삭산805), and normal follow kept
+            # issuing moves off whichever reading it happened to catch,
+            # sending the character back and forth through the door
+            # instead of just letting position/map settle first.
+            now = time.time()
+            if now - float(getattr(self, "_last_portal_cooldown_move_log_time", 0.0) or 0.0) >= 1.0:
+                self._last_portal_cooldown_move_log_time = now
+                print("[NavBlock] follow movement withheld: portal_follow_cooldown_until (letting position settle)")
+            return False
 
         cx, cy = self.state.x, self.state.y
         dx, dy = tx - cx, ty - cy
