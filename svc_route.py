@@ -790,21 +790,19 @@ class RouteSvc(threading.Thread):
         dir_norm = normalize_move_dir(enter_dir)
         started = float(started_at if started_at is not None else time.time())
         self._portal_follow_active = True
-        # Nav target is one tile PAST the door in enter_dir, not the door
-        # tile itself. The old approach walked to warrior_xy, stopped, then
-        # had _complete_portal_follow_if_arrived tap enter_dir from a
-        # standstill - confirmed live across many attempts (with both
-        # force_press and a real held hold_move) that this specific door
-        # never once triggers from a standing tap; it visibly walks the
-        # dosa BACKWARD instead. Every successful crossing of that same
-        # door this session happened via ordinary follow movement landing
-        # on/through it mid-step (self_transition). Extending the nav
-        # target keeps _move_toward() walking straight through instead of
-        # ever stopping on the door tile to begin with.
+        # Nav target is the warrior's own last coordinate itself (the
+        # portal tile), not a tile past it - walk exactly there, then
+        # _complete_portal_follow_if_arrived taps enter_dir once from that
+        # standstill. (Previously this targeted one tile past the door so
+        # ordinary walking would carry the dosa through it, since an
+        # earlier standstill-tap attempt never triggered doors live - but
+        # that attempt used force_press(), a single instant packet;
+        # _complete_portal_follow_if_arrived was already fixed to use a
+        # real held hold_move() instead, matching how ordinary walking
+        # crosses doors, but the caller that would have exercised the
+        # fixed version was never reconnected.)
         self._portal_follow_approach = warrior_xy
-        self._portal_follow_coord = (
-            _nav_step_from_dir(warrior_xy[0], warrior_xy[1], dir_norm) if dir_norm else warrior_xy
-        )
+        self._portal_follow_coord = warrior_xy
         self._portal_follow_dir = dir_norm
         self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
         self._portal_follow_started_at = started
@@ -2089,18 +2087,17 @@ class RouteSvc(threading.Thread):
             if follow_navigation_active and not warrior_route_priority:
                 follow_target = current_follow_target or self._calc_follow_target()
                 if follow_target:
-                    # _complete_portal_follow_if_arrived() used to run here
-                    # first: stop exactly on the door tile, then tap
-                    # enter_dir from a standstill. Confirmed live it never
-                    # once triggers this game's portals (walks backward
-                    # instead) - and since _arm_portal_follow now targets
-                    # one tile PAST the door, the dosa passes through the
-                    # exact door tile on its way there, which would still
-                    # hand off to this broken stop-and-tap every time.
-                    # Removed so normal walking (_move_toward below) carries
-                    # it straight through instead, uninterrupted.
                     self._set_nav_context("follow")
                     tx, ty = follow_target
+                    if bool(getattr(self, "_portal_follow_active", False)) and self._complete_portal_follow_if_arrived():
+                        # Arrived exactly on the portal tile and tapped
+                        # enter_dir (entered/failed - either way
+                        # _finish_portal_follow already ran), or already
+                        # tapped this arm and still waiting. Nothing more
+                        # to do this cycle.
+                        self._nav_attempt_pos = None
+                        self._nav_attempt_started_at = 0.0
+                        continue
                     cx, cy = self.state.x, self.state.y
                     gap_x = abs(tx - cx)
                     gap_y = abs(ty - cy)
@@ -2108,17 +2105,14 @@ class RouteSvc(threading.Thread):
                     hold_follow_gap = 0 if bool(getattr(self, "_portal_follow_active", False)) else int(getattr(self, "_support_follow_hold_distance", 1) or 1)
                     if should_hold_follow_position(tx, ty, cx, cy, max_gap=hold_follow_gap):
                         if bool(getattr(self, "_portal_follow_active", False)):
-                            # Arriving at the nav target does not always mean the
-                            # door actually triggered, but creeping further tiles
-                            # to force it was the wrong model (3 attempts, still
-                            # got stuck chasing doors that were never really there,
-                            # blocking heal/follow the whole time). If we are here
-                            # and nothing changed, treat arrival itself as done:
-                            # finish portal-follow and hand back to normal follow,
-                            # which will pick up the warrior live position - if a
-                            # real crossing is still pending, the warrior moving
-                            # generates a fresh, accurate transition signal instead
-                            # of us guessing one extra tile at a time.
+                            # Fallback safety net only - the normal path is
+                            # _complete_portal_follow_if_arrived() above,
+                            # which already handles arrival+tap and always
+                            # finishes portal-follow one way or another.
+                            # Reaching here while still portal_follow_active
+                            # means that call returned False despite gap=0
+                            # (e.g. enter_dir missing) - give up rather than
+                            # sit here forever.
                             self._finish_portal_follow("arrived_no_transition")
                         # [FIX] Follow range ?덉뿉???湲???Stuck ??대㉧ 由ъ뀑 (?대룞 ???대룄 Stuck???꾨떂)
                         self._nav_attempt_pos = None
