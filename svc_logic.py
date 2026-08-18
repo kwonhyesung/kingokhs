@@ -2889,6 +2889,16 @@ class LogicSvc(threading.Thread):
             return False
         if bool(getattr(self.state, "service_active", False)):
             return True
+        if not self._is_game_window_active():
+            # svc_monitor가 게임창 비포커스를 감지하면 안전을 위해
+            # service_active를 끈다 - 여기서 창 포커스 확인 없이 바로
+            # 되살리면 그 안전장치와 계속 밀당하며 켜짐/꺼짐이 반복된다
+            # (로그에 [F2Watchdog] restored가 수백 번 찍히는 원인).
+            now_diag = time.time()
+            if now_diag - float(getattr(self, "_last_restore_gate_diag_time", 0.0) or 0.0) >= 0.5:
+                self._last_restore_gate_diag_time = now_diag
+                print("[RestoreGateDiag] blocked: game window not active")
+            return False
         if not (
             bool(getattr(self.state, "auto_hunt", False))
             and bool(getattr(self.state, "nav_follow_enabled", False))
