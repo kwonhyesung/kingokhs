@@ -1303,6 +1303,12 @@ class LogicSvc(threading.Thread):
         current_hp = int(getattr(self.state, "hp", 0) or 0)
         if should_trigger_self_hp_emergency(current_hp, self._self_hp_emergency_threshold):
             return False
+        if bool(getattr(self.state, "portal_follow_active", False)):
+            # Keep the request pending (don't clear the flag) so it retries
+            # once the portal crossing finishes, instead of the request
+            # getting silently dropped by _prepare_direct_tab_heal_target's
+            # own portal_follow_active guard below.
+            return False
         self._direct_heal_prepare_requested = False
         self._invalidate_warrior_redtab_verification()
         moving_follow = bool(
@@ -1338,6 +1344,15 @@ class LogicSvc(threading.Thread):
 
     def _prepare_direct_tab_heal_target(self) -> bool:
         if not self._is_hw_ready():
+            return False
+        if bool(getattr(self.state, "portal_follow_active", False)):
+            # esc>tab>tab opens a target-select box and eats movement keys
+            # (see _release_movement_keys_only below) - doing that before
+            # the warrior's portal crossing is confirmed complete can steal
+            # the follow's own keys mid-step and break the crossing. The
+            # warrior-critical override further up lets healing proceed
+            # during portal-follow, but re-acquiring the target this way
+            # must still wait for portal_follow_active to clear first.
             return False
         previous_busy = bool(getattr(self.state, "is_combat_busy", False))
         self._ntab_in_progress = True
