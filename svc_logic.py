@@ -1171,7 +1171,7 @@ class LogicSvc(threading.Thread):
         self.recovery_manager.execute_self_mp_recovery()
 
     def _recover_party_hp(self, snapshot: dict | None) -> bool:
-        if self._is_portal_support_paused(critical_override=self._is_warrior_critical(snapshot)):
+        if self._is_portal_support_paused():
             return False
         if not snapshot or not self._needs_hp_recovery_for(snapshot):
             return False
@@ -1417,7 +1417,7 @@ class LogicSvc(threading.Thread):
             self._set_combat_busy(previous_busy)
 
     def _cast_party_direct_heal(self, snapshot: dict | None = None) -> bool:
-        if self._is_portal_support_paused(critical_override=self._is_warrior_critical(snapshot)):
+        if self._is_portal_support_paused():
             return False
         if not self._is_hw_ready():
             return False
@@ -1446,7 +1446,7 @@ class LogicSvc(threading.Thread):
         return True
 
     def _cast_party_heewon(self, snapshot: dict | None = None) -> bool:
-        if self._is_portal_support_paused(critical_override=self._is_warrior_critical(snapshot)):
+        if self._is_portal_support_paused():
             return False
         if not self._is_hw_ready():
             return False
@@ -1473,7 +1473,7 @@ class LogicSvc(threading.Thread):
         return True
 
     def _cast_party_heewoncheom(self, snapshot: dict | None = None) -> bool:
-        if self._is_portal_support_paused(critical_override=self._is_warrior_critical(snapshot)):
+        if self._is_portal_support_paused():
             return False
         if not self._is_hw_ready():
             return False
@@ -2946,31 +2946,19 @@ class LogicSvc(threading.Thread):
             f"block_left={max(0.0, float(getattr(self.state, 'support_input_blocked_until', 0.0) or 0.0) - time.time()):.2f}s"
         )
 
-    def _is_warrior_critical(self, snapshot: dict | None) -> bool:
-        if not isinstance(snapshot, dict):
-            return False
-        hp_val = int(snapshot.get("hp", 0) or 0)
-        if hp_val <= 0:
-            return False
-        return hp_val <= max(10000, int(self._get_party_good_hp_threshold(snapshot) * 0.3))
-
-    def _is_portal_support_paused(self, critical_override: bool = False) -> bool:
-        # _run_dosa_service_cycle already lets a critical-HP warrior "heal
-        # anyway" through its own portal_follow_active check - but every
-        # heal-casting function below (_recover_party_hp,
-        # _cast_party_direct_heal, _cast_party_heewon,
-        # _cast_party_heewoncheom) independently re-checks
-        # portal_follow_active via this same function with no way to say
-        # "already cleared, this one's critical". Confirmed live: HP debug
-        # showed prepared=True, red_tab_enabled=True, portal_follow_active=True
-        # for 4+ consecutive cycles at 74609/1100000 HP - a fully unblocked
-        # target that never got healed purely because this second,
-        # uncoordinated gate silently overrode the outer "heal anyway"
-        # decision. critical_override lets a caller that already confirmed
-        # criticality skip only the portal_follow_active half; the
-        # short timed pause (_portal_support_pause_until) still applies.
-        if critical_override:
-            return time.time() < float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0)
+    def _is_portal_support_paused(self) -> bool:
+        # No critical-HP override here, on purpose: the warrior's red_tab
+        # target is gone the instant they cross a portal (they're on a
+        # different map), so pressing the heal key with no valid target
+        # doesn't just whiff - it pops open the game's own target-select
+        # box. That box then eats the next inputs (only ENTER-self or ESC
+        # clears it) and red_tab has to be fully re-acquired via
+        # esc>tab>tab afterward. An earlier version let critical HP bypass
+        # this to avoid leaving the warrior unhealed through a long portal
+        # crossing, but that's the wrong fix - the right one is for the
+        # follow-through-portal move (svc_route.py's arrival handling) to
+        # finish quickly so this pause is short, not to press heal into a
+        # gone target and risk that broken state.
         return (
             bool(getattr(self.state, "portal_follow_active", False))
             or time.time() < float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0)
@@ -3044,39 +3032,21 @@ class LogicSvc(threading.Thread):
             self._pace_service_loop("active")
             return True
 
-        # Computed once and reused by every portal_follow_active check in this
-        # cycle - this used to be recomputed ad hoc at each check, and the
-        # later one (now further down) didn't have it at all, so "heal
-        # anyway" from this first check got silently re-blocked by the
-        # second one moments later. Confirmed live: warrior HP dropped
-        # 839664 -> 147045 (and again 246575 -> 239850) fully unhealed while
-        # the two checks disagreed. _is_warrior_critical() is also passed
-        # into _is_portal_support_paused() by every heal-casting function
-        # further downstream - a THIRD independent portal_follow_active
-        # check used to live there with no way to know this was already
-        # cleared, silently overriding this decision yet again (confirmed
-        # live: HP debug showed prepared=True, red_tab_enabled=True,
-        # portal_follow_active=True for 4+ cycles at 74609/1100000, never
-        # healed).
-        warrior_critical = self._is_warrior_critical(support_target)
+        # No critical-HP bypass here (see _is_portal_support_paused for why):
+        # the warrior's red_tab target is gone the moment they cross a
+        # portal, so pressing heal mid-crossing pops the game's
+        # target-select box instead of actually healing. Keeping this pause
+        # short is a follow-through-portal speed problem, not something to
+        # route around by casting into a target that isn't there.
         if bool(getattr(self.state, "portal_follow_active", False)):
-            # Portal-follow can legitimately take up to _portal_follow_timeout (25s)
-            # to resolve. Don't let "still portal-following" override "warrior
-            # is about to die" - fall through to normal heal handling once HP
-            # is critically low, even mid portal-follow.
-            if not warrior_critical:
-                self._portal_support_pause_until = max(
-                    float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0),
-                    time.time() + 0.4,
-                )
-                self._invalidate_warrior_redtab_verification()
-                self._log_dosa_f2_idle_reason("portal_follow_active stop_party_heal", interval=0.4)
-                self._pace_service_loop("active")
-                return True
-            self._log_dosa_f2_idle_reason(
-                f"portal_follow_active BUT warrior_critical hp={support_target.get('hp')}: heal anyway",
-                interval=0.4,
+            self._portal_support_pause_until = max(
+                float(getattr(self, "_portal_support_pause_until", 0.0) or 0.0),
+                time.time() + 0.4,
             )
+            self._invalidate_warrior_redtab_verification()
+            self._log_dosa_f2_idle_reason("portal_follow_active stop_party_heal", interval=0.4)
+            self._pace_service_loop("active")
+            return True
 
         if isinstance(support_target, dict):
             map_sync_status = classify_map_sync(self.state.get_all(), support_target, now=time.time())
@@ -3288,7 +3258,11 @@ class LogicSvc(threading.Thread):
         portal_follow_active = bool(getattr(self.state, "portal_follow_active", False))
         portal_retarget_requested = bool(getattr(self.state, "portal_follow_retarget_requested", False))
 
-        if portal_follow_active and not warrior_critical:
+        if portal_follow_active:
+            # Second, independent catch of the same rule as the early gate
+            # above - state.portal_follow_active is set by RouteSvc's own
+            # thread, so kept here in case it flips true in the gap between
+            # that check and this one. No critical-HP bypass, same reason.
             self._invalidate_warrior_redtab_verification()
             self._portal_retarget_attempt_count = 0
             self._log_dosa_f2_idle_reason(
