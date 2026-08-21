@@ -181,7 +181,10 @@ from typing import Tuple, Optional, Dict
 from enum import Enum, auto
 
 # ?뚣끇瑗???????袁る７??
-from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep, discord_notify
+from bis_core import (
+    Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep, discord_notify,
+    is_game_window_active, find_game_window_any, GAME_WINDOW_TITLE_TOKENS,
+)
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc
 from svc_sentinel import SentinelThread
@@ -202,17 +205,18 @@ except Exception:
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-WIN_KEY = "ory"
 MULT = 1
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_env_file(SCRIPT_DIR)
 LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
 LOG_FILE_STR = os.path.join(SCRIPT_DIR, "game_log_str.csv")
 
-from config_utils import *
-from gui_overlay import *
-from background_threads import *
-from gui_app import *
+# import *를 없애고 실제로 쓰는 이름만 명시적으로 가져온다(2026-08-20, gui_app.py와
+# 같은 이유). gui_overlay는 이 파일에서 실제로 안 쓰여서 뺐다 - 런타임 NameError
+# 나면 여기부터 확인할 것.
+from config_utils import load_network_config
+from background_threads import LoggerThread, NetworkThread
+from gui_app import AppView
 
 # ?袁⑸열 ??살쟿??筌〓챷??獄??遺우춭 癰궰??
 action_thread = None
@@ -250,45 +254,6 @@ def _dispatch_gui_hotkey(gui_instance, hotkey_name: str, callback):
         print(f"[Hotkey] {hotkey_name} queue full or unavailable")
 
 
-def _is_game_window_active(state) -> bool:
-    try:
-        current_hwnd = win32gui.GetForegroundWindow()
-    except Exception:
-        return False
-
-    candidate_hwnds = [current_hwnd]
-    try:
-        root_hwnd = win32gui.GetAncestor(current_hwnd, win32con.GA_ROOT)
-        if root_hwnd and root_hwnd not in candidate_hwnds:
-            candidate_hwnds.append(root_hwnd)
-    except Exception:
-        pass
-
-    state_hwnd = getattr(state, "hwnd", None)
-    if state_hwnd and state_hwnd in candidate_hwnds:
-        return True
-
-    for hwnd_candidate in candidate_hwnds:
-        try:
-            title = win32gui.GetWindowText(hwnd_candidate) or ""
-        except Exception:
-            title = ""
-        if any(token.lower() in title.lower() for token in ["ory", "바람", "aion"]):
-            state.hwnd = hwnd_candidate
-            return True
-
-    refreshed_hwnd = find_game_window(WIN_KEY)
-    if refreshed_hwnd:
-        state.hwnd = refreshed_hwnd
-        if refreshed_hwnd in candidate_hwnds:
-            return True
-        try:
-            refreshed_title = win32gui.GetWindowText(refreshed_hwnd) or ""
-            if any(token.lower() in refreshed_title.lower() for token in ["ory", "바람", "aion"]):
-                return True
-        except Exception:
-            pass
-    return False
 
 def main(
     preset_role: Optional[str] = None,
@@ -363,14 +328,14 @@ def main(
     print("[Stealth] [OK] Environment safety check complete")
 
     # Move the game window to (0,0) and force a fixed size.
-    hwnd = find_game_window(WIN_KEY)
+    hwnd = find_game_window_any()
     if hwnd:
         import win32con
         # Force the game window to 1920x1080.
         win32gui.SetWindowPos(hwnd, win32con.HWND_TOP, 0, 0, 1920, 1080, win32con.SWP_SHOWWINDOW)
         print("[Window] Game window moved to (0, 0) and resized to 1920x1080.")
     else:
-        print(f"[Warn] Game window not found. (title contains: {WIN_KEY})")
+        print(f"[Warn] Game window not found. (title contains one of: {GAME_WINDOW_TITLE_TOKENS})")
 
     global action_thread, reader_thread
     state = GameState()
@@ -602,7 +567,7 @@ def main(
 
                     # 5. 실제 N_tab -> red_tab 테스트
                     try:
-                        if not _is_game_window_active(state):
+                        if not is_game_window_active(state):
                             print("[NTabTest] 게임창이 활성화되어 있지 않아 테스트를 건너뜁니다.")
                             return
 

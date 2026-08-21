@@ -30,7 +30,6 @@ from support_runtime_rules import (
     should_allow_follow_navigation,
     should_clear_target_box_after_support_stuck,
     should_defer_stuck_escape_for_support,
-    should_hold_follow_gap,
     should_hold_follow_position,
     should_retarget_after_support_follow_stuck,
     should_detect_warrior_transition,
@@ -237,7 +236,6 @@ class RouteSvc(threading.Thread):
         self._last_nav_trace_target = None
         self._last_nav_trace_pos = None
         self._last_nav_trace_gap = None
-        self._last_ntab_success_direction = None
         self._blocked_cells_until: dict[tuple[int, int], float] = {}
         self._blocked_cell_hits: dict[tuple[int, int], int] = {}
         self._blocked_cell_base_ttl = 6.0
@@ -280,12 +278,6 @@ class RouteSvc(threading.Thread):
         self.state.portal_follow_dir = None
 
     # ----------------------------------------------------------
-    def _should_hold_follow_at_gap(self, gap: int) -> bool:
-        return should_hold_follow_gap(
-            gap,
-            hold_distance=int(getattr(self, "_support_follow_hold_distance", 1) or 1),
-        )
-
     def _get_nav_grid_pos(self) -> tuple[int, int]:
         """char_grid가 초기값이면 실제 좌표를 blocked-memory 기준으로 사용한다."""
         try:
@@ -603,14 +595,11 @@ class RouteSvc(threading.Thread):
             self._quick_support_follow_escape(self._calc_follow_target())
             print("[Recover] support follow stalled with confirmed red_tab: use detour, keep target.")
             return
-        # 이동 키 입력 후 좌표 미변경 = box 충돌로 간주: ESC 1회 + F2 재준비 요청
-        try:
-            hw.humanized_press("esc")
-            humanized_sleep(0.05)
-        except Exception:
-            pass
-        self.state.box_collision_reprepare_requested = True
-        print("[Recover] box collision suspected: esc once + request F2 reprepare.")
+        # 도사/따라가기 상황이 아니면(예: 격수 본인, 또는 follow 시작 전) red_tab
+        # 타겟박스 자체가 없으므로 "박스 충돌"로 볼 근거가 없다 - ESC+재타겟
+        # 요청은 여기선 아무 의미가 없고, 실제 벽/장애물이었을 때 오히려 도움이
+        # 안 된다. 다른 stuck 상황에서 이미 쓰는 일반 회피 이동으로 처리한다.
+        self._escape_stuck(rewind_waypoint=False)
 
     def _mark_nav_attempt(self):
         current_pos = (self.state.x, self.state.y)
@@ -1470,16 +1459,6 @@ class RouteSvc(threading.Thread):
         self._last_follow_target = (int(follow_target[0]), int(follow_target[1]))
         self._last_follow_target_ts = time.time()
         return follow_target
-
-    def _is_follow_reposition_needed(self) -> bool:
-        if not bool(getattr(self.state, "nav_follow_enabled", False)):
-            return False
-        follow_target = self._calc_follow_target()
-        if not follow_target:
-            return False
-        tx, ty = follow_target
-        cx, cy = int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0)
-        return not should_hold_follow_position(tx, ty, cx, cy)
 
     def _log_portal_move_block(self, reason: str) -> None:
         # Only the caller-facing gate at the bottom of _move_toward used to

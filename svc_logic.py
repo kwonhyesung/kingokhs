@@ -38,7 +38,8 @@ import win32con
 
 from bis_core import (
     AppStatus, hw, GameState,
-    TIMING_CONFIG, humanized_sleep, tc, display_game_hotkey, discord_notify
+    TIMING_CONFIG, humanized_sleep, tc, display_game_hotkey, discord_notify,
+    is_game_window_active,
 )
 from bis_spell import RecoveryManager
 from support_runtime_rules import (
@@ -57,7 +58,6 @@ from support_runtime_rules import (
     should_cast_periodic_heewon,
     classify_map_sync,
     should_continue_self_hp_recovery,
-    should_hold_follow_gap,
     should_hold_follow_position,
     should_ignore_monster_combat_for_support_autohunt,
     should_prioritize_self_mp,
@@ -66,6 +66,7 @@ from support_runtime_rules import (
     should_trigger_self_hp_emergency,
     speed_up_delay,
     support_retarget_block_duration,
+    build_warrior_search_sequence,
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -127,9 +128,8 @@ class LogicSvc(threading.Thread):
  
         self.recovery_manager = RecoveryManager(self.state)
         self._support_self_pattern = "jump2"
-        self._support_warrior_pattern = "jump"
-        self._support_wizard_pattern = "dah"
-        self._ntab_repeat_per_direction = 1
+        self._support_warrior_pattern = "점프_user"
+        self._support_wizard_pattern = "졈프_user"
         self._ntab_confirm_required_hits = 1
         self._ntab_confirm_timeout = 0.42
         self._warrior_next_attack_at = 0.0
@@ -354,12 +354,6 @@ class LogicSvc(threading.Thread):
                 return bool(json.load(f).get("require_map_sync_for_heal", True))
         except Exception:
             return True
-
-    def _should_hold_follow_at_gap(self, gap: int) -> bool:
-        hold_distance = 1
-        if self._is_support_follow_guard_active():
-            hold_distance = int(self._support_follow_hold_distance)
-        return should_hold_follow_gap(gap, hold_distance=hold_distance)
 
     def _find_spell_by_name(self, spell_name: str):
         wanted = str(spell_name or "").strip()
@@ -1382,25 +1376,12 @@ class LogicSvc(threading.Thread):
         self.state.support_targeting_active = True
         self._set_combat_busy(True)
         try:
-            for key, delay in (("esc", 0.06), ("tab", 0.08), ("tab", 0.08)):
-                if not self._press_hw_key(key, variance=0.10):
-                    return False
-                self._sleep_ui_gap(delay)
-            if self._wait_for_red_tab_lock(timeout=0.28, min_hits=1):
-                # tab은 근처의 아무 대상(몬스터 포함)이나 잡을 수 있다 - red_tab이
-                # 켜졌다는 건 "뭔가 선택됐다"는 뜻일 뿐 "격수가 선택됐다"는 보장이
-                # 아니다. target_kind/target_info_text는 같은 OCR 프레임에서 이미
-                # 공짜로 계산돼 있으니 추가 키입력 없이 바로 확인한다.
-                if self._is_monster_target_selected():
-                    print("[Support] red_tab locked onto a monster, not the warrior. Retrying.")
-                    self._cancel_ntab_selection()
-                    return False
-
-                # "jump" 패턴(격수 ID) 재확인은 껐다 - 라이브 로그 2회 연속
-                # 확인 성공률 0%(user_info 화면 캘리브레이션 미완료로 추정)인데
-                # 실패해도 매번 최대 0.42s를 기다리고 그동안 이동까지 묶어놔서
-                # (support_input_blocked_until 재설정) 실익 없이 이동/힐 속도만
-                # 깎아먹고 있었다. user_info 캘리브레이션을 맞춘 뒤 다시 켤 것.
+            # 예전엔 tab -> tab만 누르고 red_tab_enabled(뭔가 선택됐다는 신호)만
+            # 봤다 - 몬스터/다른 유저/자기 자신을 잘못 잡아도 구분이 안 됐다.
+            # _confirm_and_lock_warrior_target()가 대상을 Enter로 확정하고
+            # User_info ROI(findtext_patterns.json의 점프_user)로 신원까지
+            # 확인한 뒤에만 최종 lock(esc->tab->tab)을 건다.
+            if self._confirm_and_lock_warrior_target():
                 self._party_direct_heal_target_prepared = True
                 return True
             self._cancel_ntab_selection()
@@ -1584,30 +1565,7 @@ class LogicSvc(threading.Thread):
         return hw.is_input_ready()
 
     def _is_game_window_active(self) -> bool:
-        try:
-            current_hwnd = win32gui.GetForegroundWindow()
-            candidate_hwnds = [current_hwnd]
-            try:
-                root_hwnd = win32gui.GetAncestor(current_hwnd, 2)
-                if root_hwnd and root_hwnd not in candidate_hwnds:
-                    candidate_hwnds.append(root_hwnd)
-            except Exception:
-                pass
-
-            if bool(self.state.hwnd) and self.state.hwnd in candidate_hwnds:
-                return True
-
-            for hwnd_candidate in candidate_hwnds:
-                try:
-                    title = win32gui.GetWindowText(hwnd_candidate) or ""
-                except Exception:
-                    title = ""
-                if any(token.lower() in title.lower() for token in ["ory", "바람", "aion"]):
-                    self.state.hwnd = hwnd_candidate
-                    return True
-            return False
-        except Exception:
-            return False
+        return is_game_window_active(self.state)
 
     def _is_dosa_f2_follow_service(self) -> bool:
         return (
@@ -2242,47 +2200,6 @@ class LogicSvc(threading.Thread):
         except Exception:
             pass
 
-    def _reenter_ntab_selection(self):
-        self._press_hw_key("tab")
-        self._sleep_ntab_gap()
-
-    def _get_ntab_direction_order(self, snapshot: dict | None = None) -> list[str]:
-        current_x = int(getattr(self.state, "x", 0) or 0)
-        current_y = int(getattr(self.state, "y", 0) or 0)
-        target_x = int((snapshot or {}).get("x", (snapshot or {}).get("pos_x", current_x)) or current_x)
-        target_y = int((snapshot or {}).get("y", (snapshot or {}).get("pos_y", current_y)) or current_y)
-        dx = target_x - current_x
-        dy = target_y - current_y
-        order = []
-
-        def add(direction: str | None):
-            if direction and direction not in order:
-                order.append(direction)
-
-        horiz = "right" if dx > 0 else "left" if dx < 0 else None
-        vert = "down" if dy > 0 else "up" if dy < 0 else None
-        opposite = {"up": "down", "down": "up", "left": "right", "right": "left"}
-
-        if abs(dx) >= abs(dy):
-            add(horiz)
-            add(vert)
-            add(opposite.get(vert) if vert else None)
-            add(opposite.get(horiz) if horiz else None)
-        else:
-            add(vert)
-            add(horiz)
-            add(opposite.get(horiz) if horiz else None)
-            add(opposite.get(vert) if vert else None)
-
-        for direction in ["up", "down", "left", "right"]:
-            add(direction)
-
-        last_dir = getattr(self, "_last_ntab_success_direction", None)
-        if last_dir in order:
-            order.remove(last_dir)
-            order.insert(0, last_dir)
-        return order
-
     def _is_monster_target_selected(self, baseline_target_text: str = "", baseline_target_kind: str = "") -> bool:
         current_kind = str(getattr(self.state, "target_kind", "") or "")
         current_text = str(getattr(self.state, "target_info_text", "") or "")
@@ -2294,7 +2211,6 @@ class LogicSvc(threading.Thread):
 
     def _attempt_ntab_confirm(
         self,
-        direction: str,
         expected_pattern: str,
         confirm_timeout: float | None = None,
     ) -> str:
@@ -2331,11 +2247,46 @@ class LogicSvc(threading.Thread):
                     if soft_user_streak >= 2:
                         return "user"
             if current_user and current_user != baseline_user and self._is_user_pattern_confident(current_user):
+                if current_user == self._support_wizard_pattern:
+                    return "self"
                 return "other_user"
             if self._is_monster_target_selected(baseline_target_text, baseline_target_kind):
                 return "monster"
             time.sleep(0.02 if self._ntab_in_progress else 0.03)
         return "no_match"
+
+    def _confirm_and_lock_warrior_target(self) -> bool:
+        """대상선택박스를 후보별로 열어 Enter로 확정하고, User_info ROI에서
+        격수(점프_user)인지 확인한다. 격수로 확인되면 ESC -> TAB -> TAB
+        (_promote_ntab_to_red_tab)으로 red_tab을 최종 lock한다. 자기 자신
+        (졈프_user)/다른 유저/몬스터/불일치면 다음 후보(방향키 상 -> 하)로
+        재시도한다. 호출부가 입력 차단/combat_busy 등 주변 상태는 미리
+        설정해뒀다고 가정한다(_promote_ntab_to_red_tab과 동일한 관례)."""
+        candidate_sequences: list[tuple[str, ...]] = [
+            ("esc", "tab", "enter"),
+            build_warrior_search_sequence("up"),
+            build_warrior_search_sequence("down"),
+        ]
+        for attempt, sequence in enumerate(candidate_sequences, start=1):
+            for key in sequence:
+                if not self._press_hw_key(key, variance=0.10):
+                    return False
+                self._sleep_ui_gap(0.10 if key == "enter" else 0.06)
+            self.state.ntab_active = True
+            self.state.ntab_active_since = time.time()
+            try:
+                result = self._attempt_ntab_confirm(self._support_warrior_pattern)
+            finally:
+                self.state.ntab_active = False
+                self.state.ntab_active_since = 0.0
+            print(f"[TargetConfirm] attempt={attempt} sequence={sequence} result={result}")
+            if result == "user":
+                if not self._press_hw_key("esc", variance=0.10):
+                    return False
+                self._sleep_ui_gap(0.06)
+                return self._promote_ntab_to_red_tab()
+        self._press_hw_key("esc", variance=0.10)
+        return False
 
     def _promote_ntab_to_red_tab(self) -> bool:
         self.state.red_tab_promotion_active = True
@@ -2837,6 +2788,15 @@ class LogicSvc(threading.Thread):
     def _is_follow_reposition_needed(self) -> bool:
         if not bool(getattr(self.state, "nav_follow_enabled", False)):
             return False
+
+        # 포탈을 넘는 중이면(RouteSvc가 state.portal_follow_active로 공유해둔
+        # 값) 좌표 거리 계산과 무관하게 재이동이 우선이다 - 안 그러면 격수가
+        # 막 포탈을 넘어 좌표가 크게 튀는 순간에도 그냥 "거리 문제"로만 보고
+        # 자버프/MP회복 우선순위 판단을 계속 진행해버린다. RouteSvc가 도는
+        # 별도 스레드라 그쪽의 상세 포탈 추적 상태(_calc_follow_target 등)에는
+        # 직접 접근할 수 없지만, 이 플래그는 이미 공유 state에 공개돼 있다.
+        if bool(getattr(self.state, "portal_follow_active", False)):
+            return True
 
         remote_data = self.state.get_fresh_remote_data_by_role("격수")
         if not isinstance(remote_data, dict):
