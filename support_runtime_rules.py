@@ -143,6 +143,20 @@ def should_prioritize_follow_distance(gap: int, risk_distance: int = 7) -> bool:
     return max(0, int(gap)) >= max(1, int(risk_distance))
 
 
+def should_defer_heal_for_follow_distance(
+    follow_distance_risk: bool,
+    heal_target_verified: bool,
+) -> bool:
+    """Only defer the heal when landing it would need a fresh esc>tab>tab
+    retarget (which releases movement keys and fights the catch-up chase).
+    A cast on an already-verified target is a plain hotkey tap on a separate
+    input channel from movement, so it costs nothing to let through even
+    while distance risk is active. No HP carve-out: at 7+ tiles behind,
+    catching up wins regardless of warrior HP - retargeting here would
+    freeze follow to heal a target about to be out of range anyway."""
+    return bool(follow_distance_risk) and not bool(heal_target_verified)
+
+
 WARRIOR_TRANSITION_JUMP_DISTANCE = 4
 
 

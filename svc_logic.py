@@ -55,6 +55,7 @@ from support_runtime_rules import (
     should_allow_party_support_cast,
     should_block_party_heal,
     should_cast_periodic_heewon,
+    should_defer_heal_for_follow_distance,
     classify_map_sync,
     should_continue_self_hp_recovery,
     should_hold_follow_gap,
@@ -69,6 +70,14 @@ from support_runtime_rules import (
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+def _ts() -> str:
+    """HH:MM:SS.mmm prefix for diagnostic prints - plain print() has no
+    timestamp otherwise, making tick-rate/freeze-duration issues (like
+    follow stalling during heal retarget) impossible to measure from logs."""
+    now = time.time()
+    return time.strftime("%H:%M:%S", time.localtime(now)) + f".{int(now % 1 * 1000):03d}"
 
 
 # ============================================================
@@ -1183,12 +1192,12 @@ class LogicSvc(threading.Thread):
             if not self._party_direct_heal_target_prepared and not self._prepare_direct_tab_heal_target():
                 now = time.time()
                 if (now - float(self._last_warrior_redtab_skip_log_time or 0.0)) >= 0.8:
-                    print("[Support] HP heal skipped: direct target prepare failed.")
+                    print(f"[Support] {_ts()} HP heal skipped: direct target prepare failed.")
                     self._last_warrior_redtab_skip_log_time = now
                 self._register_direct_heal_prepare_failure()
                 return False
             if not self._party_direct_heal_target_prepared:
-                print("[Support] direct heal target prepared: esc -> tab -> tab")
+                print(f"[Support] {_ts()} direct heal target prepared: esc -> tab -> tab")
                 self._party_direct_heal_target_prepared = True
 
         if not self._cast_party_direct_heal(snapshot):
@@ -1199,7 +1208,7 @@ class LogicSvc(threading.Thread):
             # HP정체 스트릭(최대 5틱)까지 기다릴 필요 없이, 대상이 몬스터로
             # 바뀐 건 확실한 신호라 즉시 재확인으로 넘어간다 - 몬스터한테
             # 계속 3키를 날리며 격수는 안 낫는 낭비를 막는다.
-            print("[Support] target drifted to a monster mid-heal. Retargeting.")
+            print(f"[Support] {_ts()} target drifted to a monster mid-heal. Retargeting.")
             self._party_heal_stagnant_streak = 0
             self._party_direct_heal_verified = False
             self._party_direct_heal_target_prepared = False
@@ -1222,6 +1231,13 @@ class LogicSvc(threading.Thread):
         self._party_direct_heal_fail_count = 0
 
         if self._party_heal_stagnant_streak >= self._party_heal_stagnant_cap:
+            # This path was silent - no way to tell from logs whether stagnant
+            # HP (real lost target) or follow-distance/monster-drift is what's
+            # actually forcing the retarget+movement-freeze during follow.
+            print(
+                f"[Support] {_ts()} HP stagnant for {self._party_heal_stagnant_cap} casts "
+                f"(hp={before_hp}). Forcing retarget."
+            )
             self._party_heal_stagnant_streak = 0
             self._party_direct_heal_verified = False
             self._party_direct_heal_target_prepared = False
@@ -1432,9 +1448,10 @@ class LogicSvc(threading.Thread):
             return False
         hp_val = int((snapshot or {}).get("hp", 0) or 0)
         now = time.time()
-        if (now - float(getattr(self, "_last_party_direct_heal_log_time", 0.0) or 0.0)) >= 1.0:
-            print(f"[Support] HP heal casting on warrior: key={self._party_direct_heal_key}, hp={hp_val}, direct_verified={self._party_direct_heal_verified}")
-            self._last_party_direct_heal_log_time = now
+        # Unthrottled (was 1s-throttled) - a 1s gate hides the very thing
+        # we need this line for: the actual gap between individual casts.
+        print(f"[Support] {_ts()} HP heal casting on warrior: key={self._party_direct_heal_key}, hp={hp_val}, direct_verified={self._party_direct_heal_verified}")
+        self._last_party_direct_heal_log_time = now
         # 이미 red_tab이 잠긴 대상에게 핫키 한 번 탭하는 것뿐이라 이동을 막을
         # 필요가 없다 (자힐 수정과 동일한 이유 - 방향키와 스킬키는 서로 다른
         # 채널이라 동시에 눌러도 충돌하지 않는다). support_targeting_active는
@@ -2938,7 +2955,7 @@ class LogicSvc(threading.Thread):
             return
         self._last_dosa_f2_idle_reason_log_time = now
         print(
-            f"[F2Idle] {reason} | "
+            f"[F2Idle] {_ts()} {reason} | "
             f"service={bool(getattr(self.state, 'service_active', False))} "
             f"follow={bool(getattr(self.state, 'nav_follow_enabled', False))} "
             f"auto_hunt={bool(getattr(self.state, 'auto_hunt', False))} "
@@ -3328,7 +3345,19 @@ class LogicSvc(threading.Thread):
             self._portal_retarget_attempt_count = 0
 
         if needs_hp:
-            if follow_distance_risk and int(support_target.get("hp", 0) or 0) > 30000:
+            if should_defer_heal_for_follow_distance(
+                follow_distance_risk,
+                self._party_direct_heal_verified,
+            ):
+                # Only defer when a heal cast would need a fresh esc>tab>tab
+                # (which releases movement keys and fights the catch-up
+                # chase). Once the target is already verified, pressing the
+                # heal hotkey is a free tap on a separate input channel from
+                # movement - skipping it here bought nothing but threw away
+                # the verified state, forcing a full re-verify (and another
+                # stretch of zero heal ticks) the moment distance dropped
+                # back under risk_distance. That's what capped the real
+                # heal rate well under its ~5-tick/s design during follow.
                 self._invalidate_warrior_redtab_verification()
                 self._log_dosa_f2_idle_reason(
                     f"follow_distance_priority distance={warrior_distance} defer_warrior_heal",

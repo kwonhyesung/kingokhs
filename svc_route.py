@@ -1729,6 +1729,21 @@ class RouteSvc(threading.Thread):
                     f"is_combat_busy={hw_combat_busy}"
                 )
                 self._last_portal_move_block_log_time = time.time()
+            elif follow_mode and not portal_follow and (time.time() - float(getattr(self, "_last_follow_move_block_log_time", 0.0) or 0.0)) >= 0.5:
+                # Same gate as the portal-follow branch above, but this is the
+                # path that actually fires during ordinary following - a heal
+                # retarget (esc>tab>tab) sets support_targeting/is_combat_busy
+                # and can hold support_input_blocked_until up to 0.75s, and
+                # every step call in that window returns False here with no
+                # move ever attempted. This was previously invisible in logs.
+                now_block = time.time()
+                block_left = max(0.0, float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0) - now_block)
+                print(
+                    f"[NavBlock] {time.strftime('%H:%M:%S', time.localtime(now_block))}.{int(now_block % 1 * 1000):03d} "
+                    f"follow movement withheld: in_combat={in_combat} input_blocked={input_blocked} "
+                    f"block_left={block_left:.2f}s support_targeting={support_targeting} is_combat_busy={hw_combat_busy}"
+                )
+                self._last_follow_move_block_log_time = now_block
             return False
         moved = hw.hold_move(step_dir, "move_hold", duration=hold_time)
         if not moved:

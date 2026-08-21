@@ -35,6 +35,7 @@ from support_runtime_rules import (
     support_retarget_block_duration,
     should_detect_warrior_transition,
     should_prioritize_follow_distance,
+    should_defer_heal_for_follow_distance,
     should_trigger_self_hp_emergency,
     should_accept_hotkey_press,
     classify_map_sync,
@@ -224,6 +225,15 @@ def test_support_follow_hold_gap_uses_one_tile_spacing():
 def test_follow_distance_risk_starts_at_seven_tiles():
     assert should_prioritize_follow_distance(6, risk_distance=7) is False
     assert should_prioritize_follow_distance(7, risk_distance=7) is True
+
+
+def test_heal_defer_skips_only_when_retarget_would_be_needed():
+    # already-verified target: cast is a free tap, never defer regardless of distance
+    assert should_defer_heal_for_follow_distance(True, True) is False
+    # unverified + far: would need a fresh esc>tab>tab, defer regardless of HP
+    assert should_defer_heal_for_follow_distance(True, False) is True
+    # no distance risk at all: never defer
+    assert should_defer_heal_for_follow_distance(False, False) is False
 
 
 def test_pause_hotkey_rejects_duplicate_event_but_accepts_later_press():
