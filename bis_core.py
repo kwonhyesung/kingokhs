@@ -61,6 +61,7 @@ from enum import Enum
 from typing import Optional
 
 import win32gui
+import win32con
 from svc_stealth import HumanBehaviorSimulator
 from support_runtime_rules import dir_between_coords, is_plausible_transition_coord, normalize_move_dir
 
@@ -223,6 +224,69 @@ def find_game_window(substring: str) -> Optional[int]:
     except Exception:
         pass
     return found_hwnd
+
+
+# 게임 창 제목에 이 중 하나만 포함돼 있어도 같은 창으로 인식한다(사용자 확인:
+# "ory"/"바람" 둘 중 하나만 있어도 충분).
+GAME_WINDOW_TITLE_TOKENS = ("ory", "바람")
+
+
+def find_game_window_any(substrings: tuple = GAME_WINDOW_TITLE_TOKENS) -> Optional[int]:
+    """find_game_window를 substrings 순서대로 시도해 첫 매치를 반환한다.
+    예전엔 파일마다 WIN_KEY="ory" 한 단어만 검색하는 곳과 "바람"/"AION"까지
+    같이 검색하는 곳이 따로 있어서, 제목에 "ory"가 없는 창은 앞쪽에서만
+    못 찾는 상태였다 - 창을 찾는 곳은 전부 이 함수 하나로 모은다."""
+    for substring in substrings:
+        hwnd = find_game_window(substring)
+        if hwnd:
+            return hwnd
+    return None
+
+
+def is_game_window_active(state, window_key_tokens: tuple = ("ory", "바람", "aion")) -> bool:
+    """게임 창이 지금 활성(포그라운드)인지 확인.
+    svc_logic.py와 svc_worker.py에 각각 따로(내용도 서로 다르게) 있던
+    버전을 여기 하나로 합쳤다 - 한쪽만 고치고 다른 쪽은 안 고치는 일이
+    없도록. state.hwnd로 먼저 빠르게 확인하고, 실패하면 창 제목으로
+    재확인, 그래도 실패하면 find_game_window로 시스템 전체를 다시 훑는다."""
+    try:
+        current_hwnd = win32gui.GetForegroundWindow()
+    except Exception:
+        return False
+
+    candidate_hwnds = [current_hwnd]
+    try:
+        root_hwnd = win32gui.GetAncestor(current_hwnd, win32con.GA_ROOT)
+        if root_hwnd and root_hwnd not in candidate_hwnds:
+            candidate_hwnds.append(root_hwnd)
+    except Exception:
+        pass
+
+    state_hwnd = getattr(state, "hwnd", None)
+    if state_hwnd and state_hwnd in candidate_hwnds:
+        return True
+
+    for hwnd_candidate in candidate_hwnds:
+        try:
+            title = win32gui.GetWindowText(hwnd_candidate) or ""
+        except Exception:
+            title = ""
+        if any(token.lower() in title.lower() for token in window_key_tokens):
+            state.hwnd = hwnd_candidate
+            return True
+
+    refreshed_hwnd = find_game_window_any(window_key_tokens)
+    if refreshed_hwnd:
+        state.hwnd = refreshed_hwnd
+        if refreshed_hwnd in candidate_hwnds:
+            return True
+        try:
+            refreshed_title = win32gui.GetWindowText(refreshed_hwnd) or ""
+            if any(token.lower() in refreshed_title.lower() for token in window_key_tokens):
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def split_map_name_floor(map_text: str) -> tuple[str, str]:
@@ -460,7 +524,11 @@ class GameState:
 
     # party whitelist (user_info FindText patterns)
     # user_info ROI에서 파티원 닉네임을 FindText로 빠르게 판정할 때 사용.
-    party_userinfo_patterns: List[str] = field(default_factory=lambda: ["jump", "jump2", "dah"])
+    # jump2 = 도사 자신의 self_status 패턴(patterns.json). 점프_user/졈프_user는
+    # findtext_patterns.json의 party 카테고리(ft.py로 캡처) - 격수/도사 식별용.
+    # 앞으로 파티원이 늘어나면 "<이름>_user" 키를 findtext_patterns.json에 추가하고
+    # 여기 목록에도 더해주면 된다.
+    party_userinfo_patterns: List[str] = field(default_factory=lambda: ["jump2", "점프_user", "졈프_user"])
     
     # 추가 필드 (기존 코드 호환성)
     whitelist_names: List[str] = field(default_factory=list)

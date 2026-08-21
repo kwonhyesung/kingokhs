@@ -10,6 +10,7 @@ import json
 import csv
 import io
 import ipaddress
+import traceback
 
 # ?곕????몄퐫??媛뺤젣 ?ㅼ젙 (CP949 ?섍꼍 ???)))
 try:
@@ -62,7 +63,7 @@ from typing import Tuple, Optional, Dict
 from enum import Enum, auto
 
 # 而ㅻ꼸 ?대옒???꾪룷??
-from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep
+from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep, find_game_window_any
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc
 from svc_sentinel import SentinelThread
@@ -89,7 +90,6 @@ except Exception:
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-WIN_KEY = "ory"
 MULT = 1
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
@@ -98,9 +98,22 @@ PATROL_ROUTE_FILES = {
     "천안궁흉가5": os.path.join(SCRIPT_DIR, "patrol_points_cheonan_heunggga5.csv"),
 }
 
-from config_utils import *
-from gui_overlay import *
-from background_threads import *
+# import *를 없애고 실제로 쓰는 이름만 명시적으로 가져온다 - bis_core에서 이미
+# 가져온 이름(find_game_window 등)을 config_utils가 뒤에서 조용히 덮어쓰던
+# 문제(2026-08-20 확인) 재발 방지. pyflakes로 실제 참조되는 이름만 추렸다.
+# gui_overlay/background_threads의 나머지 이름(LoggerThread 등)은 이 파일에서
+# 안 쓰여서 뺐다 - 혹시 런타임에서 NameError 나면 여기부터 확인할 것.
+from config_utils import (
+    load_gui_state,
+    save_gui_state,
+    grab_window_bg,
+    TEMPLATE_DIGIT_DIR,
+    load_config,
+    save_config,
+    save_network_config,
+    get_local_ipv4_candidates,
+)
+from gui_overlay import OverlaySelector, ROIIndicator, GridIndicator
 
 # --------------------------------------------------------------------------------# 7. UI ?대옒??(珥덈?吏??섏씠?붾뱶 ?붿옄??
 # --------------------------------------------------------------------------------
@@ -771,7 +784,7 @@ class AppView:
         if not hasattr(self, "calibration_popup") or not self.calibration_popup.winfo_exists():
             print("[DEBUG] 罹섎━釉뚮젅?댁뀡 ?앹뾽??議댁옱?섏? ?딆쓬")
             return
-        hwnd = find_game_window(WIN_KEY)
+        hwnd = find_game_window_any()
         if not hwnd:
             print("[DEBUG] 寃뚯엫 ?덈룄?곕? 李얠쓣 ???놁쓬")
             self.preview_meta_lbl.configure(text="Game window not found")
@@ -900,7 +913,7 @@ class AppView:
     def start_sampling_tool(self):
         """Start sampling tool."""
         print("[DEBUG]")
-        hwnd = find_game_window(WIN_KEY)
+        hwnd = find_game_window_any()
         if not hwnd:
             print("[DEBUG] 寃뚯엫李쎌쓣 李얠쓣 ???놁쓬")
             self.show_toast("[Err] WINDOW NOT FOUND", "#FF5555")
@@ -946,7 +959,7 @@ class AppView:
         # ?쒕옒洹???利됱떆 罹≪쿂???대?吏 ?곗꽑 ?ъ슜 (醫뚰몴 ?뺥빀 蹂댁옣)
         full_img = getattr(self, 'sample_captured_img', None)
         if full_img is None:
-            hwnd = find_game_window(WIN_KEY)
+            hwnd = find_game_window_any()
             if not hwnd:
                 return
             full_img = grab_window_bg(hwnd)
@@ -2382,7 +2395,7 @@ class AppView:
         if reader_thread is None:
             self.show_toast("[Err] VISION THREAD NOT READY", "#FF5555")
             return
-        hwnd = find_game_window(WIN_KEY)
+        hwnd = find_game_window_any()
         if not hwnd:
             self.show_toast("[Err] WINDOW NOT FOUND", "#FF5555")
             return
@@ -2439,7 +2452,7 @@ class AppView:
 
     def toggle_roi_indicator(self):
         if not hasattr(self, "indicator"):
-            hwnd = find_game_window(WIN_KEY)
+            hwnd = find_game_window_any()
             if not hwnd:
                 self.show_toast("??GAME NOT FOUND", "#FF5555")
                 return
@@ -2456,7 +2469,7 @@ class AppView:
 
     def toggle_grid_overlay(self):
         if not hasattr(self, "grid_indicator"):
-            hwnd = find_game_window(WIN_KEY)
+            hwnd = find_game_window_any()
             if not hwnd:
                 self.show_toast("??GAME NOT FOUND", "#FF5555")
                 return
@@ -2736,7 +2749,7 @@ class AppView:
         """Docstring."""
         try:
             # ?ㅼ젣 寃뚯엫李??댁긽??媛?몄삤湲?
-            hwnd = find_game_window(WIN_KEY)
+            hwnd = find_game_window_any()
             if hwnd:
                 rect = win32gui.GetWindowRect(hwnd)
                 game_w = rect[2] - rect[0]

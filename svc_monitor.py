@@ -1537,34 +1537,6 @@ class MonitorSvc(threading.Thread):
         return out
 
     # ----------------------------------------------------------
-    def _calc_grid(self, abs_x: int, abs_y: int):
-        """
-        게임 절대 좌표를 Grid(격자) 좌표로 변환
-        GridX = (ScreenX - PlayArea_SX) // grid_size
-        config.json의 play_area 사용 (캘리브레이션 기준)
-        """
-        import json
-        import os
-        SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_file = os.path.join(SCRIPT_DIR, "config.json")
-        # 확정 오프셋 기본값: sx=272, sy=28
-        pa_sx, pa_sy = 272, 28
-        grid_size = 48
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    conf = json.load(f)
-                    pa = conf.get("play_area", {})
-                    pa_sx = pa.get("sx", 272)
-                    pa_sy = pa.get("sy", 28)
-            except Exception:
-                pass
-        # 확정 48px: GridX = (abs_x - pa_sx) // 48
-        gx = (abs_x - pa_sx) // grid_size
-        gy = (abs_y - pa_sy) // grid_size
-        return (int(gx), int(gy))
-
-    # ----------------------------------------------------------
     def run(self):
         # CaptureSvc updates state.last_frame / state.last_frame_time.
         # MonitorSvc only consumes the shared frames (do not open another VideoCapture here).
@@ -1848,9 +1820,44 @@ class MonitorSvc(threading.Thread):
                         self._party_user_stable_until = 0.0
                         self._last_user_info_mode = user_mode
 
-                    allowed_patterns = ["jump"] if user_mode == "ntab" else ["jump2"]
-                    required_hits = 1 if user_mode == "self_status" else self._party_user_required_hits
-                    user_err_ratio = 0.13 if user_mode == "ntab" else 0.10
+                    if user_mode == "ntab":
+                        # 격수/도사 신원 확인: ft.py로 캡처한 findtext_patterns.json의
+                        # party 카테고리("<이름>_user" 키)를 직접 스캔한다.
+                        # patterns.json의 낡은 jump/dah 데이터는 여기서 더 이상 쓰지 않는다
+                        # (그게 신원 확인이 계속 실패했던 원인 - 캡처는 findtext_patterns.json에
+                        # 저장되는데 여기선 patterns.json을 보고 있었다).
+                        identity_hits = [
+                            h for h in self.matcher.find_text_scan(crop, "party", "USER")
+                            if str(h.get("name", "")).endswith("_user")
+                        ]
+                        if identity_hits:
+                            identity_hits.sort(key=lambda h: -float(h.get("score", 0.0) or 0.0))
+                            matched_name = str(identity_hits[0].get("name", ""))
+                            if matched_name != self._last_user_info_logged:
+                                print(f"[UserInfo] ntab identity detected: {matched_name}")
+                                self._last_user_info_logged = matched_name
+                                self._last_user_info_source = "findtext-stable"
+                            res_updates["user_name"] = matched_name
+                            res_updates["user_info_text"] = matched_name
+                            res_updates["user_kind"] = "USER"
+                            res_updates["user_score"] = 1.0
+                            res_updates["user_info_source"] = "findtext-stable"
+                            res_updates["user_info_ambiguous"] = len(identity_hits) > 1
+                            res_updates["is_user_detected"] = True
+                        else:
+                            if self._last_user_info_logged:
+                                print("[UserInfo] ntab identity cleared")
+                                self._last_user_info_logged = None
+                                self._last_user_info_source = None
+                            res_updates["user_score"] = 0.0
+                            res_updates["user_info_source"] = ""
+                            res_updates["user_info_ambiguous"] = False
+                            res_updates["is_user_detected"] = False
+                        continue
+
+                    allowed_patterns = ["jump2"]
+                    required_hits = self._party_user_required_hits
+                    user_err_ratio = 0.10
                     user_name = ""
                     user_score = 0.0
                     matched_source = None
@@ -1907,22 +1914,23 @@ class MonitorSvc(threading.Thread):
                     if not user_name and not party_ambiguous:
                         bitwise_name, bitwise_score = self.matcher.recognize_entity_bitwise(crop, "users")
                         allowed = set(allowed_patterns)
-                        bitwise_threshold = 0.82 if user_mode == "self_status" else 0.88
+                        bitwise_threshold = 0.82
                         if bitwise_name in allowed and float(bitwise_score or 0.0) >= bitwise_threshold:
                             user_name = bitwise_name
                             user_score = float(bitwise_score or 0.0)
                             matched_source = "bitwise"
 
+                    # 아래는 self_status(도사 자신 상태 확인) 전용 경로다.
+                    # ntab(격수/도사 신원 확인)은 위에서 이미 continue로 빠졌다.
                     if user_name:
                         if user_name != self._last_user_info_logged or matched_source != self._last_user_info_source:
                             print(f"[UserInfo] detected: {user_name} via {matched_source or 'unknown'}")
                             self._last_user_info_logged = user_name
                             self._last_user_info_source = matched_source
-                        if user_mode == "self_status" and user_name == "jump2":
+                        if user_name == "jump2":
                             res_updates["last_self_userinfo_seen"] = time.time()
-                        if user_mode == "self_status":
-                            res_updates["self_status_scan_active"] = False
-                            res_updates["self_status_scan_until"] = 0.0
+                        res_updates["self_status_scan_active"] = False
+                        res_updates["self_status_scan_until"] = 0.0
                         res_updates["user_name"] = user_name
                         res_updates["user_info_text"] = user_name
                         res_updates["user_kind"] = "USER"
@@ -1930,16 +1938,6 @@ class MonitorSvc(threading.Thread):
                         res_updates["user_info_source"] = matched_source or ""
                         res_updates["user_info_ambiguous"] = bool(party_ambiguous)
                         res_updates["is_user_detected"] = True
-                    else:
-                        if self._last_user_info_logged and user_mode == "ntab":
-                            print("[UserInfo] cleared")
-                            self._last_user_info_logged = None
-                            self._last_user_info_source = None
-                        if user_mode == "ntab":
-                            res_updates["user_score"] = 0.0
-                            res_updates["user_info_source"] = ""
-                            res_updates["user_info_ambiguous"] = bool(party_ambiguous)
-                            res_updates["is_user_detected"] = False
                     continue
 
                 if name == "cooltime_area":
