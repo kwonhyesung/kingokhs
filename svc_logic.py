@@ -67,7 +67,6 @@ from support_runtime_rules import (
     should_trigger_self_hp_emergency,
     speed_up_delay,
     support_retarget_block_duration,
-    build_warrior_search_sequence,
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -168,6 +167,9 @@ class LogicSvc(threading.Thread):
         self._redtab_clear_cooldown_sec = 1.0
         self._last_party_hp_support_time = 0.0
         self._last_party_hp_value = 0
+        self._self_hp_before_warrior_cast = 0
+        self._self_hp_before_warrior_cast_time = 0.0
+        self._self_redtab_misfire_threshold = 20000
         self._last_party_hp_check_log_time = 0.0
         self._last_party_direct_heal_log_time = 0.0
         self._last_dosa_f2_watchdog_log_time = 0.0
@@ -209,6 +211,8 @@ class LogicSvc(threading.Thread):
         self._last_self_support_buff_attempt_time = 0.0
         self._self_support_buff_min_interval = 6.0
         self._party_direct_heal_key = "3"
+        self._last_warrior_revive_time = 0.0
+        self._warrior_revive_cooldown = 3.0
         self._party_direct_heal_verified = False
         self._party_direct_heal_target_prepared = False
         self._party_heal_blocked_until = 0.0
@@ -219,10 +223,16 @@ class LogicSvc(threading.Thread):
         # 몬스터 종류가 너무 많아 이름표 이미지로 "몬스터를 잡았는지"를 다
         # 걸러낼 수 없다 - 결국 격수가 직접 보고하는 실제 HP가 오르는지가
         # 유일한 범용 증거다. 데미지 한 틱 정도로 안 오르는 건 봐주되,
-        # 이 이상 연속으로 안 오르면(오검출로 몬스터를 잡았을 가능성 포함)
-        # 바로 재확인한다. 5(≈1초)는 너무 느슨해서 몬스터를 오래 붙잡고
-        # 있을 수 있어 2(≈0.4초)로 낮췄다.
-        self._party_heal_stagnant_cap = 2
+        # 이 이상 연속으로 안 오르면 바로 재확인한다.
+        # 2(≈0.4초)는 몬스터를 잘못 잡았을 때 오래 붙잡지 않으려고 낮춘
+        # 값이었는데, 그건 이제 _is_monster_target_selected()가 캐스트마다
+        # 별도로 잡아낸다(_recover_party_hp 초입) - 여기 남은 역할은 순수히
+        # "텔레메트리가 그냥 느려서 안 오른 것처럼 보이는" 오탐만 거르는
+        # 것뿐이다. 실측 로그: 실제 HP값은 약 2~3초에 한 번씩만 갱신되는데
+        # 힐은 0.15~0.2초마다 나가서, 2캐스트(~0.4초) 안에는 거의 항상
+        # "안 오른 것처럼" 보여 매번 불필요하게 재확인을 강제하고 있었다.
+        # 관측된 갱신 주기보다 확실히 긴 여유를 두고 15(~3초)로 올린다.
+        self._party_heal_stagnant_cap = 15
         self._warrior_redtab_verified = False
         self._warrior_redtab_verified_hp = 0
         self.state.support_input_blocked_until = 0.0
@@ -718,6 +728,16 @@ class LogicSvc(threading.Thread):
         support_block_duration: float = 2.0,
         max_attempts: int = 6,
     ) -> bool:
+        # 자힐 시전 전에는 따라가기/격수 힐을 명시적으로 끄고, HP가 good_hp
+        # 이상이 됐을 때만 다시 켠다 - 기존 input_block/combat_busy는 시간
+        # 기반이라 재시도가 오래 걸리면 그 사이에 follow/heal이 먼저 풀려서
+        # 자힐과 겹칠 수 있었다. pause_duration은 최악의 경우(모든 attempt
+        # 소진)까지 커버하도록 여유 있게 잡는다 - 그래도 못 끝나면
+        # _repair_dosa_f2_runtime_state 워치독이 알아서 follow를 복구한다.
+        previous_follow = bool(getattr(self.state, "nav_follow_enabled", False))
+        pause_duration = max(2.0, float(support_block_duration or 0.0) * max(1, int(max_attempts)))
+        self._pause_follow_for_action(duration=pause_duration)
+        self._party_heal_blocked_until = time.time() + pause_duration
         self._set_support_phase("self_recover", duration=max(1.2, float(support_block_duration or 0.0) + 0.8))
         self._set_support_input_block(max(0.8, float(support_block_duration or 0.0)))
         self._stop_support_movement_inputs()
@@ -753,30 +773,60 @@ class LogicSvc(threading.Thread):
         finally:
             self._clear_support_phase(expected="self_recover")
             self._set_combat_busy(False)
+            current_hp_final = int(getattr(self.state, "hp", 0) or 0)
+            good_hp_final = self._get_good_hp_threshold()
+            if current_hp_final >= good_hp_final:
+                print(f"[Recovery] self hp {current_hp_final} reached good_hp {good_hp_final} - resuming follow/heal.")
+                self._restore_follow_after_action(previous_follow)
+                self._party_heal_blocked_until = 0.0
 
-    def _cast_emergency_gg_hold(self, hold_duration: float = 1.5) -> bool:
+    def _is_geumgang_bulche_detected(self) -> bool:
+        """magic_info ROI에서 금강불체 버프 아이콘/텍스트가 떴는지 확인한다
+        (실측 캡처된 FindText 패턴 기반 - _execute_self_geumgang_cycle의
+        주기 사이클이 사용한다). magic_info ROI나 findtext_patterns.json의
+        magic 카테고리가 아직 캘리브레이션/캡처 안 됐으면 조용히 False."""
+        matcher = getattr(self.state, "pattern_matcher", None)
+        frame = getattr(self.state, "last_frame", None)
+        if matcher is None or frame is None or getattr(frame, "size", 0) == 0:
+            return False
+        crop_result = self._get_config_roi_crop(frame, "magic_info")
+        if crop_result is None:
+            return False
+        crop, _, _ = crop_result
+        hits = matcher.find_text_scan(crop, "magic", "STATUS")
+        return any(str(h.get("name", "")) == "금강불체" for h in hits)
+
+    def _maintain_geumgang_buff(self) -> bool:
+        """GG(금강) 유지: 11초에 한 번씩 magic_info에서 금강불체가 있는지
+        확인해서, 있으면 아무것도 안 하고 없으면 0을 누른다 - 그게 전부다.
+        jump2 자기상태창 확인이나 cooltime_area 스캔 같은 다른 게이트는
+        안 거친다(요청에 따라 제거)."""
+        if int(getattr(self.state, "hp", 0) or 0) <= 0:
+            return False
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
-        if not self._clear_red_tab_for_self_cast():
+        now = time.time()
+        if now - float(getattr(self, "_last_gg_check_time", 0.0) or 0.0) < 11.0:
             return False
-
-        base_hold = max(1.35, float(hold_duration or 0.0))
-        for attempt in range(2):
-            actual_hold = max(1.35, min(1.75, random.uniform(base_hold * 0.97, base_hold * 1.10)))
+        self._last_gg_check_time = now
+        detected = self._is_geumgang_bulche_detected()
+        if now - float(getattr(self, "_last_gg_maintain_log_time", 0.0) or 0.0) >= 2.0:
+            self._last_gg_maintain_log_time = now
+            matcher = getattr(self.state, "pattern_matcher", None)
+            frame = getattr(self.state, "last_frame", None)
+            crop_result = self._get_config_roi_crop(frame, "magic_info") if (matcher is not None and frame is not None) else None
             print(
-                "[Recovery] self emergency GG hold cast: "
-                f"attempt={attempt + 1} hold={actual_hold:.2f}s"
+                f"[GGProbe] {_ts()} detected={detected} matcher={'set' if matcher is not None else 'None'} "
+                f"frame={'set' if frame is not None else 'None'} magic_info_roi={'ok' if crop_result is not None else 'missing/zero'}"
             )
-            try:
-                hw.press_key("0")
-                humanized_sleep(actual_hold, variance=0.08)
-            finally:
-                try:
-                    hw.release_key("0")
-                except Exception:
-                    pass
-            self.state.last_self_gg_cast_time = time.time()
-            humanized_sleep(0.18, variance=0.10)
+        if detected:
+            return False
+        if now - float(getattr(self, "_last_gg_maintain_press_time", 0.0) or 0.0) < 0.3:
+            return False
+        self._last_gg_maintain_press_time = now
+        self._press_hw_key("0", variance=0.10, skip_focus_guard=True)
+        self.state.last_self_gg_cast_time = now
+        print("[Buff] self gg missing (magic_info). Cast 0.")
         return True
 
     def _complete_self_hp_recovery_reengage(self, source_log: str) -> bool:
@@ -796,7 +846,9 @@ class LogicSvc(threading.Thread):
         if not moving_follow:
             self._set_combat_busy(True)
         try:
-            self._cast_emergency_gg_hold(hold_duration=1.5)
+            # GG(금강)는 이제 _execute_self_geumgang_cycle의 독립적인 주기
+            # 사이클로만 관리한다 - 자힐/MP회복 재동기화에 얹혀서 같이
+            # 도는 게 아니다.
             humanized_sleep(0.025, variance=0.08)
             if moving_follow:
                 self._set_support_input_block(support_retarget_block_duration(True))
@@ -921,11 +973,25 @@ class LogicSvc(threading.Thread):
             humanized_sleep(0.06, variance=0.10)
             after_mp = max(0, int(getattr(self.state, "mp", 0) or 0))
             after_hp = max(0, int(getattr(self.state, "hp", 0) or 0))
+            # casted_mp만으로는 "성공"을 보장 못 한다 - 그건 그냥 "가드에
+            # 안 걸리고 키를 눌렀다"는 뜻이지, 스킬 자체가 게임 안에서
+            # 성공했는지는 별개다(캐스트 실패 확률이 있음). MP가 실제로
+            # 올랐는지로 진짜 성공 여부를 확인한다.
+            mp_actually_rose = casted_mp and after_mp > before_mp
             if not casted_mp:
                 self._self_mp_priority_failed_until = time.time() + 0.35
                 print(
                     f"[Recovery] self MP boost skipped: before={before_mp}, after={after_mp}. "
                     "Allow warrior heal before retry."
+                )
+            elif not mp_actually_rose:
+                # 캐스트는 나갔는데 MP가 안 올랐다 - 게임 쪽에서 실패한 것으로
+                # 본다. "성공" defer(0.35s, 다음 판단을 늦춤)를 걸지 않고
+                # 실패와 같은 짧은 재시도 창을 줘서 곧바로 다시 시도하게 한다.
+                self._self_mp_priority_failed_until = time.time() + 0.35
+                print(
+                    f"[Recovery] self MP boost cast fired but MP didn't rise "
+                    f"(mp={before_mp}->{after_mp}) - treating as failed cast. Retrying soon."
                 )
             else:
                 self._self_mp_priority_defer_until = time.time() + 0.35
@@ -1007,6 +1073,12 @@ class LogicSvc(threading.Thread):
         except Exception:
             pass
 
+        # esc 없이 시도해봤는데 실제로 문제가 있었다: 힐이 초당 5틱으로
+        # 계속 도는 동안은 힐 대상박스가 계속 열려있는 상태라, 그걸 안 닫고
+        # 2키를 누르면 박스가 남아있는 채로 진행된다. 다시 복원 - esc로
+        # 열려있는 박스를 전부 비활성화하고 시작한다(격수 red_tab이 그
+        # 과정에서 풀리는 건 알고 있고, 그래서 그 다음 재탐색이 필요한 것도
+        # 정상이다).
         self._press_hw_key("esc", variance=0.10, skip_focus_guard=True)
         self._sleep_ui_gap(0.035)
         cast_function = self.recovery_manager.resolve_recovery_cast_function(
@@ -1203,6 +1275,23 @@ class LogicSvc(threading.Thread):
             # 바뀐 건 확실한 신호라 즉시 재확인으로 넘어간다 - 몬스터한테
             # 계속 3키를 날리며 격수는 안 낫는 낭비를 막는다.
             print(f"[Support] {_ts()} target drifted to a monster mid-heal. Retargeting.")
+            self._party_heal_stagnant_streak = 0
+            self._party_direct_heal_verified = False
+            self._party_direct_heal_target_prepared = False
+            self._register_direct_heal_prepare_failure()
+            return False
+
+        current_self_hp = int(getattr(self.state, "hp", 0) or 0)
+        self_hp_rise = current_self_hp - self._self_hp_before_warrior_cast
+        if self_hp_rise >= self._self_redtab_misfire_threshold:
+            # 격수 대상 직접 힐(전용 자힐 스킬과 다른 키)을 눌렀는데 도사 본인
+            # HP가 올랐다 - red_tab이 격수가 아니라 도사 자신에게 걸려있다는
+            # 확실한 증거다. 격수 원격 HP 정체를 기다리는 스태그넌트 캡(최대
+            # ~3초)보다 훨씬 빠르게(캐스트 1번 만에) 잡아서 즉시 재확인한다.
+            print(
+                f"[Support] {_ts()} self HP rose by {self_hp_rise} after warrior-targeted "
+                f"heal cast - red_tab is on self, not warrior. Forcing retarget."
+            )
             self._party_heal_stagnant_streak = 0
             self._party_direct_heal_verified = False
             self._party_direct_heal_target_prepared = False
@@ -1413,6 +1502,30 @@ class LogicSvc(threading.Thread):
             self._support_lock_search_until = time.time() + 0.12
             self._set_combat_busy(previous_busy)
 
+    def _revive_warrior_if_dead(self, snapshot: dict | None) -> bool:
+        """격수 HP가 0(사망)이면 일반 힐키(3)로는 못 살린다 - 5키를 2번 눌러
+        부활시키고 곧바로 힐을 이어서 시전한다. red_tab이 아직 안 잡혀
+        있으면(재확인 중) 부활 키도 소용없으니 정상 재확인 경로로 넘긴다."""
+        if not snapshot:
+            return False
+        if int(snapshot.get("hp", 0) or 0) > 0:
+            return False
+        if not self._party_direct_heal_verified:
+            return False
+        if self._is_portal_support_paused():
+            return False
+        now = time.time()
+        if now - float(getattr(self, "_last_warrior_revive_time", 0.0) or 0.0) < self._warrior_revive_cooldown:
+            return False
+        self._last_warrior_revive_time = now
+        print(f"[Support] {_ts()} warrior HP=0. Casting revive: key=5 x2, then heal.")
+        for _ in range(2):
+            if not self._press_hw_key("5", variance=0.10):
+                return True
+            self._sleep_ui_gap(random.uniform(0.10, 0.16))
+        self._cast_party_direct_heal(snapshot)
+        return True
+
     def _cast_party_direct_heal(self, snapshot: dict | None = None) -> bool:
         if self._is_portal_support_paused():
             return False
@@ -1437,6 +1550,14 @@ class LogicSvc(threading.Thread):
         # 필요가 없다 (자힐 수정과 동일한 이유 - 방향키와 스킬키는 서로 다른
         # 채널이라 동시에 눌러도 충돌하지 않는다). support_targeting_active는
         # 실제 ESC>TAB>TAB 재타겟팅에만 사용한다.
+        # red_tab 대상이 격수가 아니라 실수로 도사 자신에게 걸려 있으면, 이
+        # 키(격수 대상 직접 힐)가 자기 자신을 낫게 만든다 - 격수 원격 HP가
+        # 안 오르는 건 스태그넌트 캡(최대 15캐스트/~3초)이 걸려야 잡히지만,
+        # 자기 HP가 오르는 건 이 캐스트 하나만으로 바로 알 수 있는 훨씬 빠른
+        # 신호다. 전용 자힐 스킬과는 다른 키(격수 red_tab 직접 힐)이므로
+        # 자기 HP가 오르면 안 되는 게 정상 - 오르면 잘못된 타겟이 확실하다.
+        self._self_hp_before_warrior_cast = int(getattr(self.state, "hp", 0) or 0)
+        self._self_hp_before_warrior_cast_time = time.time()
         if not self._press_hw_key(self._party_direct_heal_key, variance=0.10):
             return False
         self._last_party_hp_support_time = time.time()
@@ -1761,7 +1882,10 @@ class LogicSvc(threading.Thread):
             cooltime_ready = self._refresh_self_cooltime_view("[Buff] self gg missing. Press S once before gg cast.")
             if not cooltime_ready:
                 return False
-        if bool(getattr(self.state, "self_gg_detected", False)):
+        # magic_info의 금강불체 FindText 패턴으로 확인한다 - cooltime_area의
+        # 옛 gg 비트와이즈 패턴(self_gg_detected)보다 정확하다(실측 캡처된
+        # 패턴 기반).
+        if self._is_geumgang_bulche_detected():
             self._self_gg_retry_cooldown_until = 0.0
             return False
 
@@ -1783,11 +1907,9 @@ class LogicSvc(threading.Thread):
                 if attempt < attempt_count - 1:
                     self._sleep_self_buff_gap()
 
-            cast_refresh_start = time.time()
-            self._wait_for_self_cooltime_scan(cast_refresh_start, timeout=self._self_gg_verify_timeout)
             deadline = time.time() + self._self_gg_verify_timeout
             while time.time() < deadline:
-                if bool(getattr(self.state, "self_gg_detected", False)):
+                if self._is_geumgang_bulche_detected():
                     print("[Buff] self gg detected after cast burst.")
                     self._self_gg_retry_cooldown_until = 0.0
                     return True
@@ -1870,40 +1992,12 @@ class LogicSvc(threading.Thread):
         try:
             self._release_movement_keys_only()
             acted = False
-            gg_ready_for_cycle = bool(getattr(self.state, "self_gg_detected", False))
-            if current_time < float(getattr(self, "_self_gg_retry_cooldown_until", 0.0) or 0.0):
-                gg_ready_for_cycle = True
-            if not gg_ready_for_cycle:
-                attempt_count = random.randint(2, 3)
-                print(f"[Buff] self gg missing. Cast 0 x{attempt_count}.")
-                for attempt in range(attempt_count):
-                    if self._should_abort_self_support_buff():
-                        return acted
-                    self._press_hw_key("0", variance=0.10, skip_focus_guard=True)
-                    self.state.last_self_gg_cast_time = time.time()
-                    if attempt < attempt_count - 1:
-                        self._sleep_geumgang_gap_fast()
-                acted = True
-
-                cast_refresh_start = time.time()
-                self._wait_for_self_cooltime_scan(cast_refresh_start, timeout=0.15)
-                deadline = time.time() + 0.15
-                while time.time() < deadline:
-                    if bool(getattr(self.state, "self_gg_detected", False)):
-                        print("[Buff] self gg detected after cast burst.")
-                        self._self_gg_retry_cooldown_until = 0.0
-                        gg_ready_for_cycle = True
-                        break
-                    time.sleep(0.015)
-
-                if not gg_ready_for_cycle:
-                    print("[Buff] self gg still missing after cast burst. Retry deferred.")
-                    self._self_gg_retry_cooldown_until = time.time() + self._self_gg_retry_cooldown_sec
-                    return acted
-
+            # GG(금강)는 이제 이 사이클(jump2/cooltime_view 게이트 뒤)이 아니라
+            # _maintain_geumgang_buff()가 magic_info의 금강불체 패턴만으로
+            # 독립적으로 판단한다 - 여기 남는 건 BM(보무)뿐이다.
             last_buff_time = float(getattr(self.state, "last_self_buff_time", 0.0) or 0.0)
             bm_retry_locked = current_time < float(getattr(self, "_self_bm_retry_cooldown_until", 0.0) or 0.0)
-            if gg_ready_for_cycle and not bm_retry_locked and not bool(getattr(self.state, "self_bm_detected", False)) and (time.time() - last_buff_time) >= 3.0:
+            if not bm_retry_locked and not bool(getattr(self.state, "self_bm_detected", False)) and (time.time() - last_buff_time) >= 3.0:
                 print("[Buff] self bm missing. Cast 8 -> HOME -> ENTER, 9 -> HOME -> ENTER")
                 for key in ("8", "9"):
                     if self._should_abort_self_support_buff():
@@ -1953,9 +2047,14 @@ class LogicSvc(threading.Thread):
         print("[Support] warrior 보무 시전: 8 -> 9 (red_tab direct)")
         for key in ("8", "9"):
             self._press_hw_key(key, variance=0.10)
-            humanized_sleep(TIMING_CONFIG["spell_cast_gap"], variance=0.10)
-            if key == "8":
-                humanized_sleep(TIMING_CONFIG["bomu_spell_gap"], variance=0.10)
+            # spell_cast_gap/bomu_spell_gap (30ms/200ms) was tuned for the
+            # self-cast path's own separate home->enter confirm step, not for
+            # a bare keypress landing directly on a red_tab-locked target -
+            # too tight here and the cast lands unreliably. _sleep_self_buff_gap
+            # (0.20~0.50s) is what the self-cast bomu cycle already uses
+            # successfully for the same 8/9 keys; reuse it instead of
+            # re-tuning blind.
+            self._sleep_self_buff_gap()
         self.state.last_warrior_bomu_time = current_time
         return True
 
@@ -2272,23 +2371,137 @@ class LogicSvc(threading.Thread):
             time.sleep(0.02 if self._ntab_in_progress else 0.03)
         return "no_match"
 
-    def _confirm_and_lock_warrior_target(self) -> bool:
-        """대상선택박스를 후보별로 열어 Enter로 확정하고, User_info ROI에서
-        격수(점프_user)인지 확인한다. 격수로 확인되면 ESC -> TAB -> TAB
-        (_promote_ntab_to_red_tab)으로 red_tab을 최종 lock한다. 자기 자신
-        (졈프_user)/다른 유저/몬스터/불일치면 다음 후보(방향키 상 -> 하)로
-        재시도한다. 호출부가 입력 차단/combat_busy 등 주변 상태는 미리
-        설정해뒀다고 가정한다(_promote_ntab_to_red_tab과 동일한 관례)."""
-        candidate_sequences: list[tuple[str, ...]] = [
-            ("esc", "tab", "enter"),
-            build_warrior_search_sequence("up"),
-            build_warrior_search_sequence("down"),
+    _WARRIOR_MARKER_PATTERNS = ("점프_back", "점프_top", "점프_left", "점프_right")
+
+    def _get_config_roi_crop(self, frame, roi_name: str):
+        """전체 프레임 대신 config.json의 roi_name 영역만 잘라 반환한다
+        (crop, offset_x, offset_y). ROI가 없거나(아직 캘리브레이션 안 됨)
+        0 크기면 None을 돌려준다 - 호출부가 "이 기능은 아직 설정 안 됨"으로
+        처리해야 한다(전체 프레임 폴백은 느리고, 엉뚱한 위치를 스캔해서
+        오탐만 만든다)."""
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                roi = json.load(f).get(roi_name, {})
+            sx, sy, dx, dy = int(roi["sx"]), int(roi["sy"]), int(roi["dx"]), int(roi["dy"])
+            fh, fw = frame.shape[:2]
+            sx, sy = max(0, sx), max(0, sy)
+            dx, dy = min(fw, dx), min(fh, dy)
+            if dx <= sx or dy <= sy:
+                return None
+            return frame[sy:dy, sx:dx], sx, sy
+        except Exception:
+            return None
+
+    def _get_play_area_crop(self, frame):
+        """전체 프레임 대신 config.json의 play_area 영역만 잘라 반환한다
+        (crop, offset_x, offset_y). 실패하면 프레임 전체를 offset 0으로
+        돌려준다(안전한 폴백 - 느리지만 예전처럼은 동작한다)."""
+        result = self._get_config_roi_crop(frame, "play_area")
+        return result if result is not None else (frame, 0, 0)
+
+    def _click_warrior_marker_and_lock(self) -> bool | None:
+        """마우스 직접 클릭 방식(S/W, win32api - 아두이노 하드웨어 신호 아님):
+        esc(다른 대상에게 걸려있을 red_tab 비활성화) -> tab(대상박스 활성화)
+        -> 화면에서 격수 캐릭터 자체(방향별로 캡처된
+        점프_back/top/left/right, 마커 아니라 캐릭터 스프라이트 그 자체)를
+        find_text_scan으로 찾아 클릭 -> tab(=_promote_ntab_to_red_tab과
+        같은 역할의 promote/lock, enter 아님)으로 red_tab을 최종 확정한다.
+        클릭으로 이미 어떤 패턴(점프_* = 격수 전용)이 매칭됐는지로 신원이
+        확정되므로 User_info 팝업으로 다시 확인할 필요가 없다.
+        클릭이 실제로 이 PC의 커서를 옮기는지는 hw.click_pixel() 안에서
+        GetCursorPos로 되읽어 [Click] 로그로 남긴다.
+        반환값: True/False = 캐릭터를 찾아서 클릭까지 시도함(성공/실패),
+        None = 화면에서 격수를 못 찾음(몬스터/장애물에 가려짐, 화면 밖 등) -
+        호출부가 기존 방향키 순차 탐색으로 폴백해야 한다."""
+        matcher = getattr(self.state, "pattern_matcher", None)
+        frame = getattr(self.state, "last_frame", None)
+        if matcher is None or frame is None or getattr(frame, "size", 0) == 0:
+            return None
+        # esc가 없으면 다른 대상(도사 자신 등)에게 이미 걸려있던 red_tab이
+        # 안 풀린 채로 진행돼서 클릭이 새 대상을 잡아도 예전 lock과 꼬일 수
+        # 있다 - 먼저 비활성화하고 시작해야 한다.
+        if not self._press_hw_key("esc", variance=0.10):
+            return None
+        self._sleep_ui_gap(0.02)
+        if not self._press_hw_key("tab", variance=0.10):
+            return None
+        self._sleep_ui_gap(0.02)
+
+        # 이전 시도(클릭)로 커서가 격수 캐릭터 위에 그대로 남아있으면, 커서
+        # 아이콘이 캐릭터/패턴을 가려서 스캔이 계속 실패하는 원인이 된다 -
+        # 스캔 직전에 화면 구석(0,0)으로 미리 빼두고, 캡처가 그 상태를
+        # 반영할 시간을 준 뒤 프레임을 다시 읽는다.
+        hw.move_cursor(0, 0)
+        self._sleep_ui_gap(0.03)
+        refreshed_frame = getattr(self.state, "last_frame", None)
+        if refreshed_frame is not None:
+            frame = refreshed_frame
+
+        # 전체 프레임(1920x1080)을 통째로 스캔하면 느리다(tab 이후 체감
+        # 딜레이의 실제 원인). 격수는 play_area 안에서만 보이므로 그 영역만
+        # 잘라서 스캔한다 - 훨씬 작은 이미지라 훨씬 빠르다. 매치 좌표는
+        # crop 기준이라 클릭 전에 play_area의 화면 offset을 다시 더해야 한다.
+        scan_crop, offset_x, offset_y = self._get_play_area_crop(frame)
+        hits = [
+            h for h in matcher.find_text_scan(scan_crop, "party", "USER")
+            if str(h.get("name", "")) in self._WARRIOR_MARKER_PATTERNS
         ]
-        for attempt, sequence in enumerate(candidate_sequences, start=1):
-            for key in sequence:
+        if not hits:
+            return None
+        hits.sort(key=lambda h: -float(h.get("score", 0.0) or 0.0))
+        best = hits[0]
+        px = int(best.get("cx", 0)) + offset_x
+        py = int(best.get("cy", 0)) + offset_y
+        print(f"[TargetConfirm] character click: name={best.get('name')} pos=({px},{py}) score={best.get('score')}")
+        hw.click_pixel(px, py)
+        self._sleep_ui_gap(0.03)
+        if not self._press_hw_key("tab", variance=0.10):
+            return False
+        self._sleep_ui_gap(0.03)
+        # _ntab_in_progress를 켜면 _wait_for_red_tab_lock의 폴링 간격이
+        # 0.03s->0.015s로 빨라진다(키보드 경로도 이미 이렇게 쓰고 있음).
+        prev_ntab_in_progress = self._ntab_in_progress
+        self._ntab_in_progress = True
+        try:
+            return self._wait_for_red_tab_lock(timeout=0.30, min_hits=1)
+        finally:
+            self._ntab_in_progress = prev_ntab_in_progress
+
+    def _confirm_and_lock_warrior_target(self) -> bool:
+        """esc(모든 동작 중지) -> tab(대상박스 활성화) -> 방향키(대상박스 이동)
+        -> enter(대상 선택 확정) -> User_info ROI에서 점프_user 패턴 확인.
+        확인되면 esc -> tab -> tab으로 red_tab을 최종 lock한다. 확인 안 되면
+        (자기 자신/다른 유저/몬스터/불일치) 같은 동작을 다시 시도한다 -
+        후보 순서는 매번 랜덤이라(실측 확인됨) 같은 동작을 반복하는 것만으로
+        결국 격수 차례가 온다. 방향키 1번으로 대상이 바뀌는 것도 실측
+        확인됨(예전엔 방향키가 안 먹힌다고 착각해서 tab 반복으로 잘못
+        바꿨었다 - 원복).
+        마우스 클릭 방식을 최대 3번까지 재시도하고, 그래도 성공(True) 못 하면
+        이 방향키 순차 탐색으로 폴백한다."""
+        for mouse_attempt in range(1, 4):
+            marker_result = self._click_warrior_marker_and_lock()
+            if marker_result is True:
+                return True
+            print(f"[TargetConfirm] mouse attempt={mouse_attempt}/3 result={marker_result}")
+
+        max_attempts = 20
+        for attempt in range(1, max_attempts + 1):
+            for key in ("esc", "tab", "up"):
                 if not self._press_hw_key(key, variance=0.10):
                     return False
-                self._sleep_ui_gap(0.10 if key == "enter" else 0.06)
+                self._sleep_ui_gap(0.08)
+            if self._is_monster_target_selected():
+                # target_info는 ntab_active 없이도 항상 실시간으로 스캔되므로
+                # enter를 누르기 전에 이미 몬스터인지 알 수 있다 - enter로
+                # 확정(공격/인게이지로 이어질 수 있음)하기 전에 걸러서 다음
+                # 후보로 넘어간다. 몬스터/도사/격수 셋 다 무차별로 enter까지
+                # 눌러버리던 문제를 여기서 막는다.
+                print(f"[TargetConfirm] attempt={attempt} sequence=('esc', 'tab', 'up') result=monster (skipped enter)")
+                continue
+            if not self._press_hw_key("enter", variance=0.10):
+                return False
+            self._sleep_ui_gap(0.10)
+            sequence = ("esc", "tab", "up", "enter")
             self.state.ntab_active = True
             self.state.ntab_active_since = time.time()
             try:
@@ -2298,10 +2511,12 @@ class LogicSvc(threading.Thread):
                 self.state.ntab_active_since = 0.0
             print(f"[TargetConfirm] attempt={attempt} sequence={sequence} result={result}")
             if result == "user":
-                if not self._press_hw_key("esc", variance=0.10):
-                    return False
-                self._sleep_ui_gap(0.06)
-                return self._promote_ntab_to_red_tab()
+                # 격수는 이미 방금 enter로 확정 선택된 상태다 - 여기서
+                # _promote_ntab_to_red_tab()(tab->tab)을 부르면 tab이 후보를
+                # 다시 무작위로 바꿔버려서(실측 확인됨) 방금 확인한 격수 대신
+                # 도사/몬스터가 걸리는 원인이 됐다. tab을 더 누르지 않고,
+                # 이미 선택된 대상의 red_tab이 뜨는지만 확인한다.
+                return self._wait_for_red_tab_lock(timeout=0.30, min_hits=1)
         self._press_hw_key("esc", variance=0.10)
         return False
 
@@ -3009,6 +3224,10 @@ class LogicSvc(threading.Thread):
             self._pace_service_loop("active")
             return True
 
+        # GG(금강)는 매 사이클 무조건 확인한다 - 힐/따라가기 등 다른 로직과
+        # 무관하게 magic_info에서 금강불체가 없으면 0을 누른다.
+        self._maintain_geumgang_buff()
+
         # No critical-HP bypass here (see _is_portal_support_paused for why):
         # the warrior's red_tab target is gone the moment they cross a
         # portal, so pressing heal mid-crossing pops the game's
@@ -3305,6 +3524,9 @@ class LogicSvc(threading.Thread):
             self._portal_retarget_attempt_count = 0
 
         if needs_hp:
+            if self._revive_warrior_if_dead(support_target):
+                self._pace_service_loop("active")
+                return True
             if should_defer_heal_for_follow_distance(
                 follow_distance_risk,
                 self._party_direct_heal_verified,
@@ -3727,10 +3949,9 @@ class LogicSvc(threading.Thread):
             if self._run_sulsa_debuff_once_if_due(force=False):
                 self._pace_service_loop("active")
                 return True
-        if bool(getattr(self.state, "auto_hunt", False)):
-            if self._run_sulsa_hellfire_cycle_if_due():
-                self._pace_service_loop("active")
-                return True
+        # ponytail: 술사 auto_hunt(헬파이어) 좌표 연동이 아직 부정확해서
+        # 임시로 꺼둠 - 따라가기 도중엔 자힐/자버프만 수행. 정확한
+        # follow-aware auto_hunt 재구현 시 이 블록을 복구할 것.
         now = time.time()
         if now - float(getattr(self, "_sulsa_last_action_log_time", 0.0) or 0.0) >= 2.0:
             print(

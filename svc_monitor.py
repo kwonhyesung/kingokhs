@@ -1721,18 +1721,31 @@ class MonitorSvc(threading.Thread):
                 if name in self.NUMERIC_FIELDS:
                     continue
 
+                probe_ntab = name == "user_info" and bool(getattr(self.state, "ntab_active", False))
+
                 now_roi = time.time()
                 if not self._should_process_roi(name, now_roi):
+                    if probe_ntab:
+                        print(f"[UserInfoProbe] {time.strftime('%H:%M:%S')} skipped by _should_process_roi interval throttle")
                     continue
 
                 # 좌표 계산 및 crop 추출
                 ox, oy, scx, scy = self.obs_params
                 fh, fw = img_np.shape[:2]
-                pad = 0 if name == "map_info" else 5  # map_info는 패딩 없이 정확히 crop
+                # FindText는 픽셀 단위 정확한 매칭이 필요하다 - map_info는 이미 패딩 없이 도트
+                # 폰트를 정확히 crop한다. user_info(점프_user/졈프_user 신원 확인)도 findtext_scan
+                # 기반이라 똑같이 정확한 crop이 필요한데 여기 빠져있었다: 5px 패딩을 넣고 CUBIC으로
+                # 다시 리사이즈하면(아래 interp 분기) 도트 폰트가 뭉개져 매칭이 항상 실패한다.
+                pad = 0 if name in ("map_info", "user_info") else 5
                 sx = max(0, int(reg.sx * scx + ox - pad))
                 sy = max(0, int(reg.sy * scy + oy - pad))
                 dx = min(fw, int(reg.dx * scx + ox + pad))
                 dy = min(fh, int(reg.dy * scy + oy + pad))
+                if probe_ntab:
+                    print(
+                        f"[UserInfoProbe] {time.strftime('%H:%M:%S')} roi=({sx},{sy},{dx},{dy}) "
+                        f"frame=({fw}x{fh}) obs_params={self.obs_params}"
+                    )
 
                 # hp_trig/mp_trig are point-style ROIs in config (often dx<=sx, dy<=sy).
                 is_point = (reg.dx <= reg.sx) and (reg.dy <= reg.sy)
@@ -1758,24 +1771,34 @@ class MonitorSvc(threading.Thread):
                     continue
 
                 crop = img_np[sy:dy, sx:dx]
-                if crop.size == 0: continue
+                if crop.size == 0:
+                    if probe_ntab:
+                        print(f"[UserInfoProbe] {time.strftime('%H:%M:%S')} skipped: crop.size == 0")
+                    continue
 
                 target_w, target_h = reg.dx - reg.sx, reg.dy - reg.sy
                 if target_w > 0 and target_h > 0:
                     if crop.shape[1] != target_w or crop.shape[0] != target_h:
                         # map_info는 도트 폰트 → NEAREST 필수 (CUBIC이면 FindText 매칭 붕괴)
-                        interp = cv2.INTER_NEAREST if name == "map_info" else cv2.INTER_CUBIC
+                        interp = cv2.INTER_NEAREST if name in ("map_info", "user_info") else cv2.INTER_CUBIC
                         crop = cv2.resize(crop, (target_w, target_h), interpolation=interp)
                 else:
+                    if probe_ntab:
+                        print(f"[UserInfoProbe] {time.strftime('%H:%M:%S')} skipped: target_w/h <= 0 ({target_w}x{target_h})")
                     continue
 
                 cur_hash = self._fast_crop_signature(crop)
-                # map_info는 상태 로그/재시도를 위해 해시 스킵에서 제외
+                # map_info는 상태 로그/재시도를 위해 해시 스킵에서 제외.
+                # user_info도 마찬가지 이유로 제외해야 한다 - _confirm_and_lock_warrior_target()이
+                # ntab_active 짧은 창(~0.42s) 동안 매 프레임 신선한 재스캔을 필요로 하는데,
+                # 이 캐시가 걸리면 화면이 그대로인 것처럼 보이는 순간 이후로는 user_mode=="ntab"
+                # 분기 자체가 실행되지 않아 신원 확인이 영원히 no_match로 끝난다
+                # (target_info가 red_tab 신원 판정을 위해 이미 같은 이유로 예외 처리돼 있던 것과 동일).
                 if (
                     name != "map_info"
                     and self.last_hashes.get(name) == cur_hash
                     and name in self.last_values
-                    and name not in ("play_area", "target_info")
+                    and name not in ("play_area", "target_info", "user_info")
                 ):
                     continue
                 self.last_hashes[name] = cur_hash
@@ -1808,6 +1831,18 @@ class MonitorSvc(threading.Thread):
                 if name == "user_info":
                     now_user = time.time()
                     user_mode = self._resolve_user_info_mode(now_user)
+                    if probe_ntab:
+                        print(f"[UserInfoProbe] {time.strftime('%H:%M:%S')} reached ntab check, user_mode={user_mode}")
+                        if now_user - float(getattr(self, "_last_user_info_probe_save", 0.0) or 0.0) >= 0.5:
+                            self._last_user_info_probe_save = now_user
+                            try:
+                                debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ocr_debug")
+                                os.makedirs(debug_dir, exist_ok=True)
+                                out_path = os.path.join(debug_dir, "user_info_probe.png")
+                                cv2.imwrite(out_path, crop)
+                                print(f"[UserInfoProbe] saved crop -> {out_path} shape={crop.shape}")
+                            except Exception as e:
+                                print(f"[UserInfoProbe] crop save failed: {e}")
                     if user_mode == "idle":
                         continue
 

@@ -29,7 +29,7 @@ except ImportError:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PATTERNS_FILE = os.path.join(SCRIPT_DIR, "findtext_patterns.json")
-PATTERN_CATEGORIES = ("map", "item", "monster", "party")
+PATTERN_CATEGORIES = ("map", "item", "monster", "party", "magic")
 
 
 def grab_full_screen_bgr() -> np.ndarray:

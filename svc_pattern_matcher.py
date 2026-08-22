@@ -118,7 +118,7 @@ class PatternMatcher:
 
     def find_text_scan(self, play_area_rgb: np.ndarray, category: str, ent_type: str,
                         err1: float = 0.10, err0: float = 0.10) -> list[dict]:
-        """findtext_patterns.json의 category(map/item/monster/party)에 저장된
+        """findtext_patterns.json의 category(map/item/monster/party/magic)에 저장된
         패턴을 전부 '|'로 결합해 한 번에 스캔한다. 각 패턴에 이미 박혀있는
         <comment>가 그대로 엔티티 이름(id)이 된다 (ft.py 저장 시 comment=이름
         으로 강제하기 때문에 여기서 별도 이름 매핑이 필요 없음).
@@ -132,7 +132,16 @@ class PatternMatcher:
         if not patterns:
             return []
         combined = "".join(patterns.values())
-        matches = self._ft.find_text(combined, screenshot=play_area_rgb,
+        # find_text()/findtext_wrapper는 BGR을 가정한다(ft.py도 mss가 준 BGR을
+        # 그대로 넘긴다 - gray=R*38+G*75+B*15 계산 자체가 채널0=B를 전제).
+        # 하지만 이 함수로 들어오는 인자는 이름 그대로 RGB다(CaptureSvc가
+        # last_frame을 RGB로 미리 변환해서 공유하기 때문). 흑백에 가까운
+        # map 도트폰트는 R≈B라 우연히 매칭이 됐지만, party 카테고리처럼
+        # 색이 뚜렷한 패턴(빨간 배경의 점프_user 등)은 R/B가 뒤바뀌면서
+        # 색 허용오차를 벗어나 전혀 매칭되지 않았다 - ft.py(BGR)에서는
+        # 찾아지는데 여기(RGB)서는 못 찾던 원인.
+        screenshot_bgr = cv2.cvtColor(play_area_rgb, cv2.COLOR_RGB2BGR)
+        matches = self._ft.find_text(combined, screenshot=screenshot_bgr,
                                       err1=err1, err0=err0, find_all=True)
         results = []
         for m in matches:

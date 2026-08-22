@@ -1509,6 +1509,45 @@ class BisHardware:
             self.send_force(f"U:{direction}")
         return True
 
+    def move_cursor(self, px: int, py: int) -> bool:
+        """클릭 없이 커서만 이동 (grid 변환 없음). 격수 캐릭터를 클릭한 뒤
+        커서가 그 자리에 그대로 남아있으면, 다음 재시도의 FindText 스캔이
+        커서 아이콘에 캐릭터/패턴이 가려져서 못 찾는 원인이 된다 - 스캔
+        직전에 화면 구석으로 미리 빼두는 용도."""
+        try:
+            import win32api
+            win32api.SetCursorPos((int(px), int(py)))
+            return True
+        except Exception as e:
+            _hw_log(f"[Click] 커서 이동 실패: {e}")
+            return False
+
+    def click_pixel(self, px: int, py: int) -> bool:
+        """화면 절대 픽셀 좌표를 S/W(win32api)로 직접 클릭 (grid 변환 없음,
+        아두이노 하드웨어 신호 아님). 지난 시도는 클릭 후 커서가 실제로
+        안 움직인 것처럼 보였는데, 원인이 확실치 않아(원격 PC 화면이라
+        애초에 안 닿는 것인지, 이 PC에서조차 SetCursorPos 자체가 실패한
+        것인지) 여기서 GetCursorPos로 즉시 되읽어 실제로 그 좌표로 이동
+        했는지 로그로 남긴다 - 다음 실행에서 어느 쪽인지 바로 구분된다."""
+        try:
+            import win32api
+            import win32con
+            win32api.SetCursorPos((int(px), int(py)))
+            actual = win32api.GetCursorPos()
+            moved = abs(actual[0] - int(px)) <= 2 and abs(actual[1] - int(py)) <= 2
+            # plain print (not _hw_log) - this is a one-off diagnostic we need
+            # visible regardless of VERBOSE_HW_LOGS to tell apart "SetCursorPos
+            # itself failed on this PC" from "it succeeded here but the game
+            # PC never saw it" (remote OBS virtual-cam feed).
+            print(f"[Click] SetCursorPos({px},{py}) -> GetCursorPos={actual} moved={moved}")
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.02)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            return moved
+        except Exception as e:
+            _hw_log(f"[Click] 픽셀 클릭 실패: {e}")
+            return False
+
     def click(self, grid_x: int, grid_y: int, grid_manager=None):
         """
         Grid 좌표를 받아 Pixel 좌표로 변환 후 클릭

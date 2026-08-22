@@ -398,6 +398,9 @@ def main(
     
     numeric_scanner = NumericFieldScanner(state, reader_thread.matcher, config_file, reader_thread)  # ?⑥쥙???袁⑹뒠 ??살쟿??
     sentinel_thread = SentinelThread(state, reader_thread.matcher, config_file) # 筌뤣딅뮞???袁⑹뵠???癒? ?袁⑹뒠
+    # LogicSvc는 자기 소유 matcher가 없다 - 격수 위치 마커(점프_back/top/left/right)를
+    # 직접 find_text_scan으로 찾아 클릭하는 타겟팅에 필요해서 공유 인스턴스를 노출한다.
+    state.pattern_matcher = reader_thread.matcher
     action_thread = LogicSvc(state)  # FSM 嚥≪뮇彛?
     nav_thread = RouteSvc(state)  # ??삵돩野껊슣???
     

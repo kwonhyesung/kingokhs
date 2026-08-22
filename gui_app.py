@@ -558,6 +558,26 @@ class AppView:
             print(f"[ERROR] 스킬 저장 실패: {e}")
             self.show_toast("스킬 저장 실패", "#EF4444")
     
+    def _on_screen_geometry_or_default(self, saved_geometry, default_geometry):
+        """저장된 geometry(예: 903x754+2354+256)가 현재 화면 밖 좌표면 기본값으로 대체한다 -
+        예전에 다른 모니터 구성(듀얼모니터 등)에서 저장된 좌표가 그 모니터가 없어진 뒤에도
+        그대로 남아있으면, 팝업이 화면 밖에서 뜨면서(코드상 생성/표시 성공 로그까지 찍히지만)
+        사용자에게는 아무 반응이 없는 것처럼 보이던 CALIB 버튼 버그의 원인이었다."""
+        if not saved_geometry:
+            return default_geometry
+        try:
+            size_part, x_str, y_str = saved_geometry.split("+")
+            x, y = int(x_str), int(y_str)
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            if 0 <= x < sw and 0 <= y < sh:
+                return saved_geometry
+            print(f"[DEBUG] saved calibration_geometry {saved_geometry} is off-screen "
+                  f"(screen={sw}x{sh}) - falling back to default")
+            return default_geometry
+        except Exception:
+            return default_geometry
+
     def open_calibration_popup(self):
         print("[DEBUG]")
         pop = getattr(self, "calibration_popup", None)
@@ -575,7 +595,9 @@ class AppView:
         try:
             self.calibration_popup = ctk.CTkToplevel(self.root)
             self.calibration_popup.title("Calibration")
-            self.calibration_popup.geometry(self.calibration_geometry or "920x420+180+180")
+            default_geometry = "920x420+180+180"
+            geometry = self._on_screen_geometry_or_default(self.calibration_geometry, default_geometry)
+            self.calibration_popup.geometry(geometry)
             self.calibration_popup.attributes("-topmost", True)
             self.calibration_popup.transient(self.root)
             self.calibration_popup.minsize(860, 360)
@@ -611,7 +633,7 @@ class AppView:
         ctk.CTkLabel(left_panel, text="CALIBRATION", font=("Inter", 11, "bold"), text_color="#00D4FF").pack(pady=(6, 4))
         target_grid = ctk.CTkFrame(left_panel, fg_color="transparent")
         target_grid.pack(pady=2)
-        targets = ["hp", "mp", "exp", "money", "x", "y", "hp_trig", "mp_trig", "stat_info", "target_info", "user_info", "cooltime_area", "map_info", "play_area"]
+        targets = ["hp", "mp", "exp", "money", "x", "y", "hp_trig", "mp_trig", "stat_info", "target_info", "user_info", "magic_info", "cooltime_area", "map_info", "play_area"]
         for i, t in enumerate(targets):
             r, c = divmod(i, 3)
             ctk.CTkButton(target_grid, text=t.upper(), width=64, height=22, font=("Inter", 9),

@@ -8,7 +8,6 @@ import bis_core
 from support_runtime_rules import (
     adjust_follow_target_by_axis_gap,
     build_f5_hon_sequence,
-    build_warrior_search_sequence,
     confirm_support_lock_by_hp_gain,
     dir_between_coords,
     infer_dir_from_trail,
@@ -481,6 +480,8 @@ def test_support_autohunt_ignores_monster_combat_for_dosa_follow_service():
     assert should_ignore_monster_combat_for_support_autohunt("도사", True, True) is True
     assert should_ignore_monster_combat_for_support_autohunt("도사1", True, True) is True
     assert should_ignore_monster_combat_for_support_autohunt("도사2", True, True) is True
+    assert should_ignore_monster_combat_for_support_autohunt("술사", True, True) is True
+    assert should_ignore_monster_combat_for_support_autohunt("술사", True, False) is False
     assert should_ignore_monster_combat_for_support_autohunt("도사", True, False) is False
     assert should_ignore_monster_combat_for_support_autohunt("격수", True, True) is False
 
@@ -538,10 +539,6 @@ def test_target_box_clear_waits_for_support_targeting_to_finish():
     assert should_clear_target_box_after_support_stuck(True, True, False) is False
     assert should_clear_target_box_after_support_stuck(True, False, True) is False
     assert should_clear_target_box_after_support_stuck(False, False, False) is False
-
-
-def test_warrior_search_sequence_matches_real_input_flow():
-    assert build_warrior_search_sequence("left") == ("esc", "tab", "left", "enter")
 
 
 def test_support_lock_requires_hp_gain_after_heal():

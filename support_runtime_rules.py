@@ -386,7 +386,7 @@ def should_ignore_monster_combat_for_support_autohunt(
 ) -> bool:
     normalized_role = str(role or "").strip()
     return (
-        normalized_role in ("도사", "도사1", "도사2")
+        normalized_role in ("도사", "도사1", "도사2", "술사")
         and bool(service_active)
         and bool(nav_follow_enabled)
     )
@@ -442,10 +442,6 @@ def should_block_party_heal(
     blocked_until_sec: float,
 ) -> bool:
     return bool(retarget_active) or float(now_sec) < float(blocked_until_sec or 0.0)
-
-
-def build_warrior_search_sequence(direction: str) -> tuple[str, str, str, str]:
-    return ("esc", "tab", str(direction), "enter")
 
 
 def confirm_support_lock_by_hp_gain(before_hp: int, after_hp: int) -> bool:

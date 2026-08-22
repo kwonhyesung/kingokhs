@@ -156,6 +156,20 @@
             0
         ]
     },
+    "magic_info": {
+        "sx": 0,
+        "sy": 0,
+        "dx": 0,
+        "dy": 0,
+        "grid_start": [
+            0,
+            0
+        ],
+        "grid_end": [
+            0,
+            0
+        ]
+    },
     "cooltime_area": {
         "sx": 1256,
         "sy": 459,

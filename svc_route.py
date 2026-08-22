@@ -39,6 +39,7 @@ from support_runtime_rules import (
     is_implausible_walk_speed,
     fingerprint_hamming_distance,
     MAP_FINGERPRINT_SAME_MAX_DISTANCE,
+    classify_map_sync,
 )
 
 
@@ -1303,7 +1304,14 @@ class RouteSvc(threading.Thread):
         # "self_transition" completions. Use the same real held keypress
         # here instead of a synthetic tap, since that's what this game
         # actually recognizes as a step.
-        hw.hold_move(enter_dir, "move_hold", duration=TIMING_CONFIG.get("move_hold", 0.09))
+        # force=True: skip hold_move's own support_targeting_active /
+        # red_tab_promotion_active / is_combat_busy busy-check - without it,
+        # hold_move can silently send no keypress at all (returns False) if
+        # a heal/targeting cycle is running at this exact instant, and the
+        # code below has no way to tell that apart from "door didn't
+        # respond" (confirmed live: enter attempt landed mid heal-cast,
+        # moved=False, gave up on a door that was never actually tapped).
+        hw.hold_move(enter_dir, "move_hold", duration=TIMING_CONFIG.get("move_hold", 0.09), force=True)
         self.state.last_move_dir = enter_dir
 
         entered = False
@@ -1432,6 +1440,21 @@ class RouteSvc(threading.Thread):
                 )
                 self._last_portal_follow_log_time = now
             return portal_target
+        # portal_follow가 끝났는데도(예: enter_failed로 포기) 격수가 이미 다른 맵으로
+        # 넘어간 상태라면, 격수의 raw x,y는 도사가 있는 맵과 무관한 좌표다 - 같은 맵인
+        # 것처럼 그 좌표를 목표로 삼으면 엉뚱한 방향으로 걷는다. "different"로 확실할
+        # 때만 걸러낸다("pending"까지 막으면 map_info OCR이 애매한 정상 상황에서도
+        # 추적이 자주 끊긴다).
+        local_map_info = {
+            "map_info_text": getattr(self.state, "map_info_text", "") or getattr(self.state, "current_map", ""),
+            "current_map": getattr(self.state, "current_map", ""),
+            "map_info_fingerprint": getattr(self.state, "map_info_fingerprint", ""),
+        }
+        if classify_map_sync(local_map_info, remote_data, now=time.time()) == "different":
+            self._last_follow_target = None
+            self._last_follow_target_key = None
+            return None
+
         # 일반 추적은 마지막 방향값에 의존하지 않고 최신 격수 좌표를 직접 목표로 삼는다.
         # 방향값은 포탈 진입 판정에서만 사용해야 지연/오래된 방향으로 선회하지 않는다.
         follow_key = ("normal", *map_sig, dps_x, dps_y)
