@@ -552,6 +552,7 @@ class GameState:
     last_coord_transition_seq: int = 0
     last_coord_transition: Optional[Dict[str, Any]] = None
     _share_last_coord: Optional[Tuple[int, int]] = field(default=None, init=False, repr=False)
+    _share_last_coord_ts: float = field(default=0.0, init=False, repr=False)
     _share_last_map_sig: Optional[Tuple[str, str, str]] = field(default=None, init=False, repr=False)
     is_stuck: bool = False
     char_grid: Tuple[int, int] = (0, 0)
@@ -861,7 +862,21 @@ class GameState:
         prev = self._share_last_coord
         prev_map_sig = self._share_last_map_sig
         cur_ok = is_plausible_transition_coord(cur[0], cur[1])
-        prev_ok = bool(prev and is_plausible_transition_coord(prev[0], prev[1]))
+        # prev must also be RECENT, not just plausible-looking - if this PC's own
+        # x/y OCR silently stops updating for a while (occluded ROI, UI popup) and
+        # then resumes, the frozen old value looks like a normal coordinate but is
+        # actually stale by several real steps. Confirmed live: dosa was ~5 tiles
+        # from the warrior right up to the crossing, but the emitted "from" was a
+        # coordinate 25+ tiles away that the warrior had left minutes earlier -
+        # that's a stale prev, not a real jump. A real portal jump always fires
+        # within one telemetry tick of prev being refreshed, so require prev to be
+        # fresh too; a stale prev is silently re-synced below instead of emitting
+        # a garbage transition off it.
+        prev_ok = bool(
+            prev
+            and is_plausible_transition_coord(prev[0], prev[1])
+            and (time.time() - float(self._share_last_coord_ts or 0.0)) <= 1.5
+        )
         if cur_ok:
             if prev_ok:
                 gap = abs(cur[0] - prev[0]) + abs(cur[1] - prev[1])
@@ -907,6 +922,7 @@ class GameState:
                         "ts": time.time(),
                     }
             self._share_last_coord = cur
+            self._share_last_coord_ts = time.time()
             self._share_last_map_sig = map_sig
         if isinstance(self.last_coord_transition, dict):
             try:
@@ -1249,7 +1265,15 @@ class BisHardware:
             _hw_log(f"[Hardware] already connected to {current_port}; skip switching to {port}")
             return False
         try:
-            self.ser = serial.Serial(port, 115200, timeout=1)
+            # write_timeout: pyserial defaults this to None (blocks forever if the
+            # device stops draining its buffer). send()/send_force() hold self._lock
+            # for the whole write - an unresponsive ESP32/USB hiccup with no write
+            # timeout freezes that write forever, and since every other thread's
+            # hw call also waits on the same lock, the entire bot hangs with no
+            # exception anywhere to explain why (confirmed live: total freeze,
+            # zero output from any thread, right after rapid-fire F3 pause/resume
+            # queued up several overlapping RELEASE_ALL sends). Bound it instead.
+            self.ser = serial.Serial(port, 115200, timeout=1, write_timeout=1)
             _hw_log(f"[Hardware] 연결 성공: {port}")
             return True
         except Exception as e:

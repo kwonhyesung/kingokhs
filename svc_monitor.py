@@ -31,6 +31,8 @@ from svc_entity_tracker import EntityTracker
 from svc_numeric_scanner import NumericFieldScanner
 from svc_sentinel import SentinelThread
 
+_FLOOR_DIGIT_SUFFIX = re.compile(r"^(.+)_(\d)$")  # map_info가 매 사이클 도는 핫패스라 컴파일을 매 호출 밖으로 뺐다.
+
 
 class MonitorSvc(threading.Thread):
     NUMERIC_FIELDS = {"hp", "mp", "exp", "money", "x", "y"}
@@ -138,7 +140,7 @@ class MonitorSvc(threading.Thread):
             "cooltime_area": 0.090,
             "stat_info": 0.140,
             "items_scan": 0.120,
-            "map_info": 0.080,
+            "map_info": 0.0,  # x/y와 거의 동시에 포탈이동을 잡아야 해서 스로틀 없이 매 사이클 스캔.
         }
 
         # patterns.json 로드
@@ -175,24 +177,28 @@ class MonitorSvc(threading.Thread):
         (1~3자리) 왼쪽부터 이어붙이고, 앞에 없는 0은 안 붙인다(정수 형태).
         일반 던전(패턴 하나가 전체 이름+층수를 통짜로 담음, 예: "흉가1")은
         digit-suffix 패턴이 아예 없으니 그대로 첫 히트를 쓴다."""
-        digit_suffix = re.compile(r"^(.+)_(\d)$")
-        base_hits = [h for h in hits if not digit_suffix.match(str(h.get("name", "")))]
-        digit_hits = [h for h in hits if digit_suffix.match(str(h.get("name", "")))]
+        # 히트마다 정규식은 딱 한 번만 매치하고 그 결과를 재사용한다(이전엔 같은
+        # 문자열을 base/digit 분류, own_digits 필터, floor 조립에서 최대 4번씩
+        # 다시 매치했다).
+        matched = [(h, _FLOOR_DIGIT_SUFFIX.match(str(h.get("name", "")))) for h in hits]
+        base_hits = [(h, m) for h, m in matched if not m]
+        digit_hits = [(h, m) for h, m in matched if m]
 
         if base_hits:
-            base_name = str(base_hits[0]["name"]).strip()
-            score = float(base_hits[0].get("score", 1.0))
-            own_digits = [h for h in digit_hits if digit_suffix.match(str(h["name"])).group(1) == base_name]
+            base_h, _ = base_hits[0]
+            base_name = str(base_h["name"]).strip()
+            score = float(base_h.get("score", 1.0))
+            own_digits = [(h, m) for h, m in digit_hits if m.group(1) == base_name]
             if own_digits:
-                own_digits.sort(key=lambda h: h.get("x", 0))
-                floor = "".join(digit_suffix.match(str(h["name"])).group(2) for h in own_digits[:3])
+                own_digits.sort(key=lambda pair: pair[0].get("x", 0))
+                floor = "".join(m.group(2) for _, m in own_digits[:3])
                 return f"{base_name}{floor}", score
             return base_name, score
 
         if digit_hits:
-            digit_hits.sort(key=lambda h: h.get("x", 0))
-            base_name = digit_suffix.match(str(digit_hits[0]["name"])).group(1)
-            floor = "".join(digit_suffix.match(str(h["name"])).group(2) for h in digit_hits[:3])
+            digit_hits.sort(key=lambda pair: pair[0].get("x", 0))
+            base_name = digit_hits[0][1].group(1)
+            floor = "".join(m.group(2) for _, m in digit_hits[:3])
             return f"{base_name}{floor}", 1.0
 
         return "", 0.0
