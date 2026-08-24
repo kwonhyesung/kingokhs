@@ -24,13 +24,34 @@ except Exception:
     pass
 
 
+_CLAUDE_LOG_FORWARD_PORT = 5559  # telemetry(5555)/local(5556)과 겹치지 않는 별도 포트.
+
+
+def _log_forward_target_and_role():
+    """(허브 PC로 보낼 UDP 주소, 내 role). 허브(도사1) 본인이거나 설정을 못 읽으면
+    addr=None - 로그 전송은 있으면 좋고 없어도 봇 동작엔 전혀 영향을 주면 안 된다."""
+    try:
+        cfg = load_network_config()
+        role = normalize_network_role(cfg.get("role"))
+        if is_hub_network_role(role):
+            return None, role
+        server_ip = str(cfg.get("server_ip", "") or "").strip()
+        if not server_ip:
+            return None, role
+        return (server_ip, _CLAUDE_LOG_FORWARD_PORT), role
+    except Exception:
+        return None, "unknown"
+
+
 class _ClaudeLogTee:
     """print() 등 콘솔 출력을 원래 스트림과 로그 파일에 동시에 쓴다.
     콘솔은 그대로 두고(사용자용), 파일 쪽은 Claude가 나중에 빠르게 읽을 수
     있도록 매 틱 반복되는 저가치 라인은 걸러내서 용량과 토큰을 아낀다.
     FollowROI는 원래 여기서도 걸렀었는데, 그게 하필 포탈 추적 멈춤 진단에
     필요한 "도사 자신이 실제로 움직였는지" 정보라 못 찾아냈다 - 소스 쪽에서
-    이미 1.25~2초 간격으로 자체 rate-limit돼 있어 양도 적으니 남긴다."""
+    이미 1.25~2초 간격으로 자체 rate-limit돼 있어 양도 적으니 남긴다.
+    허브(도사1)가 아닌 PC에서는 같은 줄을 UDP로 허브 PC에도 보낸다 - 격수/술사/
+    도사2 PC의 로그를 Claude가 도사1 PC에서 직접 읽을 수 있게 하기 위함."""
 
     _DROP_PREFIXES = (
         "[CycleDBG]",
@@ -51,6 +72,14 @@ class _ClaudeLogTee:
         # 이 문제를 원천적으로 피한다. 실제 파일 쓰기만 락으로 보호한다.
         self._thread_local = threading.local()
         self._write_lock = threading.Lock()
+        self._forward_addr, self._forward_role = _log_forward_target_and_role()
+        self._forward_sock = None
+        if self._forward_addr is not None:
+            try:
+                import socket as _socket
+                self._forward_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            except Exception:
+                self._forward_sock = None
 
     def write(self, data):
         self._stream.write(data)
@@ -61,6 +90,15 @@ class _ClaudeLogTee:
                 if not line.lstrip().startswith(self._DROP_PREFIXES):
                     with self._write_lock:
                         self._log_file.write(line + "\n")
+                    if self._forward_sock is not None and line.strip():
+                        try:
+                            payload = json.dumps(
+                                {"role": self._forward_role, "line": line},
+                                ensure_ascii=False,
+                            ).encode("utf-8")
+                            self._forward_sock.sendto(payload, self._forward_addr)
+                        except Exception:
+                            pass
             self._thread_local.buf = buf
         except Exception:
             pass
@@ -106,6 +144,54 @@ def _open_new_claude_log_file():
     return log_file
 
 
+def _start_remote_log_receiver():
+    """허브(도사1) PC에서만 실행: 다른 PC들이 UDP로 보낸 로그 줄을 받아
+    logs/remote_<role>.log에 실시간으로 쌓는다. Claude가 이 PC에서 격수/술사/
+    도사2 PC의 로그를 파일로 직접 읽을 수 있게 하기 위함 - 순수 진단용이라
+    실패해도 조용히 넘어간다."""
+    try:
+        cfg = load_network_config()
+        if not is_hub_network_role(normalize_network_role(cfg.get("role"))):
+            return
+    except Exception:
+        return
+
+    def _run():
+        import socket as _socket
+        logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        files: dict = {}
+        try:
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            sock.bind(("0.0.0.0", _CLAUDE_LOG_FORWARD_PORT))
+        except Exception as e:
+            print(f"[LogForward] receiver bind failed: {e}")
+            return
+        print(f"[LogForward] listening on 0.0.0.0:{_CLAUDE_LOG_FORWARD_PORT}")
+        while True:
+            try:
+                data, _addr = sock.recvfrom(65535)
+                msg = json.loads(data.decode("utf-8"))
+                sender_role = str(msg.get("role", "") or "unknown")
+                line = str(msg.get("line", ""))
+            except Exception:
+                continue
+            try:
+                f = files.get(sender_role)
+                if f is None:
+                    # 매 프로세스 시작마다 새로 덮어쓴다(로컬 claude_debug_*.log와
+                    # 동일한 정책) - Claude는 항상 이 파일 하나만 읽으면 된다.
+                    path = os.path.join(logs_dir, f"remote_{sender_role}.log")
+                    f = open(path, "w", encoding="utf-8", buffering=1)
+                    files[sender_role] = f
+                f.write(line + "\n")
+                f.flush()
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True, name="LogForwardReceiver").start()
+
+
 def _install_claude_log_tee():
     """이번 실행부터의 콘솔 출력을 logs/claude_debug_<시각>.log에 남긴다.
     콘솔 표시는 그대로 유지되고, 이 파일만 Claude가 나중에 직접 읽는 용도다."""
@@ -116,6 +202,7 @@ def _install_claude_log_tee():
         _claude_log_tee_stderr = _ClaudeLogTee(sys.stderr, _claude_log_file)
         sys.stdout = _claude_log_tee_stdout
         sys.stderr = _claude_log_tee_stderr
+        _start_remote_log_receiver()
     except Exception:
         pass
 
@@ -191,7 +278,12 @@ from svc_sentinel import SentinelThread
 from svc_capture import CaptureSvc
 from svc_logic import LogicSvc
 from svc_route import RouteSvc
-from support_runtime_rules import enqueue_hotkey_callback, resolve_runtime_network_role
+from support_runtime_rules import (
+    enqueue_hotkey_callback,
+    resolve_runtime_network_role,
+    is_hub_network_role,
+    normalize_network_role,
+)
 
 # ?⑥쥚鍮?怨룸즲(65?紐꾪뒄 ?? 筌뤴뫀????紐낆넎?源놁뱽 ?袁る립 DPI ?紐꾨뻼 ??뽮쉐??
 try:
