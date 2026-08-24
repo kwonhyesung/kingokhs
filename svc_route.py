@@ -888,10 +888,33 @@ class RouteSvc(threading.Thread):
                     and is_plausible_transition_coord(event_x, event_y)
                     and (event_age is None or event_age <= 0.75)
                 ):
-                    event_prev = (event_x, event_y)
-                    event_dir = normalize_move_dir(event_data.get("dir") or event_data.get("input_dir"))
-                    event_from_confidence = str(event_data.get("from_confidence") or "low")
                     self._last_coord_transition_seq = event_seq
+                    # 격수 PC의 x/y OCR은 매 사이클 갱신되지만 map_info OCR은
+                    # 별도 스레드/캡처라 완전히 같은 순간을 보장 못한다 - 실제로
+                    # 포탈을 넘는 그 사이클에 x/y는 이미 새 맵 좌표인데 map_sig는
+                    # 아직 옛 맵으로 찍히는 경우가 있었다. 그러면 "from"이 사실
+                    # 새 맵 좌표라 도사가 옛 맵에서 걸어갈 수 없는 곳을 목표로
+                    # 삼게 된다(실측: 몇 칸 이내에서 붙어 추적 중이다가 갑자기
+                    # 30칸+ 떨어진 좌표로 점프). from_map_sig(그 좌표를 찍은
+                    # 순간의 격수 맵)가 도사가 알고 있는 격수의 직전 맵과 다르면
+                    # - 이미 새 맵 좌표라는 뜻이니 위치 정보로 신뢰하지 않는다.
+                    event_from_map_sig = event_data.get("from_map_sig")
+                    from_map_mismatch = bool(
+                        event_from_map_sig
+                        and prev_map_sig
+                        and any(prev_map_sig[:3])
+                        and tuple(str(v) for v in event_from_map_sig) != tuple(str(v) for v in prev_map_sig[:3])
+                    )
+                    if from_map_mismatch:
+                        print(
+                            f"[PortalFollow] ignoring event_seq={event_seq}: from={[event_x, event_y]} was "
+                            f"captured on map={event_from_map_sig}, not the warrior's last known map="
+                            f"{prev_map_sig[:3]} - likely already the post-crossing coordinate"
+                        )
+                    else:
+                        event_prev = (event_x, event_y)
+                        event_dir = normalize_move_dir(event_data.get("dir") or event_data.get("input_dir"))
+                        event_from_confidence = str(event_data.get("from_confidence") or "low")
             except Exception:
                 event_prev = None
                 event_dir = None

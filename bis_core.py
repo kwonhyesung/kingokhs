@@ -919,6 +919,7 @@ class GameState:
                         "from_confidence": from_confidence,
                         "map_changed": map_changed,
                         "map_sig": list(map_sig),
+                        "from_map_sig": list(prev_map_sig) if prev_map_sig else None,
                         "ts": time.time(),
                     }
             self._share_last_coord = cur
