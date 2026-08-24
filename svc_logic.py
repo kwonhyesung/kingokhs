@@ -871,6 +871,34 @@ class LogicSvc(threading.Thread):
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
 
+        # tab은 화면에 보이는(근접한) 대상만 선택된다 - 격수가 같은 맵인데 멀리
+        # 떨어져 있으면 ESC->TAB->TAB을 몇 번을 눌러도 못 잡는다. 게다가 이 함수는
+        # 곧바로 support_targeting_active=True를 거는데, hold_move()가 그 플래그를
+        # busy-gate로 보기 때문에(bis_core.py) 실패할 시도를 벌써 몇 번 반복하는
+        # 동안 정작 거리를 좁혀줄 일반 추적 이동까지 같이 막혀버린다 - 멀어서
+        # 실패하고, 실패 시도가 추적을 막아서 계속 멀고, 그래서 계속 실패하는
+        # 악순환. 같은 맵인데 너무 멀면 여기서 시도 자체를 미루고, 일반 추적이
+        # 알아서 거리를 좁히게 둔다(포탈 직후 재태깅의 distance>4 게이트와 동일
+        # 기준).
+        support_target = self.state.get_fresh_remote_data_by_role("격수")
+        if isinstance(support_target, dict) and support_target:
+            if classify_map_sync(self.state.get_all(), support_target, now=time.time()) == "same":
+                try:
+                    warrior_x = int(support_target.get("x", support_target.get("pos_x", 0)) or 0)
+                    warrior_y = int(support_target.get("y", support_target.get("pos_y", 0)) or 0)
+                    warrior_distance = follow_manhattan_gap(
+                        warrior_x, warrior_y,
+                        int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0),
+                    )
+                except Exception:
+                    warrior_distance = 0
+                if warrior_distance > 4:
+                    print(
+                        f"[Recovery] red_tab reacquire deferred: same map but "
+                        f"distance={warrior_distance} - closing gap before tab-targeting."
+                    )
+                    return False
+
         self._invalidate_warrior_redtab_verification()
         self._party_direct_heal_target_prepared = False
         self._set_support_input_block(0.75 if moving_follow else support_retarget_block_duration(False))

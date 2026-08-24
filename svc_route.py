@@ -272,6 +272,7 @@ class RouteSvc(threading.Thread):
         self._last_portal_follow_log_time = 0.0
         self._last_self_portal_coord: tuple[int, int] | None = None
         self._portal_enter_attempted = False
+        self._portal_enter_nudge_used = False
         self.state.portal_follow_active = False
         self.state.portal_follow_retarget_requested = False
         self.state.portal_follow_coord = None
@@ -797,6 +798,7 @@ class RouteSvc(threading.Thread):
         self._portal_follow_source_map_sig = tuple(source_map_sig) if source_map_sig else None
         self._portal_follow_started_at = started
         self._portal_enter_attempted = False
+        self._portal_enter_nudge_used = False
         self._last_self_portal_coord = (int(self.state.x), int(self.state.y))
         self._blocked_cells_until.clear()
         self._blocked_cell_hits.clear()
@@ -1245,12 +1247,16 @@ class RouteSvc(threading.Thread):
         """Walk to the warrior's own pre-jump tile, then tap the single
         direction key they used - not a different tile per guessed
         direction. Taps once and polls for the map change instead of a
-        fixed sleep-then-check, and does NOT auto-retry the same key on a
-        no-change read: on doors where the same key also triggers the
-        return trip on the other side, a blind second tap can undo a
-        transition that actually succeeded but was detected late - live
-        logs showed exactly this (tap 1 and tap 2 both read "no change"
-        even though the dosa was standing right on the door)."""
+        fixed sleep-then-check, and does NOT re-tap the same key at the
+        same tile on a no-change read: on doors where the same key also
+        triggers the return trip on the other side, a blind second tap
+        there can undo a transition that actually succeeded but was
+        detected late - live logs showed exactly this (tap 1 and tap 2
+        both read "no change" even though the dosa was standing right on
+        the door). If the tap produced zero position change at all
+        (capture/network lag likely left warrior_last one tile short of
+        the real door), it instead walks one tile further and retries the
+        tap from there - once."""
         target = self._get_portal_follow_target()
         if not target:
             return False
@@ -1317,6 +1323,7 @@ class RouteSvc(threading.Thread):
         entered = False
         map_sig_changed = False
         fp_changed = False
+        remote_confirmed = False
         deadline = time.time() + 0.70
         while time.time() < deadline:
             after_own_map_sig = (
@@ -1331,7 +1338,23 @@ class RouteSvc(threading.Thread):
                 and after_own_fp
                 and fingerprint_hamming_distance(before_own_fp, after_own_fp) > MAP_FINGERPRINT_SAME_MAX_DISTANCE
             )
-            if map_sig_changed or fp_changed:
+            if not (map_sig_changed or fp_changed):
+                # Own map OCR/fingerprint can lag the actual warp - cross-check
+                # against the warrior's own post-crossing map (they already
+                # settled there before we tapped) as an independent signal.
+                # They were on a different map than us when this crossing was
+                # armed, so classify_map_sync reading "same" now can only mean
+                # we actually landed there, even if our own before/after diff
+                # hasn't caught up yet.
+                local_now = {
+                    "map_info_text": getattr(self.state, "map_info_text", "") or getattr(self.state, "current_map", ""),
+                    "current_map": getattr(self.state, "current_map", ""),
+                    "map_info_fingerprint": getattr(self.state, "map_info_fingerprint", ""),
+                }
+                remote_now = self._get_remote_warrior_snapshot()
+                if remote_now and classify_map_sync(local_now, remote_now, now=time.time()) == "same":
+                    remote_confirmed = True
+            if map_sig_changed or fp_changed or remote_confirmed:
                 entered = True
                 break
             humanized_sleep(0.06, variance=0.10)
@@ -1377,7 +1400,8 @@ class RouteSvc(threading.Thread):
                     "source": "runtime_success",
                 }
             self._finish_portal_follow(
-                f"entered map_changed={map_sig_changed} fp_changed={fp_changed} enter_dir={enter_dir}"
+                f"entered map_changed={map_sig_changed} fp_changed={fp_changed} "
+                f"remote_confirmed={remote_confirmed} enter_dir={enter_dir}"
             )
             return True
 
@@ -1391,6 +1415,7 @@ class RouteSvc(threading.Thread):
             int(getattr(self.state, "x", 0) or 0),
             int(getattr(self.state, "y", 0) or 0),
         )
+        moved = after_pos_on_fail != current_pos
         # Same door/direction has now failed identically across several live
         # sessions - this distinguishes two very different root causes for
         # next time: if pos_after == pos_before, the keypress plausibly never
@@ -1400,8 +1425,27 @@ class RouteSvc(threading.Thread):
         print(
             f"[PortalFollow] portal enter failed: current={current_pos}, "
             f"warrior_last={warrior_last}, enter_dir={enter_dir}, "
-            f"pos_after_tap={after_pos_on_fail} moved={after_pos_on_fail != current_pos}"
+            f"pos_after_tap={after_pos_on_fail} moved={moved}"
         )
+        # moved=False no longer points at a swallowed keypress (force=True
+        # above already guarantees hold_move sends it) - it more likely means
+        # capture/network lag left warrior_last one tile short of the real
+        # door tile, and the held key just walked into a wall next to the
+        # door instead of through it. Walk one more real tile in enter_dir
+        # and retry the tap from there, once. A door that's genuinely wrong
+        # (moved=True but no map change) still gives up immediately - a
+        # position that DID change means the key reached the game fine, so
+        # nudging further would just walk past a door that was never here.
+        if not moved and not self._portal_enter_nudge_used:
+            self._portal_enter_nudge_used = True
+            nudged = _nav_step_from_dir(warrior_last[0], warrior_last[1], enter_dir)
+            print(f"[PortalFollow] no movement on tap - retrying one tile further {enter_dir} at {nudged}")
+            self._portal_follow_coord = nudged
+            self._portal_follow_approach = nudged
+            self.state.portal_follow_coord = nudged
+            self.state.portal_follow_approach = nudged
+            self._portal_enter_attempted = False
+            return False
         self._finish_portal_follow(f"enter_failed enter_dir={enter_dir}")
         return True
 
