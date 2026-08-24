@@ -2182,6 +2182,20 @@ class RouteSvc(threading.Thread):
                         self._nav_attempt_pos = None
                         self._nav_attempt_started_at = 0.0
                         continue
+                    if bool(getattr(self, "_portal_follow_active", False)):
+                        # _complete_portal_follow_if_arrived() can nudge
+                        # _portal_follow_coord one tile further (moved=False
+                        # retry) and return False so this cycle walks toward
+                        # it - but tx,ty above was snapshotted BEFORE that
+                        # call, so it's still the old (now-arrived-at) target.
+                        # Re-fetch fresh or the gap==0 safety net below reads
+                        # "arrived but nothing happened" off the stale target
+                        # and gives up before the nudge ever gets to walk
+                        # (confirmed live: nudge printed, then
+                        # arrived_no_transition fired the very same cycle).
+                        refreshed_target = self._get_portal_follow_target()
+                        if refreshed_target:
+                            tx, ty = refreshed_target
                     cx, cy = self.state.x, self.state.y
                     gap_x = abs(tx - cx)
                     gap_y = abs(ty - cy)
