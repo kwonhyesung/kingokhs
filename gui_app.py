@@ -3141,7 +3141,7 @@ class AppView:
     def _apply_control_mode(self, mode: str, announce: bool = True):
         normalized = str(mode or "NONE").strip().upper()
         role = str(getattr(self.state, "role", "") or "").strip()
-        if normalized in {"FOLLOW_SERVICE", "F2"}:
+        if normalized in {"FOLLOW_SERVICE", "FOLLOW+SERVICE", "F2"}:
             control_mode = "FOLLOW+SERVICE"
             follow_enabled = True
             # Warrior uses patrol route mode while service loop is on.
