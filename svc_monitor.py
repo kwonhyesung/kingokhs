@@ -2127,8 +2127,11 @@ class MonitorSvc(threading.Thread):
                         print(f"[MapOCR] find_text_scan error: {e}")
                     if ft_map_hits:
                         map_text, score = self._compose_map_text_with_floor_digits(ft_map_hits)
-                        if now_map - float(getattr(self, "_last_map_hits_log_time", 0.0) or 0.0) >= 1.0:
-                            self._last_map_hits_log_time = now_map
+                        # map_info는 스로틀 없이 매 사이클 스캔되니(포탈 감지 속도 때문),
+                        # 예전처럼 "1초에 한 번"으로 찍으면 같은 값을 계속 반복해서
+                        # 로그/포워딩 비용만 태운다 - composed 값이 실제로 바뀔 때만 남긴다.
+                        if map_text != getattr(self, "_last_map_hits_logged_text", None):
+                            self._last_map_hits_logged_text = map_text
                             hit_names = [str(h.get("name", "")) for h in ft_map_hits]
                             print(f"[MapOCR] hits={hit_names} -> composed={map_text!r}")
                     else:
