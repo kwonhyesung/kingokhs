@@ -2650,9 +2650,25 @@ class AppView:
 
     def launch_findtext_tool(self):
         try:
-            subprocess.Popen([sys.executable, os.path.join(SCRIPT_DIR, "ft.py")], cwd=SCRIPT_DIR)
+            proc = subprocess.Popen(
+                [sys.executable, os.path.join(SCRIPT_DIR, "ft.py")], cwd=SCRIPT_DIR,
+                stderr=subprocess.PIPE, text=True,
+            )
         except Exception as exc:
             self.show_toast(f"FindText 실행 실패: {exc}", "#FF5555")
+            return
+
+        # Popen은 프로세스가 뜨는지만 확인한다 - ft.py가 창을 띄우기 전에
+        # (모듈 import 실패, tkinter 초기화 실패 등으로) 바로 죽어버리면
+        # Popen 자체는 성공했으니 아무 에러도 안 뜨고 그냥 "팝업이 안
+        # 뜬 것"처럼 보인다. 창을 띄울 시간(1.5s)을 준 뒤 이미 죽었는지
+        # 확인해서, 죽었으면 그 이유(stderr)를 토스트로 보여준다.
+        def _check_startup():
+            if proc.poll() is not None:
+                err = (proc.stderr.read() or "").strip().splitlines()
+                reason = err[-1] if err else f"exit code {proc.returncode}"
+                self.show_toast(f"FindText 창 시작 실패: {reason}", "#FF5555")
+        self.root.after(1500, _check_startup)
 
     def set_role(self, role: str):
         """Toggle F1 route mode."""

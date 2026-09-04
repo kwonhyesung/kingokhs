@@ -63,6 +63,7 @@ class MonitorSvc(threading.Thread):
         self._last_preview_dump_time = 0.0
         self._last_gps_log_time = 0.0
         self._last_gps_grid = None
+        self._last_focus_warn_time = 0.0
 
         # PatternMatcher: temple/ 루트
         tmpl_root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -1610,7 +1611,15 @@ class MonitorSvc(threading.Thread):
                 if hasattr(self.state, "service_active"): self.state.service_active = False
                 
                 # Panic Release 호출 제거 - 게임창 비활성화 시에도 하드웨어 신호 유지
-                _monitor_log("[Warn] 게임창 비활성화 감지 - 서비스만 중단하고 하드웨어 신호는 유지합니다.")
+                # ponytail: 이 진단이 SVC_VERBOSE_LOGS 뒤에 숨어 있어서, F2를
+                # 눌러도 service_active가 계속 꺼지는 원인을 실전에서 못
+                # 찾고 있었다(여러 번 로그 확인해도 원인 후보만 나오고
+                # 확정을 못 함). 흔한 verbose 스팸이 아니라 "왜 서비스가
+                # 안 켜지지"의 직접적인 답이라 기본으로 보이게 한다.
+                now_focus = time.time()
+                if now_focus - self._last_focus_warn_time >= 2.0:
+                    self._last_focus_warn_time = now_focus
+                    print("[Warn] 게임창 비활성화 감지 - 서비스만 중단하고 하드웨어 신호는 유지합니다.")
             
             frame_time = getattr(self.state, "last_frame_time", 0)
             if frame_time <= self.last_frame_time:
