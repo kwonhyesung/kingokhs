@@ -30,6 +30,7 @@ class SentinelThread(threading.Thread):
         # 디바운싱 로직: 3프레임 연속 감지 시 확정
         self._monster_history = {}  # {"x_y": [frame_count, last_seen_time]}
         self._char_pattern_lost_since = 0.0
+        self._last_slow_cycle_log_time = 0.0
         # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (매 프레임 스팸 방지)
         self._last_announced_item_names = set()
         self._last_announced_monster_names = set()
@@ -203,18 +204,20 @@ class SentinelThread(threading.Thread):
             users = deduplicate_entities(users)
             party = deduplicate_entities(party)
 
-            # ── 디바운싱: 1초 안에 3번 감지되면 확정 ────
+            # ── 디바운싱: 최근 몇 초 안에 3번 감지되면 확정 ────
             # 열쇠는 이름이다(위치는 몬스터가 맴돌면 매 프레임 다른 버킷으로
             # 넘어가서 못 쓴다 - 예전 버그).
             #
-            # "3프레임 연속"이 아니라 "1초 안에 3번"이다 - 한 프레임이라도
+            # "3프레임 연속"이 아니라 "최근 몇 초 안에 3번"이다 - 한 프레임
             # 놓치면 카운트를 0으로 리셋하는 코드가 있었는데, 몬스터 패턴은
-            # 캐릭터 패턴(점프_*)보다 프레임당 인식률이 낮아서(실측: 15초
+            # 캐릭터 패턴(점프_*)보다 프레임당 인식률이 낮아서(실측: 15~20초
             # 내내 화면에 있었는데도 확정이 한 번도 안 됨) 완벽하게 연속
-            # 3번을 채우는 일이 거의 없었다 - 매번 한 번 놓치는 순간 처음부터
-            # 다시 3번을 쌓아야 했다. 굳이 연속일 필요가 없다 - 1초 이내에
-            # 3번이면 충분히 "지금 화면에 있다"는 근거가 된다. 진짜로 사라진
-            # 경우는 아래 1초 TTL이 알아서 지운다.
+            # 3번을 채우는 일이 거의 없었다. 굳이 연속일 필요가 없다.
+            # 만료 시간을 8초로 넉넉히 잡는다 - 실측 스캔 주기가 30fps 설계와
+            # 크게 어긋나는 사례(20초 유지 = 로그 8줄, 사이클당 1초 이상)가
+            # 나와서, 그 실제 속도에서도 3번을 모을 여유를 준다. 진짜로
+            # 사라진 몬스터는 hunt 쪽의 별도 유예(target_miss_grace_sec)가
+            # 처리하므로, 여기서 너무 빡빡하게 지울 필요가 없다.
             confirmed_monsters = []
             for m in monsters:
                 key = m.get("name", "")
@@ -229,7 +232,7 @@ class SentinelThread(threading.Thread):
                 if self._monster_history.get(key, [0, 0])[0] >= self._debounce_frames:
                     confirmed_monsters.append(m)
 
-            for k in [k for k, v in self._monster_history.items() if now - v[1] > 1.0]:
+            for k in [k for k, v in self._monster_history.items() if now - v[1] > 8.0]:
                 del self._monster_history[k]
 
             monsters = confirmed_monsters
@@ -353,3 +356,11 @@ class SentinelThread(threading.Thread):
                         cv2.putText(play_area_overlay, i.get("name", ""), (x1, y1 - 5),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
                 self._last_overlay_time = now
+
+            # 실측 사이클 소요 시간 진단: "20초 F2 유지 = 로그 8줄"처럼 스캔
+            # 속도가 30fps 설계와 크게 어긋나는 사례가 나와서, 정확히 한
+            # 사이클(스캔+매칭 전체)이 몇 ms 걸리는지 직접 찍는다(1초 제한).
+            cycle_ms = (time.time() - now) * 1000.0
+            if cycle_ms > 150.0 and time.time() - self._last_slow_cycle_log_time >= 1.0:
+                self._last_slow_cycle_log_time = time.time()
+                print(f"[SentinelPerf] 사이클 {cycle_ms:.0f}ms (30fps 목표=33ms)")
