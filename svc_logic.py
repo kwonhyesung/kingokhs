@@ -3920,9 +3920,10 @@ class LogicSvc(threading.Thread):
                 # 한 사이클이라도 못 봤다고 바로 "죽었다"로 처리하면, 인식이
                 # 잠깐 흔들릴 때마다 타겟을 놓치고 처음부터 다시 찾게 된다.
                 # 마지막으로 본 지 grace(1.5s)가 지나야만 진짜 소멸로 본다.
-                grace = float(cfg.get("target_miss_grace_sec", 1.5))
-                if now - self._hunt_sticky_last_seen > grace:
-                    print("[Hunt] 타겟 소멸 (처치 또는 이탈)")
+                grace = float(cfg.get("target_miss_grace_sec", 4.0))
+                missed_for = now - self._hunt_sticky_last_seen
+                if missed_for > grace:
+                    print(f"[Hunt] 타겟 소멸 (처치 또는 이탈, {missed_for:.2f}s 미검출)")
                     self._release_hunt_target_lock()
                     self._hunt_sticky = None
                     self._hunt_target_since = 0.0

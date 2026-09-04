@@ -26,6 +26,7 @@ CFG = {
     "pickup_retry": 3,
     "target_lost_sec": 8.0,
     "stationary_gap_sec": 0.25,
+    "target_miss_grace_sec": 1.5,
 }
 
 
