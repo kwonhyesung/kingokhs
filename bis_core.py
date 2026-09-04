@@ -963,6 +963,13 @@ class GameState:
             if accept_relayed_peers and isinstance(peers, dict):
                 received_at = time.time()
                 for peer_name, peer_data in peers.items():
+                    if str(peer_name).strip().upper() == str(self.network_peer_name).strip().upper():
+                        # 허브가 "peers" 묶음에 이 PC 자신의 최신 상태도 같이
+                        # 실어 보낸다 - 걸러내지 않으면 격수가 허브를 통해
+                        # 자기 자신을 "원격 격수"로 되돌려받아서 follow 대상이
+                        # 항상 자기 위치가 된다(실측: follow_target이 매번
+                        # 정확히 me와 같음 - 이동이 통째로 막히는 원인이었다).
+                        continue
                     if isinstance(peer_data, dict):
                         relayed = dict(peer_data)
                         source_received_at = relayed.get("_received_at")
