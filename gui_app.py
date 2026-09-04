@@ -3263,6 +3263,14 @@ class AppView:
             if now - last_active < 1.2:
                 print("[Hotkey] Follow+Service duplicate ignored")
                 return
+            # ponytail: 1.2초가 지난 뒤 F2를 또 누르면 (아래 공용 토글 규칙에
+            # 걸려) 이미 켜져 있던 걸 그대로 꺼버렸다 - F3(일시정지)가 이미
+            # 명확한 정지 버튼인데, F2도 끄는 역할을 겸하면 실전에서 "혹시나
+            # 하고 한 번 더" 눌렀다가 자기도 모르게 서비스를 끄는 사고가
+            # 난다. F2는 항상 켜기 전용으로 만든다 - 이미 켜져 있으면 그냥
+            # 유지만 하고 끝낸다.
+            print("[Hotkey] Follow+Service already ON (use F3 to pause)")
+            return
         if getattr(self.state, "automation_paused", False):
             self._paused_control_mode = "NONE"
         if current == normalized and not getattr(self.state, "automation_paused", False):
