@@ -65,6 +65,7 @@ class MonitorSvc(threading.Thread):
         self._last_gps_grid = None
         self._last_focus_warn_time = 0.0
         self._focus_lost_since = 0.0
+        self._own_gui_hwnd = 0
 
         # PatternMatcher: temple/ 루트
         tmpl_root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -1615,9 +1616,21 @@ class MonitorSvc(threading.Thread):
                     tracked_title = "(확인 실패)"
                 print(f"[GameWindow] 게임 창으로 추적 시작: {tracked_title!r}")
             self.state.hwnd = hwnd
-            
+
+            # 이 봇 자신의 GUI 창(SYSTEM PARALLEL SOTA - gui_app.py의
+            # self.root.title())도 "게임에 집중 중"으로 쳐준다. 실전에서
+            # 몇 분씩 계속되던 "게임창 비활성화" 경고의 정체가 사실 이
+            # GUI 자신이었다 - 상태 확인하려고 컨트롤 패널을 보는 것도
+            # "자리를 비운 것"으로 취급해 서비스를 계속 꺼버리고 있었다.
+            # 프로세스 수명 동안 안 바뀌므로 한 번만 찾아서 캐싱한다.
+            if not self._own_gui_hwnd:
+                # 못 찾으면(예: 시작 직후 GUI 창이 아직 안 떴을 때) 0을 영구
+                # 고정하지 않고 다음 사이클에 다시 찾는다.
+                self._own_gui_hwnd = find_game_window("SYSTEM PARALLEL SOTA") or 0
+
             # 게임창 비활성화 감지 시 Panic Release 방지
-            if win32gui.GetForegroundWindow() != hwnd:
+            foreground_hwnd = win32gui.GetForegroundWindow()
+            if foreground_hwnd != hwnd and foreground_hwnd != self._own_gui_hwnd:
                 now_focus = time.time()
                 # ponytail: 예전엔 포커스 벗어난 프레임 1개만으로 즉시 껐다 -
                 # service_active=False가 스로틀 없이 매 사이클 실행되고 있어서
@@ -1633,8 +1646,7 @@ class MonitorSvc(threading.Thread):
                     if now_focus - self._last_focus_warn_time >= 2.0:
                         self._last_focus_warn_time = now_focus
                         try:
-                            stealer_hwnd = win32gui.GetForegroundWindow()
-                            stealer_title = win32gui.GetWindowText(stealer_hwnd) or "(제목 없음)"
+                            stealer_title = win32gui.GetWindowText(foreground_hwnd) or "(제목 없음)"
                         except Exception:
                             stealer_title = "(확인 실패)"
                         try:
