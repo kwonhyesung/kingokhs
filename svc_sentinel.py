@@ -203,21 +203,21 @@ class SentinelThread(threading.Thread):
             users = deduplicate_entities(users)
             party = deduplicate_entities(party)
 
-            # ── 디바운싱: 3프레임 연속 감지된 몬스터만 확정 ────
-            # 열쇠는 이름이다. 예전엔 픽셀 위치(20px 버킷)를 썼는데, 몬스터가
-            # 가만히 안 있고 맴돌면(실측: "몬스터가 격수 근처에서 맴돌고
-            # 있다") 매 프레임 다른 버킷으로 넘어가서 같은 버킷이 3번 연속
-            # 쌓일 일이 없어 확정이 영원히 안 됐다 - 원본 패턴 매칭 자체는
-            # 매 프레임 성공하는데(ft.py 수동 테스트로 확인) 확정 카운터만
-            # 계속 리셋되는 버그였다. 그 전엔 pos(월드 좌표)를 썼는데, 그러면
-            # 캐릭터 패턴을 놓친 프레임엔 몬스터가 화면에 있어도 확정 집계에
-            # 아예 못 들어가는 문제가 있었다(pos 계산 자체가 안 됨). 이름은
-            # 위치나 자기 위치 인식 여부와 무관하게 안정적인 유일한 키다.
+            # ── 디바운싱: 1초 안에 3번 감지되면 확정 ────
+            # 열쇠는 이름이다(위치는 몬스터가 맴돌면 매 프레임 다른 버킷으로
+            # 넘어가서 못 쓴다 - 예전 버그).
+            #
+            # "3프레임 연속"이 아니라 "1초 안에 3번"이다 - 한 프레임이라도
+            # 놓치면 카운트를 0으로 리셋하는 코드가 있었는데, 몬스터 패턴은
+            # 캐릭터 패턴(점프_*)보다 프레임당 인식률이 낮아서(실측: 15초
+            # 내내 화면에 있었는데도 확정이 한 번도 안 됨) 완벽하게 연속
+            # 3번을 채우는 일이 거의 없었다 - 매번 한 번 놓치는 순간 처음부터
+            # 다시 3번을 쌓아야 했다. 굳이 연속일 필요가 없다 - 1초 이내에
+            # 3번이면 충분히 "지금 화면에 있다"는 근거가 된다. 진짜로 사라진
+            # 경우는 아래 1초 TTL이 알아서 지운다.
             confirmed_monsters = []
-            current_keys = set()
             for m in monsters:
                 key = m.get("name", "")
-                current_keys.add(key)
                 hist = self._monster_history.get(key)
                 if hist is None:
                     self._monster_history[key] = [1, now]
@@ -231,9 +231,6 @@ class SentinelThread(threading.Thread):
 
             for k in [k for k, v in self._monster_history.items() if now - v[1] > 1.0]:
                 del self._monster_history[k]
-            for key in self._monster_history:
-                if key not in current_keys:
-                    self._monster_history[key][0] = 0
 
             monsters = confirmed_monsters
 
