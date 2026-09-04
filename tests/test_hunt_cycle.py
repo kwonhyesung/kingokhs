@@ -63,6 +63,7 @@ def make_logic(**state_kwargs):
     logic._hunt_cfg_cache = (CFG, time.time())
     logic._hunt_sticky = None
     logic._hunt_sticky_name = ""
+    logic._hunt_sticky_last_seen = 0.0
     logic._hunt_target_since = 0.0
     logic._hunt_giveup_until = {}
     logic._item_job = None
@@ -211,8 +212,29 @@ def test_target_lock_released_when_target_dies():
     logic._run_warrior_attack_loot_cycle()   # lock
     assert state.target_locked is True
     state.detected_monsters_world = []       # 죽음/이탈
+    # 놓친 직후(유예 1.5s 이내)는 아직 살아있는 것으로 취급한다 - 실전에서
+    # 움직이는 몬스터는 한 프레임 정도 인식이 흔들릴 수 있고, 그때마다 바로
+    # "죽었다"로 처리하면 계속 처음부터 다시 타겟팅해야 한다.
+    logic._run_warrior_attack_loot_cycle()
+    assert state.target_locked is True, "한 번 놓친 것만으로 바로 풀리면 안 된다"
+
+    # 유예 시간이 지나면 그제서야 진짜로 풀린다.
+    logic._hunt_sticky_last_seen = time.time() - 2.0
     logic._run_warrior_attack_loot_cycle()
     assert state.target_locked is False      # 다음 몬스터를 위해 풀려야 한다
+
+
+def test_target_survives_a_single_missed_detection():
+    logic, state, keys = make_logic(
+        detected_monsters_world=[{"name": "달걀", "world": (12, 10)}])
+    logic._run_warrior_attack_loot_cycle()
+    assert logic._hunt_sticky == (12, 10)
+    state.detected_monsters_world = []       # 이번 사이클만 못 봄
+    logic._run_warrior_attack_loot_cycle()
+    assert logic._hunt_sticky == (12, 10), "잠깐 놓친 것으로 타겟을 잃으면 안 된다"
+    state.detected_monsters_world = [{"name": "달걀", "world": (12, 10)}]
+    logic._run_warrior_attack_loot_cycle()   # 다시 보임 - 그대로 이어져야 함
+    assert logic._hunt_sticky == (12, 10)
 
 
 def run_all():

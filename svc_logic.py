@@ -149,6 +149,7 @@ class LogicSvc(threading.Thread):
         self._hunt_cfg_cache = ({}, 0.0)
         self._hunt_sticky = None          # 쫓던 몬스터 pos (타겟 유지용)
         self._hunt_sticky_name = ""
+        self._hunt_sticky_last_seen = 0.0  # 마지막으로 실제 본 시각 (소멸 유예용)
         self._hunt_target_since = 0.0
         self._hunt_giveup_until = {}      # pos -> 이 시각까지 무시
         self._item_job = None             # {"pos":(x,y), "tries":int, "name":str}
@@ -3914,14 +3915,21 @@ class LogicSvc(threading.Thread):
                                   sticky=self._hunt_sticky, sticky_name=self._hunt_sticky_name)
         if not target:
             if self._hunt_sticky is not None:
-                # 감지 목록에서 사라졌다 = 죽은 것으로 간주
-                print("[Hunt] 타겟 소멸 (처치 또는 이탈)")
-                self._release_hunt_target_lock()
-                self._hunt_sticky = None
-                self._hunt_target_since = 0.0
-                self._clear_hunt_move_target()
+                # 실측: 몬스터가 실제로 옆에 있어도 스캔 한 프레임 정도는
+                # 놓칠 수 있다(움직이는 대상 인식은 100% 안정적이지 않음) -
+                # 한 사이클이라도 못 봤다고 바로 "죽었다"로 처리하면, 인식이
+                # 잠깐 흔들릴 때마다 타겟을 놓치고 처음부터 다시 찾게 된다.
+                # 마지막으로 본 지 grace(1.5s)가 지나야만 진짜 소멸로 본다.
+                grace = float(cfg.get("target_miss_grace_sec", 1.5))
+                if now - self._hunt_sticky_last_seen > grace:
+                    print("[Hunt] 타겟 소멸 (처치 또는 이탈)")
+                    self._release_hunt_target_lock()
+                    self._hunt_sticky = None
+                    self._hunt_target_since = 0.0
+                    self._clear_hunt_move_target()
             return False
 
+        self._hunt_sticky_last_seen = now
         target_pos = (int(target["world"][0]), int(target["world"][1]))
         if self._hunt_sticky is None or hunt.chebyshev(self._hunt_sticky, target_pos) > 2:
             self._hunt_target_since = now

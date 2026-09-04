@@ -248,6 +248,7 @@
   "patrol_point_timeout_sec": 15.0,
   "stationary_gap_sec": 0.25,
   "wall_confirm_hits": 3,
-  "inventory_full_pattern": "가득"
+  "inventory_full_pattern": "가득",
+  "target_miss_grace_sec": 1.5
  }
 }
