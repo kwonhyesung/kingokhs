@@ -1619,7 +1619,17 @@ class MonitorSvc(threading.Thread):
                 now_focus = time.time()
                 if now_focus - self._last_focus_warn_time >= 2.0:
                     self._last_focus_warn_time = now_focus
-                    print("[Warn] 게임창 비활성화 감지 - 서비스만 중단하고 하드웨어 신호는 유지합니다.")
+                    # 무엇이 포커스를 가져갔는지도 같이 찍는다 - "게임창이
+                    # 비활성"이라는 것만으로는 원격 제어 도구 때문인지,
+                    # 다른 앱(로그 뷰어 등)이 계속 앞에 뜨는 건지 구분이
+                    # 안 돼서 실전에서 몇 차례나 원인 확정이 늦어졌다.
+                    try:
+                        stealer_hwnd = win32gui.GetForegroundWindow()
+                        stealer_title = win32gui.GetWindowText(stealer_hwnd) or "(제목 없음)"
+                    except Exception:
+                        stealer_title = "(확인 실패)"
+                    print(f"[Warn] 게임창 비활성화 감지 (현재 활성 창: {stealer_title!r}) "
+                          f"- 서비스만 중단하고 하드웨어 신호는 유지합니다.")
             
             frame_time = getattr(self.state, "last_frame_time", 0)
             if frame_time <= self.last_frame_time:
