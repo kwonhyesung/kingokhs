@@ -507,8 +507,16 @@ class GameState:
     my_world_pos: Tuple[float, float] = (0.0, 0.0)
     
     # 아이템 관리
-    detected_item_grid: Optional[Tuple[int, int]] = None
     detected_item_name: str = ""
+    detected_item_world: Optional[Tuple[int, int]] = None
+    detected_items_world: List[Dict[str, Any]] = field(default_factory=list)
+    detected_monsters_world: List[Dict[str, Any]] = field(default_factory=list)
+
+    # 자동사냥 (svc_hunt)
+    last_move_time: float = 0.0          # 마지막 이동키가 나간 시각 (멈춤 판정)
+    inventory_full: bool = False         # 소지품 가득 (stat_info FindText)
+    nav_current_route_point: Optional[Tuple[int, int]] = None  # 이탈 제한 기준점
+    map_seen_at: float = 0.0             # 맵 이름을 마지막으로 확실히 읽은 시각
     
     # 디버그/로깅
     last_vision_error: str = ""
@@ -555,7 +563,6 @@ class GameState:
     _share_last_coord_ts: float = field(default=0.0, init=False, repr=False)
     _share_last_map_sig: Optional[Tuple[str, str, str]] = field(default=None, init=False, repr=False)
     is_stuck: bool = False
-    char_grid: Tuple[int, int] = (0, 0)
     maps_db: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
@@ -1532,6 +1539,12 @@ class BisHardware:
                 humanized_sleep(TIMING_CONFIG[hold_key], variance)
         finally:
             self.send_force(f"U:{direction}")
+        # 이동키가 실제로 나간 시각. 2D라 캐릭터가 칸과 칸 사이를 픽셀로
+        # 걸어가므로, 걷는 도중에 계산한 몬스터/아이템 pos는 반 칸씩
+        # 어긋난다. 아이템처럼 좌표를 고정해야 하는 쪽은 이 값으로
+        # "멈춘 상태"를 확인하고 나서 계산한다 (svc_hunt 설계 참고).
+        if self.state is not None:
+            self.state.last_move_time = time.time()
         return True
 
     def move_cursor(self, px: int, py: int) -> bool:

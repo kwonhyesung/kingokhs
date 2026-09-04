@@ -27,7 +27,25 @@ if sys.platform == 'win32':
 
 from svc_worker import main as worker_main
 
+
+def print_code_version():
+    """실행 중인 코드의 커밋 해시를 찍는다.
+    격수(DESKTOP2)는 별도 클론이라 여기 수정이 자동으로 가지 않는다 -
+    두 PC의 이 줄을 눈으로 비교하면 버전 불일치를 바로 알 수 있다.
+    (지난번 '도사가 격수를 힐 안 함' 사고의 진짜 원인이 이 불일치였다.)"""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        out = subprocess.run(["git", "-C", here, "log", "-1", "--format=%h %cd", "--date=short"],
+                             capture_output=True, text=True, timeout=5)
+        version = (out.stdout or "").strip() or "unknown"
+    except Exception:
+        version = "unknown"
+    print(f"[Version] code={version}")
+
+
 def main(preset_role=None, preset_network_role=None, preset_auto_hunt=None):
+    print_code_version()
     worker_main(
         preset_role=preset_role,
         preset_network_role=preset_network_role,

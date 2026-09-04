@@ -85,6 +85,11 @@ class MonitorSvc(threading.Thread):
         self._map_info_last_signature = ""
         self._map_info_change_seq = 0
         self._map_info_changed_at = 0.0
+        # 동일 crop 재스캔 회피용 캐시 (map_info 스캔이 파이프라인에서 제일 비싸다).
+        self._map_info_cache_signature = ""
+        self._map_info_cached_text = ""
+        self._map_info_cached_score = 0.0
+        self._map_info_cached_fingerprint = ""
         print(f"[MapOCR] ready tokens={list(self.map_ocr.tokens.keys())}")
 
         self.load_roi()
@@ -2012,78 +2017,12 @@ class MonitorSvc(threading.Thread):
                     res_updates["hb_matches"] = hb_matches
                     res_updates["hb_objects"] = hb_matches
 
-                    play_area_overlay = self.state.ocr_preview_img
-                    map_data = self.state.maps_db.get(self.state.current_map, {}) or {}
-                    char_anchor_y_offset = int(map_data.get("char_anchor_y_offset", 134))
-
-                    # ── 캐릭터 중앙 타일 기준 (J12: x=9, y=11) ──
-                    grid_sz = float(map_data.get("grid_size", 48.2))
-                    try:
-                        import json as _jg
-                        _cf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
-                        if os.path.exists(_cf):
-                            with open(_cf, 'r', encoding='utf-8') as _fg:
-                                grid_sz = float(_jg.load(_fg).get("play_area", {}).get("grid_size", 48.2))
-                    except Exception:
-                        pass
-                    center_x = sx + (9 * grid_sz) + grid_sz / 2
-                    center_y = sy + (11 * grid_sz) + grid_sz / 2
-
-                    # ── GPS Anchor (내 캐릭터 화살표) — 매 프레임 ──
-                    # findtext_scan을 사용하여 0.75 이상인 모든 마커 후보를 가져옴
-                    marker_match = self.matcher.findtext_scan(crop, ["marker"], threshold=0.75)
-                    best_marker_score = self.matcher.marker_best_score(crop, "my_arrow")
-                    
-                    # 여러 개의 마커 후보 중, 점수가 threshold 이상이면서 화면 중앙(J12) 반경 4타일(192px) 이내인 것만 진짜로 간주
-                    candidates = [
-                        m for m in marker_match 
-                        if m["name"] == "my_arrow" and m["score"] >= self.matcher.MARKER_THRESHOLD
-                        and abs((sx + m["x"] + m["w"]//2) - center_x) < 192
-                        and abs((sy + m["y"] + m["h"]//2) - center_y) < 192
-                    ]
-                    best_marker = None
-                    
-                    if candidates:
-                        # 중앙과의 거리(pixel)를 기준으로 오름차순 정렬
-                        candidates.sort(key=lambda m: ((sx + m["x"] + m["w"]//2 - center_x)**2 + (sy + m["y"] + m["h"]//2 - center_y)**2))
-                        best_marker = candidates[0]
-
-                    grid_pos = None
-                    if best_marker:
-                        feet_x = sx + best_marker["x"] + (best_marker["w"] // 2)
-                        # 화살표 하단(y+h)에서 캐릭터 발밑까지 오프셋
-                        feet_y = sy + best_marker["y"] + best_marker["h"] + 24
-
-                        # 기준점(Anchor) 캘리브레이션: my_screen_pos 업데이트
-                        self.state.my_screen_pos = (feet_x, feet_y)
-
-                        grid_pos = self._calc_grid(feet_x, feet_y)
-                    if grid_pos:
-                        self.state.entities["me"] = {
-                            "grid": grid_pos,
-                            "screen": (feet_x, feet_y),
-                            "last_seen": time.time(),
-                        }
-                        if play_area_overlay is not None:
-                            cv2.circle(play_area_overlay,
-                                       (int(feet_x), int(feet_y)), 6, (0, 255, 0), -1)
-                        if self.frame_count % 10 == 0:
-                            _monitor_log(f"   [GPS] >> Me: {grid_pos} | Anchor:({feet_x},{feet_y})")
-                    now_log = time.time()
-                    # GPS 로그 비활성화 (반복 출력 방지)
-                    # if now_log - self._last_gps_log_time >= 3.0:
-                    #     gx_d = int(grid_pos[0]) if grid_pos else -1
-                    #     gy_d = int(grid_pos[1]) if grid_pos else -1
-                    #     gname = (f"{chr(ord('A') + gx_d)}{gy_d + 1}"
-                    #              if grid_pos and gx_d >= 0 else "?")
-                    #     # 같은 GRID 값이면 출력하지 않음 (반복 출력 방지)
-                    #     if best_marker and gname != self._last_gps_grid:
-                    #         print(f"[GPS] 화살표 발견! 점수: {float(best_marker['score']):.2f} "
-                    #               f"| GRID: {gname}")
-                    #         self._last_gps_grid = gname
-                    #     # else:
-                    #     #     print(f"[GPS] 화살표 탐색 실패 (최고 점수: {best_marker_score:.2f})")
-                    #     self._last_gps_log_time = now_log
+                    # 내 캐릭터 위치(my_screen_pos)는 이제 SentinelThread가 매 프레임
+                    # FindText(category="self")로 직접 찾는다 - 예전엔 여기서 cv2 PNG
+                    # 템플릿("my_arrow")으로 찾았는데 temple/marker 폴더가 비어 있어
+                    # 항상 실패했고, 고정 좌표로 대체하는 것도 카메라가 맵 가장자리에서
+                    # 멈추면 캐릭터가 화면 중앙을 벗어나서 못 쓴다(SentinelThread가
+                    # 매 프레임 실측하면 이 문제가 없다).
                     continue
 
 
@@ -2092,6 +2031,14 @@ class MonitorSvc(threading.Thread):
                 # 5. stat_info ??status 폴더
                 # ?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═?═
                 if name == "stat_info":
+                    # 소지품이 가득 찼는지: findtext_patterns.json의 "status"
+                    # 카테고리 패턴으로 판정한다 (ft.py로 캡처해서 저장).
+                    # 패턴이 하나도 없으면 항상 False - 줍기를 막지 않는다.
+                    try:
+                        hits = self.matcher.find_text_scan(crop, category="status", ent_type="STATUS")
+                    except Exception:
+                        hits = []
+                    res_updates["inventory_full"] = bool(hits)
                     matched = self.matcher.recognize(crop, "status")
                     if matched:
                         res_updates["stat_info"] = matched
@@ -2117,46 +2064,64 @@ class MonitorSvc(threading.Thread):
                     dbg = {}
                     map_signature = ""
                     map_info_changed = False
-                    # ft.py로 저장한 FindText map 패턴을 우선 시도 (사용자가 캡처한 맵이면
-                    # 이걸로 잡힘). 없거나 못 찾으면 기존 선비족 전용 토큰 인식기로 폴백
-                    # (기존에 동작하던 던전은 그대로 유지, 새로 캡처한 맵만 FindText로 확장).
-                    try:
-                        ft_map_hits = self.matcher.find_text_scan(crop, category="map", ent_type="MAP")
-                    except Exception as e:
-                        ft_map_hits = []
-                        print(f"[MapOCR] find_text_scan error: {e}")
-                    if ft_map_hits:
-                        map_text, score = self._compose_map_text_with_floor_digits(ft_map_hits)
-                        # map_info는 스로틀 없이 매 사이클 스캔되니(포탈 감지 속도 때문),
-                        # 예전처럼 "1초에 한 번"으로 찍으면 같은 값을 계속 반복해서
-                        # 로그/포워딩 비용만 태운다 - composed 값이 실제로 바뀔 때만 남긴다.
-                        if map_text != getattr(self, "_last_map_hits_logged_text", None):
-                            self._last_map_hits_logged_text = map_text
-                            hit_names = [str(h.get("name", "")) for h in ft_map_hits]
-                            print(f"[MapOCR] hits={hit_names} -> composed={map_text!r}")
-                    else:
-                        try:
-                            map_text = str(self.map_ocr.recognize(crop) or "").strip()
-                            score = float(getattr(self.map_ocr, "last_score", 0.0) or 0.0)
-                            dbg = dict(getattr(self.map_ocr, "last_debug", {}) or {})
-                        except Exception as e:
-                            print(f"[MapOCR] recognize error: {e}")
                     try:
                         map_signature = "|".join(map(str, self._fast_crop_signature(crop)))
                     except Exception:
                         map_signature = ""
-                    map_fingerprint = self._map_info_fingerprint(crop)
                     map_info_changed = bool(map_signature and map_signature != self._map_info_last_signature)
+
+                    # map_info는 (포탈을 x/y와 같은 순간에 잡으려고) 스로틀 없이 매
+                    # 사이클 돌고, 아래 해시-스킵에서도 제외돼 있다. 그런데 이 ROI의
+                    # 스캔(FindText 풀스캔 + dHash + 템플릿 폴백)은 파이프라인에서 제일
+                    # 비싼 축이라, 화면이 그대로인 사이클에도 매번 다시 돌리면 모니터
+                    # 루프 전체가 느려지고 그 뒤에 달린 힐/추적 반응까지 같이 굼떠진다
+                    # (실측 리포트: 힐·추적 속도 저하). crop 픽셀이 그대로면 결정적으로
+                    # 같은 결과가 나오므로 캐시를 그대로 쓴다 - 픽셀이 바뀌는 순간에는
+                    # 여전히 그 즉시 풀스캔하므로 포탈 감지 속도는 그대로다.
+                    if map_signature and not map_info_changed and self._map_info_cache_signature == map_signature:
+                        map_text = self._map_info_cached_text
+                        score = self._map_info_cached_score
+                        map_fingerprint = self._map_info_cached_fingerprint
+                    else:
+                        # ft.py로 저장한 FindText map 패턴을 우선 시도 (사용자가 캡처한 맵이면
+                        # 이걸로 잡힘). 없거나 못 찾으면 기존 선비족 전용 토큰 인식기로 폴백
+                        # (기존에 동작하던 던전은 그대로 유지, 새로 캡처한 맵만 FindText로 확장).
+                        try:
+                            ft_map_hits = self.matcher.find_text_scan(crop, category="map", ent_type="MAP")
+                        except Exception as e:
+                            ft_map_hits = []
+                            print(f"[MapOCR] find_text_scan error: {e}")
+                        if ft_map_hits:
+                            map_text, score = self._compose_map_text_with_floor_digits(ft_map_hits)
+                            # composed 값이 실제로 바뀔 때만 남긴다(같은 값 반복 로그 방지).
+                            if map_text != getattr(self, "_last_map_hits_logged_text", None):
+                                self._last_map_hits_logged_text = map_text
+                                hit_names = [str(h.get("name", "")) for h in ft_map_hits]
+                                print(f"[MapOCR] hits={hit_names} -> composed={map_text!r}")
+                        else:
+                            try:
+                                map_text = str(self.map_ocr.recognize(crop) or "").strip()
+                                score = float(getattr(self.map_ocr, "last_score", 0.0) or 0.0)
+                                dbg = dict(getattr(self.map_ocr, "last_debug", {}) or {})
+                            except Exception as e:
+                                print(f"[MapOCR] recognize error: {e}")
+                        map_fingerprint = self._map_info_fingerprint(crop)
+
+                        # Fallback: temple/maps 통짜 템플릿
+                        if not map_text:
+                            matched_map = self.matcher.recognize(crop, "maps")
+                            if matched_map:
+                                map_text = str(matched_map).strip()
+
+                        self._map_info_cache_signature = map_signature
+                        self._map_info_cached_text = map_text
+                        self._map_info_cached_score = score
+                        self._map_info_cached_fingerprint = map_fingerprint
+
                     if map_info_changed:
                         self._map_info_last_signature = map_signature
                         self._map_info_change_seq += 1
                         self._map_info_changed_at = now_map
-
-                    # Fallback: temple/maps 통짜 템플릿
-                    if not map_text:
-                        matched_map = self.matcher.recognize(crop, "maps")
-                        if matched_map:
-                            map_text = str(matched_map).strip()
 
                     if map_text:
                         from bis_core import split_map_name_floor
@@ -2172,6 +2137,11 @@ class MonitorSvc(threading.Thread):
                         res_updates["map_floor"] = map_floor
                         res_updates["current_floor"] = map_floor
                         res_updates["map_info_text"] = map_text
+                        # 맵 이름을 '방금' 읽었다는 증거. current_map은 한 번
+                        # 정해지면 계속 남아있어서, 지금 확실히 읽고 있는지
+                        # 아닌지를 구분할 수 없다 - 벽 학습은 이 시각을 보고
+                        # 확실할 때만 기록한다 (틀린 맵에 벽을 쓰면 영구 오염).
+                        res_updates["map_seen_at"] = time.time()
                         if map_signature:
                             res_updates["map_info_signature"] = map_signature
                         if map_fingerprint:

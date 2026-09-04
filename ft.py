@@ -29,7 +29,8 @@ except ImportError:
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PATTERNS_FILE = os.path.join(SCRIPT_DIR, "findtext_patterns.json")
-PATTERN_CATEGORIES = ("map", "item", "monster", "party", "magic")
+# status: 소지품 가득 등 stat_info 영역에서 읽는 상태 표시
+PATTERN_CATEGORIES = ("map", "item", "monster", "party", "magic", "status")
 
 
 def grab_full_screen_bgr() -> np.ndarray:

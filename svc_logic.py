@@ -42,6 +42,9 @@ from bis_core import (
     is_game_window_active,
 )
 from bis_spell import RecoveryManager
+import svc_hunt as hunt
+
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 from support_runtime_rules import (
     adjust_follow_target_by_axis_gap,
     build_f5_hon_sequence,
@@ -141,8 +144,15 @@ class LogicSvc(threading.Thread):
         self._ntab_confirm_required_hits = 1
         self._ntab_confirm_timeout = 0.42
         self._warrior_next_attack_at = 0.0
-        self._warrior_next_loot_at = 0.0
         self._last_warrior_cycle_log_time = 0.0
+        # 자동사냥 상태 (svc_hunt 참고)
+        self._hunt_cfg_cache = ({}, 0.0)
+        self._hunt_sticky = None          # 쫓던 몬스터 pos (타겟 유지용)
+        self._hunt_sticky_name = ""
+        self._hunt_target_since = 0.0
+        self._hunt_giveup_until = {}      # pos -> 이 시각까지 무시
+        self._item_job = None             # {"pos":(x,y), "tries":int, "name":str}
+        self._last_hunt_log_time = 0.0
         self._red_tab_confirm_required_hits = 2
         self._red_tab_confirm_timeout = 0.45
         self._red_tab_promotion_timeout = 0.95
@@ -867,37 +877,43 @@ class LogicSvc(threading.Thread):
             if not moving_follow:
                 self._set_combat_busy(previous_busy)
 
+    def _should_defer_tab_targeting_for_distance(self, log_prefix: str) -> bool:
+        """tab은 화면에 보이는(근접한) 대상만 잡힌다 - 격수가 같은 맵인데 멀리
+        떨어져 있으면 ESC>TAB>TAB을 몇 번 눌러도 못 잡는다. 게다가 그 시도가
+        support_targeting_active를 거는 동안 hold_move()가 통째로 막혀서
+        (bis_core.py의 busy-gate) 정작 거리를 좁혀줄 추적 이동까지 멈춘다 -
+        멀어서 실패하고, 그 실패가 추적을 막아서 계속 멀고, 그래서 또 실패하는
+        악순환(실측: no_match 7연속 재시도가 도는 동안 도사가 제자리). 멀면
+        타겟팅을 접고 추적으로 거리부터 좁히게 둔다. 다른 맵이면 거리 비교가
+        의미 없으니 관여하지 않는다."""
+        support_target = self.state.get_fresh_remote_data_by_role("격수")
+        if not isinstance(support_target, dict) or not support_target:
+            return False
+        if classify_map_sync(self.state.get_all(), support_target, now=time.time()) != "same":
+            return False
+        try:
+            warrior_distance = follow_manhattan_gap(
+                int(support_target.get("x", support_target.get("pos_x", 0)) or 0),
+                int(support_target.get("y", support_target.get("pos_y", 0)) or 0),
+                int(getattr(self.state, "x", 0) or 0),
+                int(getattr(self.state, "y", 0) or 0),
+            )
+        except Exception:
+            return False
+        if not should_prioritize_follow_distance(warrior_distance, risk_distance=7):
+            return False
+        now = time.time()
+        if now - float(getattr(self, "_last_tab_defer_log_time", 0.0) or 0.0) >= 1.0:
+            self._last_tab_defer_log_time = now
+            print(f"{log_prefix} tab targeting deferred: distance={warrior_distance} - closing the gap first.")
+        return True
+
     def _reacquire_warrior_red_tab_after_emergency(self, moving_follow: bool = False) -> bool:
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
 
-        # tab은 화면에 보이는(근접한) 대상만 선택된다 - 격수가 같은 맵인데 멀리
-        # 떨어져 있으면 ESC->TAB->TAB을 몇 번을 눌러도 못 잡는다. 게다가 이 함수는
-        # 곧바로 support_targeting_active=True를 거는데, hold_move()가 그 플래그를
-        # busy-gate로 보기 때문에(bis_core.py) 실패할 시도를 벌써 몇 번 반복하는
-        # 동안 정작 거리를 좁혀줄 일반 추적 이동까지 같이 막혀버린다 - 멀어서
-        # 실패하고, 실패 시도가 추적을 막아서 계속 멀고, 그래서 계속 실패하는
-        # 악순환. 같은 맵인데 너무 멀면 여기서 시도 자체를 미루고, 일반 추적이
-        # 알아서 거리를 좁히게 둔다(포탈 직후 재태깅의 distance>4 게이트와 동일
-        # 기준).
-        support_target = self.state.get_fresh_remote_data_by_role("격수")
-        if isinstance(support_target, dict) and support_target:
-            if classify_map_sync(self.state.get_all(), support_target, now=time.time()) == "same":
-                try:
-                    warrior_x = int(support_target.get("x", support_target.get("pos_x", 0)) or 0)
-                    warrior_y = int(support_target.get("y", support_target.get("pos_y", 0)) or 0)
-                    warrior_distance = follow_manhattan_gap(
-                        warrior_x, warrior_y,
-                        int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0),
-                    )
-                except Exception:
-                    warrior_distance = 0
-                if warrior_distance > 4:
-                    print(
-                        f"[Recovery] red_tab reacquire deferred: same map but "
-                        f"distance={warrior_distance} - closing gap before tab-targeting."
-                    )
-                    return False
+        if self._should_defer_tab_targeting_for_distance("[Recovery] red_tab reacquire:"):
+            return False
 
         self._invalidate_warrior_redtab_verification()
         self._party_direct_heal_target_prepared = False
@@ -1239,6 +1255,12 @@ class LogicSvc(threading.Thread):
         if monsters:
             self._last_monster_seen_time = now
 
+        if self._is_warrior_role():
+            # 격수 자동사냥은 접근-회전-공격을 직접 한다. 여기서 True를
+            # 돌려주면 is_combat_busy가 켜지고 RouteSvc가 이동을 통째로
+            # 멈춰서 몬스터 옆칸까지 걸어갈 수가 없다.
+            return False
+
         if should_ignore_monster_combat_for_support_autohunt(
             getattr(self.state, "role", ""),
             getattr(self.state, "service_active", False),
@@ -1480,6 +1502,8 @@ class LogicSvc(threading.Thread):
             # warrior-critical override further up lets healing proceed
             # during portal-follow, but re-acquiring the target this way
             # must still wait for portal_follow_active to clear first.
+            return False
+        if self._should_defer_tab_targeting_for_distance("[Support] direct target prepare:"):
             return False
         previous_busy = bool(getattr(self.state, "is_combat_busy", False))
         self._ntab_in_progress = True
@@ -2901,12 +2925,11 @@ class LogicSvc(threading.Thread):
         items = self.state.entities.get("items", [])
         if items and not self._is_in_combat():
             item = items[0]
-            grid = item.get("grid")
-            if grid and not self.state.detected_item_grid:
-                print(f"[Priority4] ITEM 媛먯? ??猷⑦똿: {item.get('name','')} @ {grid}")
-                self.state.detected_item_grid = grid
+            world = item.get("world_pos")
+            if world and not self.state.detected_item_world:
+                print(f"[Priority4] ITEM 감지 -> 루팅: {item.get('name','')} @ {world}")
                 self.state.detected_item_name = item.get("name", "")
-                self.state.detected_item_world = item.get("world_pos")
+                self.state.detected_item_world = world
             return False
 
         return False
@@ -2979,6 +3002,12 @@ class LogicSvc(threading.Thread):
 
             # ?대룞 以??먮룞?щ깷? Sentinel 湲곕컲 媛먯?媛 ?꾩젣??
             if self.state.auto_hunt and not self.state.sentinel_enabled:
+                self.state.sentinel_enabled = True
+            # 격수 자동사냥도 Sentinel 감지가 전제다 (F2로 service_active만
+            # 켜고 auto_hunt가 꺼져 있으면 몬스터/아이템이 하나도 안 잡힌다).
+            if (not self.state.sentinel_enabled
+                    and self._is_warrior_role()
+                    and getattr(self.state, "service_active", False)):
                 self.state.sentinel_enabled = True
 
             # ?? 0?쒖쐞: Emergency (鍮꾩긽 ?곹솴) ?????????????????????
@@ -3744,27 +3773,19 @@ class LogicSvc(threading.Thread):
             self._set_combat_busy(False)
 
     def _handle_moving(self):
-        """?대룞/?ㅻ퉬寃뚯씠??泥섎━ (?곗꽑?쒖쐞 2)"""
-        # ?꾪닾 以묒씠 ?꾨땺 ?뚮쭔 ?대룞
+        """이동/내비게이션 처리 (우선순위 2)"""
+        # 전투 중이 아닐 때만 이동
         if not self.state.is_combat_busy:
-            # Route mode on F2 should always keep warrior attack/loot loop alive.
-            if getattr(self.state, "service_active", False) and getattr(self.state, "nav_route_enabled", False):
-                self._run_warrior_attack_loot_cycle()
-                return
-            # ?대룞 濡쒖쭅? RouteSvc?먯꽌 泥섎━
-            role_name = str(getattr(self.state, "role", "") or "").strip()
-            network_role = str(getattr(self.state, "network_role", "") or "").strip()
-            if (
-                role_name in {"격수", "Warrior", "寃⑹닔"}
-                or network_role in {"격수", "Warrior", "寃⑹닔"}
-            ):
-                self._run_warrior_attack_loot_cycle()
+            # 실제 걸음은 RouteSvc가 걷는다. 격수는 여기서 회복/버프 유지와
+            # 사냥 사이클(접근 목표 세팅 + 회전/공격)을 함께 돌린다.
+            if self._is_warrior_role():
+                self._run_dps_server_mode()
 
     # ----------------------------------------------------------
-    # ?? 寃⑹닔 紐⑤뱶: ?곗씠??怨듭쑀 ?쒕쾭 ??븷留??????????????????????
+    #  격수 모드: 데이터 공유 서버 역할 + 자동사냥
     # ----------------------------------------------------------
     def _run_dps_server_mode(self):
-        """격수 모드: 데이터 송신 + 이동 중 3/0 교대 자동사냥."""
+        """격수 모드: 데이터 송신 + 자동사냥(회복/버프 유지 + 사냥 사이클)."""
         # Keep warrior loop alive while F2 service mode is active.
         if not bool(getattr(self.state, "service_active", False)):
             self.state.last_bomu_time    = 0
@@ -3797,45 +3818,237 @@ class LogicSvc(threading.Thread):
         self._run_warrior_attack_loot_cycle()
         humanized_sleep(TIMING_CONFIG["action_loop"])
 
+    # ----------------------------------------------------------
+    #  자동사냥 (격수): 순찰 -> 몬스터 접근/공격 -> 드랍 줍기
+    # ----------------------------------------------------------
+    def _hunt_cfg(self) -> dict:
+        """config.json의 hunt 설정 (5초마다 다시 읽음)."""
+        cfg, loaded_at = self._hunt_cfg_cache
+        now = time.time()
+        if cfg and now - loaded_at < 5.0:
+            return cfg
+        try:
+            with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f).get("hunt", {}) or {}
+        except Exception:
+            cfg = {}
+        self._hunt_cfg_cache = (cfg, now)
+        return cfg
+
+    def _hunt_anchor(self) -> tuple:
+        """이탈 제한의 기준점. 지금 향하는 순찰 포인트, 없으면 내 자리."""
+        anchor = getattr(self.state, "nav_current_route_point", None)
+        if anchor and len(anchor) == 2:
+            return (int(anchor[0]), int(anchor[1]))
+        return (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
+
+    def _hunt_is_stationary(self, gap: float) -> bool:
+        """마지막 이동키가 나간 뒤 gap초가 지났는가.
+        걷는 도중엔 캐릭터가 칸 사이에 있어서 계산한 pos가 반 칸 어긋난다."""
+        return (time.time() - float(getattr(self.state, "last_move_time", 0.0) or 0.0)) >= gap
+
+    def _clear_hunt_move_target(self):
+        self.state.item_pickup_target = None
+        self.state.item_pickup_arrived = False
+
+    def _release_hunt_target_lock(self):
+        """Tab으로 lock해둔 타겟을 놓는다. lock된 채로 방치하면 다음 몬스터를
+        공격할 때 엉뚱한(죽은) 타겟에 대고 대상선택박스가 뜰 수 있다."""
+        if self.state.target_locked:
+            hw.humanized_press("esc")
+        self.state.target_locked = False
+        self.state.target_name = ""
+
+    def _known_walls(self) -> set:
+        try:
+            map_name = str(getattr(self.state, "current_map", "") or "")
+            walls = (getattr(self.state, "maps_db", {}) or {}).get(map_name, {}).get("walls") or []
+            return {(int(c[0]), int(c[1])) for c in walls}
+        except Exception:
+            return set()
+
     def _run_warrior_attack_loot_cycle(self):
-        """격수 전용: 3은 짧게 반복, 0은 긴 랜덤 쿨타임으로 독립 관리."""
-        # Route thread may keep moving even if auto_hunt flips false transiently.
-        # For warrior F2 mode, run loop based on service_active.
+        """격수 자동사냥 한 사이클. 이동은 RouteSvc가 하고 여기선 목표만 정한다."""
         if not bool(getattr(self.state, "service_active", False)):
             return
+        cfg = self._hunt_cfg()
+        if not cfg.get("enabled", True):
+            return
+
+        # 캐릭터 패턴을 못 찾은 프레임은 몬스터/아이템 pos를 만들 수 없다
+        # (뺄셈의 한쪽이 없음). 추정하지 않고 사냥 판단만 쉰다 - 순찰
+        # 이동은 RouteSvc가 pos(x,y)로 계속한다.
+        my_screen = tuple(getattr(self.state, "my_screen_pos", (0, 0)) or (0, 0))
+        if my_screen == (0, 0):
+            return
+
+        me = (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
+        if me == (0, 0):
+            return
+
+        # 1) 줍는 중이면 그것부터 끝낸다
+        if self._item_job is not None:
+            self._run_item_pickup_step(cfg)
+            return
+
+        # 2) 몬스터 (드랍은 잡아야 생기므로 몬스터가 먼저다)
+        if self._run_monster_step(cfg, me):
+            return
+
+        # 3) 몬스터가 없을 때만 아이템을 집으러 간다
+        self._start_item_pickup_if_any(cfg, me)
+
+    def _run_monster_step(self, cfg: dict, me: tuple) -> bool:
+        """몬스터를 골라 접근/공격한다. 뭔가 했으면 True."""
         now = time.time()
-        attack_due = now >= float(getattr(self, "_warrior_next_attack_at", 0.0) or 0.0)
-        loot_due = now >= float(getattr(self, "_warrior_next_loot_at", 0.0) or 0.0)
-        if not attack_due and not loot_due:
+        leash = int(cfg.get("leash_tiles", 6))
+        monsters = list(getattr(self.state, "detected_monsters_world", []) or [])
+
+        self._hunt_giveup_until = {k: v for k, v in self._hunt_giveup_until.items() if v > now}
+        if self._hunt_giveup_until:
+            monsters = [m for m in monsters
+                        if not any(hunt.chebyshev(m.get("world") or (0, 0), k) <= 1
+                                   for k in self._hunt_giveup_until)]
+
+        target = hunt.pick_target(monsters, me, self._hunt_anchor(), leash,
+                                  sticky=self._hunt_sticky, sticky_name=self._hunt_sticky_name)
+        if not target:
+            if self._hunt_sticky is not None:
+                # 감지 목록에서 사라졌다 = 죽은 것으로 간주
+                print("[Hunt] 타겟 소멸 (처치 또는 이탈)")
+                self._release_hunt_target_lock()
+                self._hunt_sticky = None
+                self._hunt_target_since = 0.0
+                self._clear_hunt_move_target()
+            return False
+
+        target_pos = (int(target["world"][0]), int(target["world"][1]))
+        if self._hunt_sticky is None or hunt.chebyshev(self._hunt_sticky, target_pos) > 2:
+            self._hunt_target_since = now
+            print(f"[Hunt] 타겟: {target.get('name','')} @ {target_pos}")
+        self._hunt_sticky = target_pos
+        self._hunt_sticky_name = target.get("name", "")
+
+        direction = hunt.attack_dir(me, target_pos)
+        if direction:
+            # 붙었다 - 이동 목표를 풀고, 그쪽을 보게 한다.
+            # 몬스터가 그 칸을 막고 있으므로 방향키는 제자리 회전이 된다.
+            self._clear_hunt_move_target()
+            self._hunt_target_since = now
+            # ponytail: force=True로 눌러 이동 게이트(is_combat_busy 등)를
+            # 우회한다. 격수 전용 경로라 도사 지원 입력과 겹치지 않는다.
+            hw.hold_move(direction, force=True)
+
+            if not self.state.target_locked:
+                # 공격 스킬이 "대상선택형"이면 타겟을 미리 lock해두지 않은 채
+                # 그냥 쏘면 화면에 대상선택박스가 뜨고, 그 뒤로는 방향키가
+                # 캐릭터 대신 그 박스를 움직인다(실측: red_tab 없이 공격 →
+                # 이동 불능). 기존 도사/술사/기본모드가 전투 전 항상 하던
+                # Tab 락(_search_target_v3)을 여기서도 한 번 하고 이번
+                # 사이클은 공격 없이 넘어간다 - 다음 사이클부터 락된 채로 공격.
+                self._search_target_v3()
+                return True
+
+            if now >= float(getattr(self, "_warrior_next_attack_at", 0.0) or 0.0):
+                role = str(getattr(self.state, "role", "") or "")
+                attack_key = str((cfg.get("attack_key") or {}).get(role, "3"))
+                self._press_hw_key(attack_key, variance=0.08, skip_focus_guard=True)
+                self._warrior_next_attack_at = now + float(cfg.get("attack_repeat_sec", 0.35))
+                if now - self._last_hunt_log_time >= 1.0:
+                    print(f"[Hunt] 공격 {direction} -> {target_pos} (target_locked)")
+                    self._last_hunt_log_time = now
+            return True
+
+        # 아직 멀다 - 몬스터의 상하좌우 4칸 중 갈 만한 칸을 목표로 준다.
+        # (몬스터 칸 자체를 목표로 주면 몬스터가 막고 있어서 '도착'이
+        #  영원히 오지 않고, 벽 학습이 그 칸을 벽으로 잘못 기억한다.)
+        lost_sec = float(cfg.get("target_lost_sec", 8.0))
+        if self._hunt_target_since and (now - self._hunt_target_since) > lost_sec:
+            # ponytail: leash 안에서도 못 닿는 놈(벽 너머 등)에 영원히
+            # 매달리지 않게 하는 안전판. 30초 뒤 다시 시도한다.
+            print(f"[Hunt] 접근 실패 {lost_sec:.0f}s -> 포기: {target_pos}")
+            self._release_hunt_target_lock()
+            self._hunt_giveup_until[target_pos] = now + 30.0
+            self._hunt_sticky = None
+            self._hunt_target_since = 0.0
+            self._clear_hunt_move_target()
+            return False
+
+        cell = hunt.approach_cell(me, target_pos, self._known_walls())
+        if cell is None:
+            print(f"[Hunt] 접근 가능한 옆칸 없음 -> 포기: {target_pos}")
+            self._release_hunt_target_lock()
+            self._hunt_giveup_until[target_pos] = now + 30.0
+            self._hunt_sticky = None
+            self._clear_hunt_move_target()
+            return False
+        self.state.item_pickup_target = cell
+        self.state.item_pickup_arrived = False
+        return True
+
+    def _start_item_pickup_if_any(self, cfg: dict, me: tuple):
+        items = list(getattr(self.state, "detected_items_world", []) or [])
+        if not items:
+            return
+        # 아이템 좌표는 한 번 정해서 고정한다. 그래서 '멈춘 상태'에서만
+        # 계산한다 - 걷는 중에 잡으면 반 칸 어긋나 틀린 칸에 고정된다.
+        if not self._hunt_is_stationary(float(cfg.get("stationary_gap_sec", 0.25))):
+            return
+        if bool(getattr(self.state, "inventory_full", False)):
+            if time.time() - self._last_hunt_log_time >= 5.0:
+                print("[Hunt] 소지품이 가득 - 줍기 건너뜀 (사냥은 계속)")
+                self._last_hunt_log_time = time.time()
+            return
+        item = min(items, key=lambda i: hunt.chebyshev(me, i.get("world") or (0, 0)))
+        pos = (int(item["world"][0]), int(item["world"][1]))
+        self._item_job = {"pos": pos, "tries": 0, "name": item.get("name", ""), "started": time.time()}
+        self.state.item_pickup_target = pos
+        self.state.item_pickup_arrived = False
+        print(f"[Hunt] 아이템 줍기: {item.get('name','')} @ {pos}")
+
+    def _run_item_pickup_step(self, cfg: dict):
+        job = self._item_job
+        now = time.time()
+        if self._needs_hp_recovery() or self._needs_mp_recovery() or getattr(self.state, "is_user_detected", False):
+            print("[Hunt] 줍기 중 위협/회복 -> 중단")
+            self._item_job = None
+            self._clear_hunt_move_target()
+            return
+        if now - float(job.get("started", now)) > 20.0:
+            print("[Hunt] 줍기 시간 초과 -> 포기")
+            self._item_job = None
+            self._clear_hunt_move_target()
+            return
+        if not getattr(self.state, "item_pickup_arrived", False):
             return
 
-        # Loot has lower frequency but should not starve behind the attack loop.
-        if loot_due:
-            if not self._is_hw_ready():
-                self._warrior_next_loot_at = now + 0.10
-                return
-            try:
-                hw.force_press("0", variance=0.08)
-                pressed = True
-            except Exception:
-                pressed = False
-            if not pressed:
-                self._warrior_next_loot_at = now + 0.10
-                return
-            self._warrior_next_loot_at = now + random.uniform(2.0, 14.0)
-            if now - self._last_warrior_cycle_log_time >= 1.0:
-                print(f"[WarriorLoop] cast=0 next_loot={max(0.0, self._warrior_next_loot_at - now):.2f}s")
-                self._last_warrior_cycle_log_time = now
-            return
+        # 아이템과 같은 칸에 올라섰다 - 줍기 키
+        self._press_hw_key(str(cfg.get("pickup_key", ",")), variance=0.08, skip_focus_guard=True)
+        humanized_sleep(TIMING_CONFIG["enter_wait"])
+        job["tries"] = int(job.get("tries", 0)) + 1
+        self._clear_hunt_move_target()
 
-        pressed = self._press_hw_key("3", variance=0.08, skip_focus_guard=True)
-        if not pressed:
-            self._warrior_next_attack_at = now + 0.10
+        # 아직 그 자리에 아이템이 보이면 좌표가 한 칸 어긋난 것 - 주변 1칸을 훑는다
+        still = [i for i in (getattr(self.state, "detected_items_world", []) or [])
+                 if i.get("world") and hunt.chebyshev(i["world"], job["pos"]) <= 1]
+        if not still or job["tries"] >= int(cfg.get("pickup_retry", 3)):
+            if still:
+                print(f"[Hunt] 줍기 실패 {job['tries']}회 -> 포기: {job['pos']}")
+            else:
+                print(f"[Hunt] 줍기 완료: {job.get('name','')}")
+            self._item_job = None
             return
-        self._warrior_next_attack_at = now + random.uniform(0.3, 0.5)
-        if now - self._last_warrior_cycle_log_time >= 1.0:
-            print(f"[WarriorLoop] cast=3 next_attack={max(0.0, self._warrior_next_attack_at - now):.2f}s")
-            self._last_warrior_cycle_log_time = now
+        nxt = (int(still[0]["world"][0]), int(still[0]["world"][1]))
+        job["pos"] = nxt
+        self.state.item_pickup_target = nxt
+        self.state.item_pickup_arrived = False
+        print(f"[Hunt] 줍기 재시도 {job['tries']} -> {nxt}")
+
+    def _is_warrior_role(self) -> bool:
+        role = str(getattr(self.state, "role", "") or "").strip()
+        network_role = str(getattr(self.state, "network_role", "") or "").strip()
+        return (role in {"격수", "Warrior", "寃‹湔"}
+                or network_role in {"격수", "Warrior", "寃‹湔"})
 
     def _is_sulsa_role(self) -> bool:
         return str(getattr(self.state, "role", "") or "").strip() == "술사"
@@ -4053,16 +4266,11 @@ class LogicSvc(threading.Thread):
         for m in self._get_priest_monsters():
             if not isinstance(m, dict):
                 continue
-            monster_pos = m.get("world_pos") or m.get("pos")
+            monster_pos = m.get("world_pos")
             if not monster_pos or len(monster_pos) != 2:
-                grid = m.get("grid")
-                if not grid or len(grid) != 2:
-                    continue
-                dx = int(grid[0]) - int(self.state.char_grid[0])
-                dy = int(grid[1]) - int(self.state.char_grid[1])
-            else:
-                dx = int(monster_pos[0]) - me_pos[0]
-                dy = int(monster_pos[1]) - me_pos[1]
+                continue
+            dx = int(monster_pos[0]) - me_pos[0]
+            dy = int(monster_pos[1]) - me_pos[1]
             dist = (dx * dx + dy * dy) ** 0.5
             valid_monsters.append({"monster": m, "dist": dist, "dx": dx, "dy": dy})
             if max(abs(dx), abs(dy)) <= 1:
@@ -4168,7 +4376,6 @@ class LogicSvc(threading.Thread):
                     humanized_sleep(TIMING_CONFIG["enter_wait"])
                     self.state.item_pickup_target = None
                     self.state.item_pickup_arrived = False
-                    self.state.detected_item_grid = None
                     self.state.detected_item_world = None
                     print("[OK] 아이템 픽업 완료.")
                     break
@@ -4266,7 +4473,6 @@ class LogicSvc(threading.Thread):
                     humanized_sleep(TIMING_CONFIG["enter_wait"])
                     self.state.item_pickup_target = None
                     self.state.item_pickup_arrived = False
-                    self.state.detected_item_grid = None
                     self.state.detected_item_world = None
                     print("[OK] 아이템 픽업 완료.")
                     break

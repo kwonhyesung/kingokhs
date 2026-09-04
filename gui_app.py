@@ -3,6 +3,7 @@ import time
 import threading
 import random
 import os
+import glob
 import sys
 import atexit
 import io
@@ -94,9 +95,22 @@ MULT = 1
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
 LOG_FILE_STR = os.path.join(SCRIPT_DIR, "game_log_str.csv")
-PATROL_ROUTE_FILES = {
+# 순찰 좌표 CSV는 맵 이름으로 자동 인식한다: patrol_points_<맵이름>.csv
+# (예전엔 맵 하나가 여기 하드코딩돼 있어서 그 맵에서만 순찰이 됐다.)
+PATROL_ROUTE_PREFIX = os.path.join(SCRIPT_DIR, "patrol_points_")
+# 파일명이 맵 이름과 다른 기존 파일은 여기서만 맵 이름을 이어준다.
+PATROL_ROUTE_ALIASES = {
     "천안궁흉가5": os.path.join(SCRIPT_DIR, "patrol_points_cheonan_heunggga5.csv"),
 }
+
+
+def discover_patrol_route_files() -> dict:
+    """patrol_points_*.csv를 훑어 {맵이름: 경로}로 돌려준다."""
+    found = dict(PATROL_ROUTE_ALIASES)
+    for path in glob.glob(PATROL_ROUTE_PREFIX + "*.csv"):
+        map_name = os.path.basename(path)[len("patrol_points_"):-len(".csv")]
+        found.setdefault(map_name, path)
+    return found
 
 # import *를 없애고 실제로 쓰는 이름만 명시적으로 가져온다 - bis_core에서 이미
 # 가져온 이름(find_game_window 등)을 config_utils가 뒤에서 조용히 덮어쓰던
@@ -1601,7 +1615,7 @@ class AppView:
             except (OSError, json.JSONDecodeError):
                 loaded_db = {}
 
-        for patrol_map_name, patrol_csv_path in PATROL_ROUTE_FILES.items():
+        for patrol_map_name, patrol_csv_path in discover_patrol_route_files().items():
             patrol_points = load_patrol_points_csv(patrol_csv_path)
             inject_patrol_points(loaded_db, patrol_map_name, "1", patrol_points)
         
@@ -3593,7 +3607,8 @@ class AppView:
             money_val = state.money_str or str(state.money)
             x_val = state.x_str or f"{state.x:04d}"
             y_val = state.y_str or f"{state.y:04d}"
-            char_grid = state.char_grid
+            # grid 좌표는 폐기했다 - 이 자리에 pos(x,y)를 그대로 보여준다.
+            char_grid = (int(state.x or 0), int(state.y or 0))
 
             if hp_val != self.last_values.get("dash_hp"):
                 self.lbl_hp.configure(text=hp_val)
@@ -3613,7 +3628,7 @@ class AppView:
                 self.lbl_xy.configure(text=xy_text)
                 self.last_values["dash_xy"] = xy_text
             if hasattr(self, 'lbl_char_grid'):
-                char_grid_text = f"GRID: {char_grid[0]},{char_grid[1]}"
+                char_grid_text = f"POS: {char_grid[0]},{char_grid[1]}"
                 if char_grid_text != self.last_values.get("dash_char_grid"):
                     self.lbl_char_grid.configure(text=char_grid_text)
                     self.last_values["dash_char_grid"] = char_grid_text

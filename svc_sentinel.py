@@ -28,7 +28,8 @@ class SentinelThread(threading.Thread):
         self._last_run_time = 0
         self._last_overlay_time = 0
         # 디바운싱 로직: 3프레임 연속 감지 시 확정
-        self._monster_history = {}  # {grid_key: [frame_count, last_seen_time]}
+        self._monster_history = {}  # {"x_y": [frame_count, last_seen_time]}
+        self._char_pattern_lost_since = 0.0
         # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (매 프레임 스팸 방지)
         self._last_announced_item_names = set()
         self._last_announced_monster_names = set()
@@ -84,22 +85,37 @@ class SentinelThread(threading.Thread):
             if play_area_rgb is None or play_area_rgb.size == 0:
                 continue
 
-            # config.json에서 grid_size/반경 설정 읽기 (캘리브레이션 슬라이더 + 반경 튜닝값)
+            # config.json에서 grid_size/반경/내 캐릭터 이름 설정 읽기
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as _cfg_f:
                     _pa_cfg = json.load(_cfg_f).get("play_area", {})
                     grid_pixel_size = float(_pa_cfg.get("grid_size", 48.2))
                     item_radius_tiles = float(_pa_cfg.get("item_radius_tiles", 5))
                     monster_radius_tiles = float(_pa_cfg.get("monster_radius_tiles", 12))
+                    self_pattern_name = str(_pa_cfg.get("self_pattern_name", "") or "")
             except Exception:
                 grid_pixel_size = 48.2
                 item_radius_tiles = 5
                 monster_radius_tiles = 12
+                self_pattern_name = ""
 
-            # 캐릭터 위치(마커 인식 결과) 중심으로 검색 범위를 좁혀서 속도를 올린다.
-            # 마커 인식이 그 프레임에 실패해 (0,0)이면(=위치 모름) 안전하게 전체
-            # play_area를 그대로 스캔한다.
-            my_screen_pos = tuple(getattr(self.state, "my_screen_pos", (0, 0)) or (0, 0))
+            # 내 캐릭터 위치: 새로 캡처할 필요 없이, party 카테고리에 이미 저장된
+            # 내 캐릭터 이름의 방향별 패턴(예: 점프_left/right/back/top - 다른
+            # 파티원이 나를 인식하려고 캡처해둔 것)을 그대로 재사용한다. 스프라이트
+            # 모양은 누가 보든 똑같이 생겼으므로 self 전용 카테고리가 따로 필요
+            # 없다. config에 self_pattern_name이 없는 PC(도사/술사)는 그냥 계속
+            # (0,0)=위치 모름으로 남는다 - 원래도 그 역할들은 이 좌표를 안 쓴다.
+            # party는 아직 반경 제한 대상이 아니라(논의 안 됨) 전체 play_area를 그대로 쓴다.
+            party_hits = self.matcher.find_text_scan(play_area_rgb, category="party", ent_type="PARTY")
+            my_screen_pos = (0, 0)
+            if self_pattern_name:
+                self_names = {self_pattern_name, *(f"{self_pattern_name}_{d}" for d in ("left", "right", "back", "top"))}
+                self_hits = [h for h in party_hits if h["name"] in self_names]
+                if self_hits:
+                    best_self = max(self_hits, key=lambda h: h["score"])
+                    my_screen_pos = (best_self["cx"], best_self["cy"])
+            self.state.my_screen_pos = my_screen_pos
+
             item_crop, item_ox, item_oy = self._crop_around(play_area_rgb, my_screen_pos, item_radius_tiles * grid_pixel_size)
             monster_crop, monster_ox, monster_oy = self._crop_around(play_area_rgb, my_screen_pos, monster_radius_tiles * grid_pixel_size)
 
@@ -125,7 +141,7 @@ class SentinelThread(threading.Thread):
                     self.matcher.find_text_scan(item_crop, category="item", ent_type="ITEM"),
                     item_ox, item_oy,
                 )
-                + self.matcher.find_text_scan(play_area_rgb, category="party", ent_type="PARTY")
+                + party_hits  # 위에서 내 위치 찾을 때 이미 스캔한 결과를 재사용 (중복 스캔 방지)
             )
 
             whitelist = list(getattr(self.state, "whitelist_names", []))
@@ -136,7 +152,6 @@ class SentinelThread(threading.Thread):
                     "type": r["type"],
                     "score": r["score"],
                     "is_whitelisted": (r["name"] in whitelist) if r["type"] == "USER" else False,
-                    "grid": r["grid"],
                     "cx": r["cx"],
                     "cy": r["cy"],
                     "w": r["w"],
@@ -178,95 +193,86 @@ class SentinelThread(threading.Thread):
             users = deduplicate_entities(users)
             party = deduplicate_entities(party)
 
-            # 디바운싱 로직: 3프레임 연속 감지 시만 확정
-            now = time.time()
+            # ── 디바운싱: 3프레임 연속 감지된 몬스터만 확정 ────
+            # 열쇠는 화면 픽셀 위치(20px 버킷)다. 캐릭터 패턴(내 위치 마커)을
+            # 못 찾은 프레임에도 몬스터 패턴 자체는 잡히므로, pos 계산과
+            # 무관하게 확정/발표가 되어야 한다 - 원래는 pos(월드 좌표)를
+            # 열쇠로 썼는데, 그러면 캐릭터 패턴을 놓친 프레임엔 몬스터가
+            # 화면에 있어도 확정 집계에 아예 들어가지 못해 "몬스터 감지"
+            # 로그가 영원히 안 뜨는 버그가 났다(실측: 캐릭터 패턴이 계속
+            # 안 잡히는 세션에서 몬스터 감지 로그가 0줄).
             confirmed_monsters = []
-            
-            # 현재 프레임에서 감지된 몬스터의 그리드 키 생성
-            current_grid_keys = set()
+            current_keys = set()
             for m in monsters:
-                grid = m.get("grid")
-                if grid and len(grid) == 2:
-                    grid_key = f"{grid[0]}_{grid[1]}"
-                    current_grid_keys.add(grid_key)
-                    
-                    # 히스토리 업데이트
-                    if grid_key not in self._monster_history:
-                        self._monster_history[grid_key] = [1, now]
-                    else:
-                        self._monster_history[grid_key][0] += 1
-                        self._monster_history[grid_key][1] = now
-            
-            # 3프레임 이상 연속 감지된 몬스터만 확정
+                key = f"{int(m.get('cx', 0)) // 20}_{int(m.get('cy', 0)) // 20}"
+                current_keys.add(key)
+                hist = self._monster_history.get(key)
+                if hist is None:
+                    self._monster_history[key] = [1, now]
+                else:
+                    hist[0] += 1
+                    hist[1] = now
             for m in monsters:
-                grid = m.get("grid")
-                if grid and len(grid) == 2:
-                    grid_key = f"{grid[0]}_{grid[1]}"
-                    if self._monster_history.get(grid_key, [0, 0])[0] >= self._debounce_frames:
-                        confirmed_monsters.append(m)
-            
-            # 오래된 히스토리 제거 (1초 이상 감지되지 않은 경우)
-            expired_keys = [k for k, v in self._monster_history.items() if now - v[1] > 1.0]
-            for k in expired_keys:
+                key = f"{int(m.get('cx', 0)) // 20}_{int(m.get('cy', 0)) // 20}"
+                if self._monster_history.get(key, [0, 0])[0] >= self._debounce_frames:
+                    confirmed_monsters.append(m)
+
+            for k in [k for k, v in self._monster_history.items() if now - v[1] > 1.0]:
                 del self._monster_history[k]
-            
-            # 현재 프레임에서 감지되지 않은 키의 카운트 리셋
-            for grid_key in self._monster_history:
-                if grid_key not in current_grid_keys:
-                    self._monster_history[grid_key][0] = 0
-            
+            for key in self._monster_history:
+                if key not in current_keys:
+                    self._monster_history[key][0] = 0
+
             monsters = confirmed_monsters
 
-            # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (테스트 중 눈으로 확인하기 위함)
+            # ── pos(x,y) 역계산 ────────────────────────────────
+            # 몬스터/아이템 pos = 내 pos + (패턴 픽셀 - 캐릭터 패턴 픽셀) / grid_size
+            # 캐릭터 패턴을 못 찾은 프레임(my_screen_pos == (0,0))은 뺄셈의 한쪽이
+            # 없어서 계산 자체가 불가능하다 - 사냥 판단(자동사냥의 접근/공격)만
+            # 쉬고, 감지/확정/화면 표시는 위에서 이미 끝났으므로 영향받지 않는다.
+            my_screen_x, my_screen_y = self.state.my_screen_pos
+            my_world_x, my_world_y = self.state.my_world_pos
+            if my_screen_x == 0 and my_screen_y == 0:
+                detected_entities = []
+                self._char_pattern_lost_since = self._char_pattern_lost_since or now
+                if now - self._char_pattern_lost_since >= 2.0:
+                    print("[Sentinel] 캐릭터 패턴 2초 이상 미검출 - 사냥 판단 중지 중")
+                    self._char_pattern_lost_since = now
+            else:
+                self._char_pattern_lost_since = 0.0
+                detected_entities = []
+                for e in tracked_all:
+                    e["world_pos"] = (
+                        round(my_world_x + (e.get("cx", 0) - my_screen_x) / grid_pixel_size),
+                        round(my_world_y + (e.get("cy", 0) - my_screen_y) / grid_pixel_size),
+                    )
+                    detected_entities.append(e)
+
+            # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (테스트 중 눈으로 확인하기 위함).
+            # 좌표(x,y)도 같이 찍는다 - 이름만으론 "감지는 되는데 위치가 맞는지"를
+            # 눈으로 확인할 방법이 없다. self 위치를 몰라 world_pos가 없으면 "?"로 표시.
+            def _fmt(e):
+                w = e.get("world_pos")
+                return f"{e['name']}@{tuple(w) if w else '?'}"
+
             current_item_names = {i["name"] for i in items}
             if current_item_names != self._last_announced_item_names:
                 if current_item_names:
-                    print(f"[Sentinel] 아이템 감지: {', '.join(sorted(current_item_names))}")
+                    print(f"[Sentinel] 아이템 감지: {', '.join(_fmt(i) for i in items)}")
                 self._last_announced_item_names = current_item_names
             current_monster_names = {m["name"] for m in monsters}
             if current_monster_names != self._last_announced_monster_names:
                 if current_monster_names:
-                    print(f"[Sentinel] 몬스터 감지: {', '.join(sorted(current_monster_names))}")
+                    print(f"[Sentinel] 몬스터 감지: {', '.join(_fmt(m) for m in monsters)} "
+                          f"| me=({my_world_x},{my_world_y})")
                 self._last_announced_monster_names = current_monster_names
+
             current_party_names = {p["name"] for p in party}
             if current_party_names != self._last_announced_party_names:
                 if current_party_names:
                     print(f"[Sentinel] 파티원 감지: {', '.join(sorted(current_party_names))}")
                 self._last_announced_party_names = current_party_names
 
-            # 월드 좌표 역계산 엔진: 픽셀 거리 기반 월드 좌표 계산
-            my_screen_x, my_screen_y = self.state.my_screen_pos
-            my_world_x, my_world_y = self.state.my_world_pos
-            
-            # 화살표 감지 실패 시(초기값 0,0) GPS 계산 스킵
-            if my_screen_x == 0 and my_screen_y == 0:
-                detected_entities = []
-            else:
-                # grid_pixel_size는 루프 상단에서 이미 읽었음 (재사용)
-                detected_entities = []
-                for e in tracked_all:
-                    cx = e.get("cx", 0)
-                    cy = e.get("cy", 0)
-                    # 픽셀 차이 계산
-                    pixel_diff_x = cx - my_screen_x
-                    pixel_diff_y = cy - my_screen_y
-                    # 월드 좌표 역계산
-                    target_world_x = my_world_x + (pixel_diff_x / grid_pixel_size)
-                    target_world_y = my_world_y + (pixel_diff_y / grid_pixel_size)
-                    # 엔티티에 월드 좌표 추가 (정수로 반올림)
-                    e["world_pos"] = (round(target_world_x), round(target_world_y))
-                    detected_entities.append(e)
-
-                    # 디버그 로그: 몬스터/아이템 발견 시 거리 계산 (비활성화 - 비트맵 이진화 완성 전까지)
-                    # if e.get("type") in ["MONSTER", "ITEM"]:
-                    #     dist_grid = ((target_world_x - my_world_x)**2 + (target_world_y - my_world_y)**2)**0.5
-                    #     print(f"[GPS] 내 위치: ({my_world_x},{my_world_y}) | {e['type']} 발견: ({round(target_world_x)},{round(target_world_y)}) | 거리: {dist_grid:.1f} Grid")
-
-            # GridIndicator에 아이템 위치 전달 (GameState에서 grid_overlay_enabled 확인)
-            if self.grid_indicator and getattr(self.state, "grid_overlay_enabled", False):
-                item_grids = [i.get("grid") for i in items if i.get("grid")]
-                self.grid_indicator.update_item_positions(item_grids)
-            
             hostile_users = [u for u in users if not u.get("is_whitelisted")]
             
             with getattr(self.state, "_lock", threading.Lock()):
@@ -287,7 +293,6 @@ class SentinelThread(threading.Thread):
                 
                 # 최근 발견된 몬스터/아이템 정보 (Status 출력용)
                 if monsters:
-                    self.state.detected_monster_grid = monsters[0]["grid"]
                     self.state.detected_monster_name = monsters[0]["name"]
                     self.state.detected_monster_world = monsters[0].get("world_pos")
                 # 자동사냥용: 화면에 확정된 몬스터 전체의 world 좌표 목록
@@ -297,9 +302,13 @@ class SentinelThread(threading.Thread):
                     for m in monsters if m.get("world_pos")
                 ]
                 if items:
-                    self.state.detected_item_grid = items[0]["grid"]
                     self.state.detected_item_name = items[0]["name"]
                     self.state.detected_item_world = items[0].get("world_pos")
+                # 자동사냥 줍기용: 화면에 있는 아이템 전체의 pos 목록
+                self.state.detected_items_world = [
+                    {"name": i["name"], "world": i.get("world_pos")}
+                    for i in items if i.get("world_pos")
+                ]
 
             # 실패 로그 모니터링 (5회 연속 실패 시 1회 요약 출력) - 비활성화
             # last_err = getattr(self.state, "last_vision_error", "")

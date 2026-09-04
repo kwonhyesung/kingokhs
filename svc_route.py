@@ -12,6 +12,8 @@ Integration:
     - support_runtime_rules.py: follow/stuck 판단 순수 함수
 """
 
+import os
+import json
 import time
 import threading
 import random
@@ -20,6 +22,10 @@ from bis_core import (
     hw, GameState, TIMING_CONFIG, humanized_sleep, GridManager, discord_notify,
 )
 from patrol_routes import parse_route_point
+from svc_hunt import WallMemory
+_MAPS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps.json")
+_CONFIG_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
 from support_runtime_rules import (
     adjust_follow_target_by_axis_gap,
     dir_between_coords,
@@ -43,13 +49,6 @@ from support_runtime_rules import (
 )
 
 
-def grid_name_to_coords(grid_name):
-    """Grid 이름(S3, A10)을 (col, row) 좌표로 변환."""
-    # GridManager??name_to_grid 硫붿꽌???ъ슜
-    gm = GridManager(None)
-    return gm.name_to_grid(grid_name)
-
-
 def _nav_step_from_dir(cx: int, cy: int, direction: str) -> tuple[int, int]:
     if direction == "up":
         return cx, cy - 1
@@ -63,6 +62,8 @@ def _nav_step_from_dir(cx: int, cy: int, direction: str) -> tuple[int, int]:
 
 
 def nav_cell_blockers(state: GameState, gx: int, gy: int, include_entities: bool = True) -> list[str]:
+    """(gx,gy)는 pos(x,y) 좌표. walls도 entities의 world_pos도 전부 pos 기준이다
+    (grid 좌표계는 폐기했다 - entities에는 이제 grid 필드 자체가 없다)."""
     blockers: list[str] = []
     try:
         map_name = getattr(state, "current_map", None)
@@ -81,10 +82,10 @@ def nav_cell_blockers(state: GameState, gx: int, gy: int, include_entities: bool
                 for ent in entities.get(kind, []):
                     if not isinstance(ent, dict):
                         continue
-                    grid = ent.get("grid")
-                    if not grid or len(grid) != 2:
+                    world = ent.get("world_pos")
+                    if not world or len(world) != 2:
                         continue
-                    if int(grid[0]) == gx and int(grid[1]) == gy:
+                    if int(world[0]) == gx and int(world[1]) == gy:
                         blockers.append(label)
                         break
         except Exception:
@@ -198,6 +199,7 @@ def nav_pick_step_direction(
 
     return None, None, list(dict.fromkeys(blockers))
 
+
 # ============================================================
 #  NavigationThread  ?  吏?ν삎 ?대룞 + Stuck ?덉텧
 # ============================================================
@@ -238,6 +240,20 @@ class RouteSvc(threading.Thread):
         self._last_nav_trace_pos = None
         self._last_nav_trace_gap = None
         self._blocked_cells_until: dict[tuple[int, int], float] = {}
+        # 벽 학습: 이동 실패가 같은 칸에서 시간대를 달리해 3번 쌓이면 벽으로
+        # 확정하고 maps.json에 남긴다. 몬스터가 막은 칸은 세지 않고, 나중에
+        # 실제로 밟으면 지운다 (svc_hunt.WallMemory).
+        self._walls = WallMemory(_MAPS_JSON_PATH)
+        self._last_walked_cell = None
+        # 순찰 포인트 도달 실패 감시
+        self._patrol_point_idx_seen = None
+        self._patrol_point_started_at = 0.0
+        self._patrol_point_skips = {}
+        try:
+            with open(_CONFIG_JSON_PATH, "r", encoding="utf-8") as _f:
+                self._patrol_point_timeout = float(json.load(_f).get("hunt", {}).get("patrol_point_timeout_sec", 15.0))
+        except Exception:
+            self._patrol_point_timeout = 15.0
         self._blocked_cell_hits: dict[tuple[int, int], int] = {}
         self._blocked_cell_base_ttl = 6.0
         self._blocked_cell_max_ttl = 18.0
@@ -281,17 +297,9 @@ class RouteSvc(threading.Thread):
 
     # ----------------------------------------------------------
     def _get_nav_grid_pos(self) -> tuple[int, int]:
-        """char_grid가 초기값이면 실제 좌표를 blocked-memory 기준으로 사용한다."""
-        try:
-            gx, gy = tuple(getattr(self.state, "char_grid", (0, 0)) or (0, 0))
-            gx, gy = int(gx), int(gy)
-        except Exception:
-            gx, gy = 0, 0
-        sx = int(getattr(self.state, "x", 0) or 0)
-        sy = int(getattr(self.state, "y", 0) or 0)
-        if (gx, gy) == (0, 0) and (sx, sy) != (0, 0):
-            return sx, sy
-        return gx, gy
+        """이동/차단 판정에 쓰는 현재 좌표. 좌표계는 pos(x,y) 하나뿐이다."""
+        return (int(getattr(self.state, "x", 0) or 0),
+                int(getattr(self.state, "y", 0) or 0))
 
     def _quick_support_follow_escape(self, follow_target: tuple[int, int] | None = None) -> bool:
         """F2 follow stuck 1회차는 red_tab 재준비 대신 짧은 우회 이동만 수행한다."""
@@ -387,6 +395,65 @@ class RouteSvc(threading.Thread):
         self._prune_blocked_cells()
         return set(self._blocked_cells_until.keys())
 
+    def _learning_map_name(self) -> str:
+        """벽 학습에 쓸 맵 이름. '방금 확실히 읽은' 경우에만 돌려준다.
+        current_map은 한 번 정해지면 계속 남아있어서 그것만으론 지금
+        제대로 읽고 있는지 알 수 없다."""
+        seen_at = float(getattr(self.state, "map_seen_at", 0.0) or 0.0)
+        if time.time() - seen_at > 3.0:
+            return ""
+        return str(getattr(self.state, "current_map", "") or "").strip()
+
+    def _detected_monster_cells(self) -> list:
+        cells = []
+        for m in (getattr(self.state, "detected_monsters_world", []) or []):
+            world = m.get("world") if isinstance(m, dict) else None
+            if world:
+                cells.append((int(world[0]), int(world[1])))
+        return cells
+
+    def _learn_wall(self, cell):
+        """이동 실패 1회를 벽 학습에 넘긴다 (확정되면 maps_db에도 즉시 반영).
+
+        사냥/줍기 이동(item_pickup_target, nav context 없음)에서만 배운다.
+        follow/순찰/포탈 이동은 자체 stuck-recovery가 이미 있고, red_tab
+        타겟팅 지연처럼 벽이 아닌 이유로도 잠깐 멈춘다 - 그걸 배우면
+        도사가 격수 따라가다 잠깐 막힌 자리가 그대로 영구 벽이 된다
+        (실측: 흉가1 (4,13)이 follow 중 멈칫 3번으로 벽 확정됨)."""
+        if self._current_nav_context is not None:
+            return
+        map_name = self._learning_map_name()
+        if not map_name:
+            return
+        if not self._walls.record_block(map_name, cell, monster_cells=self._detected_monster_cells()):
+            return
+        try:
+            entry = self.state.maps_db.setdefault(map_name, {})
+            walls = entry.setdefault("walls", [])
+            if [int(cell[0]), int(cell[1])] not in walls:
+                walls.append([int(cell[0]), int(cell[1])])
+        except Exception:
+            pass
+        self._walls.save()
+
+    def _record_walked_cell(self):
+        """실제로 밟은 칸을 기록한다. 벽으로 잘못 새긴 칸이면 지워진다(반증 우선)."""
+        pos = (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
+        if pos == self._last_walked_cell or pos == (0, 0):
+            return
+        self._last_walked_cell = pos
+        map_name = self._learning_map_name()
+        if not map_name:
+            return
+        if self._walls.record_walked(map_name, pos):
+            try:
+                walls = (self.state.maps_db.get(map_name) or {}).get("walls")
+                if isinstance(walls, list) and [pos[0], pos[1]] in walls:
+                    walls.remove([pos[0], pos[1]])
+            except Exception:
+                pass
+        self._walls.save()
+
     def _remember_blocked_cell(self, gx: int, gy: int, reason: str = "stuck"):
         self._prune_blocked_cells()
         cell = (int(gx), int(gy))
@@ -398,6 +465,7 @@ class RouteSvc(threading.Thread):
         self._blocked_cells_until[cell] = max(prev_until, until)
         if hits <= 2:
             print(f"[NavMem] blocked cell remember: {cell} ttl={ttl:.1f}s reason={reason}")
+        self._learn_wall(cell)
 
     def _remember_last_move_blocked_cell(self, reason: str = "stuck"):
         try:
@@ -1323,6 +1391,23 @@ class RouteSvc(threading.Thread):
             str(getattr(self.state, "current_map", "") or ""),
         )
         before_own_fp = str(getattr(self.state, "map_info_fingerprint", "") or "")
+        # Baseline for the remote_confirmed cross-check below: if local and
+        # remote map text/fingerprint already read "same" before we even tap
+        # (e.g. both stuck on a degenerate short OCR read like "도삭산2" that
+        # never changes - confirmed live across multiple real crossings this
+        # session), then "same" after proves nothing - it was already true.
+        # Only trust it as confirmation of a genuine crossing if it transitions
+        # from not-same into same.
+        before_local_map = {
+            "map_info_text": getattr(self.state, "map_info_text", "") or before_own_map_sig[2],
+            "current_map": before_own_map_sig[2],
+            "map_info_fingerprint": before_own_fp,
+        }
+        before_remote_snapshot = self._get_remote_warrior_snapshot()
+        before_map_sync = (
+            classify_map_sync(before_local_map, before_remote_snapshot, now=time.time())
+            if before_remote_snapshot else "pending"
+        )
 
         # force_press() sends a single instant "K,<key>" hardware packet.
         # Live logs show this door (and every other one this session) never
@@ -1375,7 +1460,11 @@ class RouteSvc(threading.Thread):
                     "map_info_fingerprint": getattr(self.state, "map_info_fingerprint", ""),
                 }
                 remote_now = self._get_remote_warrior_snapshot()
-                if remote_now and classify_map_sync(local_now, remote_now, now=time.time()) == "same":
+                if (
+                    remote_now
+                    and before_map_sync != "same"
+                    and classify_map_sync(local_now, remote_now, now=time.time()) == "same"
+                ):
                     remote_confirmed = True
             if map_sig_changed or fp_changed or remote_confirmed:
                 entered = True
@@ -1836,39 +1925,6 @@ class RouteSvc(threading.Thread):
         return arrived
 
     # [V5] ?꾩씠???띾뱷??寃⑹옄 湲곕컲 ?대룞
-    def _move_toward_grid(self, gx: int, gy: int) -> bool:
-        """Move one step toward a grid target, avoiding walls / monsters / users."""
-        if self._is_in_combat() or time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0):
-            return False
-        ccx, ccy = self._get_nav_grid_pos()
-        dgx, dgy = gx - ccx, gy - ccy
-
-        arrived = (abs(dgx) == 0 and abs(dgy) == 0)
-        if arrived:
-            return True
-
-        step_dir, next_grid, blockers = nav_pick_step_direction(
-            self.state,
-            (ccx, ccy),
-            dgx,
-            dgy,
-            include_entities=True,
-            blocked_cells=self._get_blocked_cells(),
-        )
-
-        if step_dir:
-            if self._is_in_combat() or time.time() < float(getattr(self.state, "support_input_blocked_until", 0.0) or 0.0):
-                return False
-            hw.hold_move(step_dir, "move_hold")
-            self.state.last_move_dir = step_dir
-            self._mark_nav_attempt()
-        elif blockers:
-            print(f"[Nav] blocked: {','.join(blockers)}")
-            self._remember_last_move_blocked_cell(reason="no_step_grid")
-            self._escape_stuck(rewind_waypoint=False)
-
-        return False
-
     def _move_toward_route_point(self, point) -> bool:
         parsed_point = parse_route_point(point)
         if not parsed_point:
@@ -1877,15 +1933,16 @@ class RouteSvc(threading.Thread):
         if parsed_point.get("mode") == "absolute":
             tx = int(parsed_point["x"])
             ty = int(parsed_point["y"])
+            # 사냥 이탈 제한(leash)의 기준점 = 지금 향하는 순찰 포인트
+            self.state.nav_current_route_point = (tx, ty)
             radius = max(0, int(parsed_point.get("radius", 1) or 1))
             if abs(tx - self.state.x) <= radius and abs(ty - self.state.y) <= radius:
                 return True
             return self._move_toward(tx, ty)
 
-        col, row = grid_name_to_coords(parsed_point["grid"])
-        if col is None or row is None:
-            return False
-        return self._move_toward_grid(col, row)
+        # grid 이름 방식('B12' 등)은 폐기했다 - 좌표계는 pos(x,y) 하나뿐이다.
+        print(f"[Seq] grid 방식 포인트는 더 이상 지원하지 않는다: {point}")
+        return True
 
     def _traverse_points_only(self, seq_data, is_reverse: bool) -> None:
         points = seq_data.get("points", [])
@@ -1900,7 +1957,7 @@ class RouteSvc(threading.Thread):
             self.seq_point_idx = len(points) - 1 if is_reverse else 0
 
         point = points[self.seq_point_idx]
-        arrived = self._move_toward_route_point(point)
+        arrived = self._move_toward_route_point(point) or self._patrol_point_timed_out(self.seq_point_idx)
         if arrived:
             print(f"[Seq] patrol point arrived: {self.seq_point_idx}")
             self.seq_point_idx += -1 if is_reverse else 1
@@ -1909,36 +1966,24 @@ class RouteSvc(threading.Thread):
             elif self.seq_point_idx >= len(points):
                 self.seq_point_idx = 0
 
-    def _find_cluster_center(self) -> tuple[int, int] | None:
-        """紐ъ뒪?곌? 2留덈━ ?댁긽 萸됱튇 洹몃━?쒖쓽 以묒떖?먯쓣 諛섑솚."""
-        monsters = self.state.entities.get("monsters", [])
-        if not isinstance(monsters, list) or len(monsters) < 2:
-            return None
+    def _patrol_point_timed_out(self, idx: int) -> bool:
+        """순찰 포인트에 제한 시간 안에 못 닿으면 건너뛴다.
+        벽 학습으로도 못 뚫는 지점이 있어서, 없으면 거기서 영원히 멈춘다.
+        건너뛴 횟수를 남겨서 잘못 찍은 포인트를 나중에 알아볼 수 있게 한다."""
+        now = time.time()
+        if getattr(self, "_patrol_point_idx_seen", None) != idx:
+            self._patrol_point_idx_seen = idx
+            self._patrol_point_started_at = now
+            return False
+        limit = float(getattr(self, "_patrol_point_timeout", 15.0) or 15.0)
+        if now - float(getattr(self, "_patrol_point_started_at", now)) < limit:
+            return False
+        self._patrol_point_skips[idx] = int(self._patrol_point_skips.get(idx, 0)) + 1
+        print(f"[Seq] patrol point {idx} 도달 실패 {limit:.0f}s -> 건너뜀 "
+              f"(누적 {self._patrol_point_skips[idx]}회)")
+        self._patrol_point_started_at = now
+        return True
 
-        grids = []
-        for m in monsters:
-            if not isinstance(m, dict):
-                continue
-            g = m.get("grid")
-            if g and len(g) == 2:
-                grids.append((int(g[0]), int(g[1])))
-        if len(grids) < 2:
-            return None
-
-        best_group = []
-        for cx, cy in grids:
-            group = [(gx, gy) for gx, gy in grids if max(abs(gx - cx), abs(gy - cy)) <= 1]
-            if len(group) > len(best_group):
-                best_group = group
-
-        if len(best_group) < 2:
-            return None
-
-        avg_x = round(sum(gx for gx, _ in best_group) / len(best_group))
-        avg_y = round(sum(gy for _, gy in best_group) / len(best_group))
-        return (int(avg_x), int(avg_y))
-
-    # [?쒗??湲곕컲 ?대룞]
     def _get_reverse_direction(self, direction, reverse_action):
         """??갑??諛⑺뼢??寃곗젙: reverse_action ?곗꽑, ?놁쑝硫??먮룞 怨꾩궛"""
         if reverse_action:
@@ -2080,6 +2125,8 @@ class RouteSvc(threading.Thread):
                 humanized_sleep(TIMING_CONFIG["idle_sleep"])
                 continue
 
+            self._record_walked_cell()
+
             # Hot-Reload
             if self.state.last_update_time > self.last_load_time:
                 self.last_load_time = time.time()
@@ -2127,28 +2174,13 @@ class RouteSvc(threading.Thread):
                 self.state.is_connected,
             )
 
-            if (
-                self.state.role == "술사"
-                and not self._is_in_combat()
-                and not self.state.nav_route_enabled
-                and not follow_navigation_active
-            ):
-                cluster_center = self._find_cluster_center()
-                if cluster_center:
-                    gx, gy = cluster_center
-                    arrived = self._move_toward_grid(gx, gy)
-                    if arrived:
-                        print(f"[MobTrain] 몹 밀집 추적 완료: Grid({gx}, {gy}) -> 대기")
-                        humanized_sleep(TIMING_CONFIG["idle_sleep"])
-                    else:
-                        humanized_sleep(TIMING_CONFIG["nav_loop"])
-                    continue
-
             # 아이템 픽업: LogicSvc가 item_pickup_target(world x,y)을 세팅하면
             # 여기서 실제로 걸어간다 (LogicSvc는 RouteSvc 전용 이동 메서드에
             # 접근할 수 없는 별도 스레드라 상태값으로만 요청을 넘긴다).
             item_pickup_target = getattr(self.state, "item_pickup_target", None)
-            if item_pickup_target and not self.state.nav_route_enabled and not follow_navigation_active:
+            # 순찰(nav_route_enabled) 중에도 이 목표가 우선이다 - 사냥 접근과
+            # 아이템 줍기가 둘 다 이 채널을 쓴다 (LogicSvc가 목표만 세팅).
+            if item_pickup_target and not follow_navigation_active:
                 tx, ty = item_pickup_target
                 arrived = self._move_toward(tx, ty)
                 if arrived:
