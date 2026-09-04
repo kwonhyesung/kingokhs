@@ -252,6 +252,8 @@ class AppView:
         self.btn_open_calib.pack(side="left", padx=1)
         self.btn_findtext = ctk.CTkButton(row2, text="FindText", height=22, width=65, font=("Inter", 9), command=self.launch_findtext_tool)
         self.btn_findtext.pack(side="left", padx=1)
+        self.btn_move_test = ctk.CTkButton(row2, text="MOVE TEST", height=22, width=75, font=("Inter", 9), command=self.test_move_signal)
+        self.btn_move_test.pack(side="left", padx=1)
         self.btn_scale_2x = ctk.CTkButton(row2, text="2x", height=22, width=30, font=("Inter", 9), command=lambda: self.set_game_scale(2.0))
         self.btn_scale_2x.pack(side="left", padx=1)
         self.btn_scale_1x = ctk.CTkButton(row2, text="1x", height=22, width=30, font=("Inter", 9), command=lambda: self.set_game_scale(1.0))
@@ -2631,6 +2633,24 @@ class AppView:
             print("[Hardware] Auto-connect failed, manual selection required")
         except Exception as e:
             print(f"[Hardware] Auto-connect error: {e}")
+
+    def test_move_signal(self):
+        """봇 로직을 전혀 거치지 않고 H/W(또는 SW 폴백)로 실제 이동 신호 1회를
+        보낸다 - 캐릭터가 실제로 화면에서 오른쪽으로 한 칸 움직이는지 눈으로
+        직접 확인하는 용도. 사냥/이동 로직이 맞아도 신호 자체가 게임에
+        안 먹히면 아무것도 안 되는데, 그 경우와 로직 문제를 구분할 방법이
+        지금까지 없었다."""
+        backend = hw.get_input_backend()
+        self.show_toast(f"이동 신호 전송 중... (backend={backend})")
+        print(f"[MoveTest] backend={backend} - 오른쪽으로 1칸 이동 신호를 보냅니다.")
+        try:
+            ok = hw.hold_move("right", force=True)
+            print(f"[MoveTest] hold_move 결과={ok}. 캐릭터가 실제로 움직였는지 게임 화면을 확인하세요.")
+            self.show_toast("전송 완료 - 캐릭터가 움직였는지 확인하세요" if ok else "전송 실패 (hold_move=False)",
+                            "#10B981" if ok else "#FF5555")
+        except Exception as exc:
+            print(f"[MoveTest] 전송 중 예외: {exc}")
+            self.show_toast(f"이동 신호 전송 실패: {exc}", "#FF5555")
 
     def toggle_hardware(self):
         global hw
