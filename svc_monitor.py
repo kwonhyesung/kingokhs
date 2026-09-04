@@ -1603,6 +1603,17 @@ class MonitorSvc(threading.Thread):
                 time.sleep(1)
                 continue
 
+            if hwnd != self.state.hwnd:
+                # ponytail: "ory"는 흔한 부분 문자열(팩토리/히스토리/메모리
+                # 등)이라 실제 게임이 아닌 다른 창을 잘못 붙잡을 수 있다 -
+                # 실전에서 게임창 비활성화 경고가 몇 분씩 계속되는 사례가
+                # 나와서, 봇이 "게임"이라고 여기는 창이 진짜 맞는지부터
+                # 확인해야 했다. hwnd가 바뀔 때만(스팸 방지) 그 제목을 찍는다.
+                try:
+                    tracked_title = win32gui.GetWindowText(hwnd) or "(제목 없음)"
+                except Exception:
+                    tracked_title = "(확인 실패)"
+                print(f"[GameWindow] 게임 창으로 추적 시작: {tracked_title!r}")
             self.state.hwnd = hwnd
             
             # 게임창 비활성화 감지 시 Panic Release 방지
@@ -1626,7 +1637,12 @@ class MonitorSvc(threading.Thread):
                             stealer_title = win32gui.GetWindowText(stealer_hwnd) or "(제목 없음)"
                         except Exception:
                             stealer_title = "(확인 실패)"
-                        print(f"[Warn] 게임창 비활성화 감지 (현재 활성 창: {stealer_title!r}) "
+                        try:
+                            tracked_title = win32gui.GetWindowText(hwnd) or "(제목 없음)"
+                        except Exception:
+                            tracked_title = "(확인 실패)"
+                        print(f"[Warn] 게임창 비활성화 감지 (봇이 추적 중인 창: {tracked_title!r}, "
+                              f"현재 실제 활성 창: {stealer_title!r}) "
                               f"- 서비스만 중단하고 하드웨어 신호는 유지합니다.")
             else:
                 self._focus_lost_since = 0.0
