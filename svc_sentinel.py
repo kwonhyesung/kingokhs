@@ -116,8 +116,18 @@ class SentinelThread(threading.Thread):
                     my_screen_pos = (best_self["cx"], best_self["cy"])
             self.state.my_screen_pos = my_screen_pos
 
-            item_crop, item_ox, item_oy = self._crop_around(play_area_rgb, my_screen_pos, item_radius_tiles * grid_pixel_size)
-            monster_crop, monster_ox, monster_oy = self._crop_around(play_area_rgb, my_screen_pos, monster_radius_tiles * grid_pixel_size)
+            # ponytail: 반경 크롭을 뺐다 - party(전체 play_area 스캔)는 항상
+            # 잡히는데 monster/item(반경 크롭)만 못 잡는 사례가 실전에서
+            # 확인됐다(ft.py 전체화면 검색으로는 패턴이 매칭되는데, 반경
+            # 안에서만 찾는 실제 스캔은 못 찾음 - 캐릭터 위치 계산이 살짝
+            # 어긋나면 크롭 경계 밖으로 몬스터가 빠지는 게 원인으로 보임).
+            # party가 이미 매 프레임 전체 play_area를 크롭 없이 스캔하고도
+            # 성능 문제가 없었으니, 몬스터/아이템도 같은 방식으로 맞춘다.
+            # 반경 튜닝값(item_radius_tiles/monster_radius_tiles)은 이제
+            # 안 쓰지만, 나중에 실제로 스캔 속도가 문제가 되면 그때 다시
+            # 크롭을 넣고 반경을 넉넉히 재보정할 것.
+            item_crop, item_ox, item_oy = play_area_rgb, 0, 0
+            monster_crop, monster_ox, monster_oy = play_area_rgb, 0, 0
 
             # 몬스터/아이템: ft.py로 저장한 FindText 패턴(findtext_patterns.json)으로 스캔.
             # find_text_scan은 카테고리 안의 패턴을 전부 '|'로 결합해 한 번에
