@@ -252,8 +252,6 @@ class AppView:
         self.btn_open_calib.pack(side="left", padx=1)
         self.btn_findtext = ctk.CTkButton(row2, text="FindText", height=22, width=65, font=("Inter", 9), command=self.launch_findtext_tool)
         self.btn_findtext.pack(side="left", padx=1)
-        self.btn_move_test = ctk.CTkButton(row2, text="MOVE TEST", height=22, width=75, font=("Inter", 9), command=self.test_move_signal)
-        self.btn_move_test.pack(side="left", padx=1)
         self.btn_scale_2x = ctk.CTkButton(row2, text="2x", height=22, width=30, font=("Inter", 9), command=lambda: self.set_game_scale(2.0))
         self.btn_scale_2x.pack(side="left", padx=1)
         self.btn_scale_1x = ctk.CTkButton(row2, text="1x", height=22, width=30, font=("Inter", 9), command=lambda: self.set_game_scale(1.0))
@@ -268,6 +266,14 @@ class AppView:
         self.cb_role.set(self._display_role_name(self._effective_role_name(self.state.role)))
         self.btn_sentinel = ctk.CTkButton(row2, text="SNT", height=22, width=40, font=("Inter", 9), command=self.toggle_sentinel)
         self.btn_sentinel.pack(side="left", padx=1)
+
+        # 별도 줄 - row1/row2가 창 너비를 넘기면 이 줄의 버튼이 잘려서 안
+        # 보일 수 있다(가로 스크롤이 없는 세로 스크롤 프레임이라 넘친 버튼은
+        # 그냥 숨는다). 자체 줄에 두면 창 너비와 무관하게 항상 보인다.
+        row_hw_test = ctk.CTkFrame(top_actions, fg_color="transparent")
+        row_hw_test.pack(fill="x", pady=1)
+        self.btn_move_test = ctk.CTkButton(row_hw_test, text="MOVE TEST", height=22, width=90, font=("Inter", 9, "bold"), fg_color="#F59E0B", command=self.test_move_signal)
+        self.btn_move_test.pack(side="left", padx=1)
 
         row_net = ctk.CTkFrame(top_actions, fg_color="transparent")
         row_net.pack(fill="x", pady=1)
@@ -3307,6 +3313,11 @@ class AppView:
                 svc_worker.rotate_claude_log()
             except Exception:
                 pass
+            # ponytail: 하드웨어 신호가 실제로 게임에 먹히는지 F2를 누를
+            # 때마다 바로 눈으로 확인하기 위한 임시 진단 훅. MOVE TEST
+            # 버튼을 찾기 어렵다는 요청으로 추가함 - 원인이 확정되면(로직
+            # 문제인지 하드웨어 문제인지) 지워야 하는 임시 코드다.
+            self.test_move_signal()
         print(f"[Hotkey] {label}: ON")
         self.show_toast(f"{label}: ON")
 
