@@ -245,6 +245,7 @@ class RouteSvc(threading.Thread):
         # 실제로 밟으면 지운다 (svc_hunt.WallMemory).
         self._walls = WallMemory(_MAPS_JSON_PATH)
         self._last_walked_cell = None
+        self._last_pickup_blocked_by_follow_log_time = 0.0
         # 순찰 포인트 도달 실패 감시
         self._patrol_point_idx_seen = None
         self._patrol_point_started_at = 0.0
@@ -2178,6 +2179,17 @@ class RouteSvc(threading.Thread):
             # 여기서 실제로 걸어간다 (LogicSvc는 RouteSvc 전용 이동 메서드에
             # 접근할 수 없는 별도 스레드라 상태값으로만 요청을 넘긴다).
             item_pickup_target = getattr(self.state, "item_pickup_target", None)
+            if item_pickup_target and follow_navigation_active:
+                # 실전에서 격수 이동이 전혀 안 되는 사례가 나왔다(사냥 타겟은
+                # 계속 세팅되는데 좌표가 한 번도 안 바뀜) - follow 모드가
+                # 격수한테도 켜져 있으면(F2가 모든 역할에 nav_follow_enabled를
+                # 켠다) 이 사냥 이동 채널이 통째로 막힌다. 원인을 바로 보이게
+                # 한다(1초 제한).
+                now_blk = time.time()
+                if now_blk - self._last_pickup_blocked_by_follow_log_time >= 1.0:
+                    self._last_pickup_blocked_by_follow_log_time = now_blk
+                    print(f"[Hunt] 이동 목표 {item_pickup_target}가 follow 모드에 막힘 "
+                          f"(follow_target={current_follow_target})")
             # 순찰(nav_route_enabled) 중에도 이 목표가 우선이다 - 사냥 접근과
             # 아이템 줍기가 둘 다 이 채널을 쓴다 (LogicSvc가 목표만 세팅).
             if item_pickup_target and not follow_navigation_active:

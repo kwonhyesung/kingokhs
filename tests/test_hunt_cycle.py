@@ -206,6 +206,26 @@ def test_target_stays_sticky_while_monster_moves():
     assert logic._hunt_sticky == (13, 10)
 
 
+def test_target_lock_released_when_monster_wanders_away_from_adjacent():
+    # 몬스터가 옆칸으로 와서 lock+공격했다가, 다시 멀어지면 다음 이동을 위해
+    # lock이 풀려야 한다 - 안 풀리면 RouteSvc._is_in_combat()이 target_locked
+    # 만 보고 이동을 계속 거부해 캐릭터가 영원히 제자리에 묶인다.
+    logic, state, keys = make_logic(
+        detected_monsters_world=[{"name": "달걀", "world": (11, 10)}])
+    logic._run_warrior_attack_loot_cycle()   # 인접 -> lock
+    assert state.target_locked is True
+    assert keys == []                        # 이번 사이클은 lock만, 공격 X
+
+    logic._run_warrior_attack_loot_cycle()   # 여전히 인접 -> 공격
+    assert keys == ["3"]
+
+    # 몬스터가 두 칸 밖으로 멀어짐 - 이제 다시 걸어가야 한다
+    state.detected_monsters_world = [{"name": "달걀", "world": (13, 10)}]
+    logic._run_warrior_attack_loot_cycle()
+    assert state.target_locked is False, "다시 이동해야 하는데 lock이 안 풀리면 RouteSvc가 이동을 거부한다"
+    assert state.item_pickup_target is not None
+
+
 def test_target_lock_released_when_target_dies():
     logic, state, keys = make_logic(
         detected_monsters_world=[{"name": "달걀", "world": (11, 10)}])

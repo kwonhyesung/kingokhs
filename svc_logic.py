@@ -3970,6 +3970,17 @@ class LogicSvc(threading.Thread):
         # 아직 멀다 - 몬스터의 상하좌우 4칸 중 갈 만한 칸을 목표로 준다.
         # (몬스터 칸 자체를 목표로 주면 몬스터가 막고 있어서 '도착'이
         #  영원히 오지 않고, 벽 학습이 그 칸을 벽으로 잘못 기억한다.)
+        #
+        # 실측 버그: 몬스터가 잠깐 옆칸에 왔다가 다시 멀어지면(맴도는 개체라
+        # 흔함) target_locked가 이전 공격 때부터 켜진 채로 남아있었다.
+        # RouteSvc._is_in_combat()이 target_locked만 보고도 "전투 중"으로
+        # 판단해 _move_toward()를 통째로 거부하는데(가장 먼저 하는 검사),
+        # 그 실패는 portal-follow 전용 로그 경로에만 찍혀서 사냥 이동에서는
+        # 완전히 조용히 실패했다 - 캐릭터가 첫 공격 이후 영원히 제자리에
+        # 묶이는데 로그엔 아무 단서도 안 남는 원인이었다. 다시 걸어야 하는
+        # 상황이면 lock부터 풀어야 이동이 재개된다.
+        if self.state.target_locked:
+            self._release_hunt_target_lock()
         lost_sec = float(cfg.get("target_lost_sec", 8.0))
         if self._hunt_target_since and (now - self._hunt_target_since) > lost_sec:
             # ponytail: leash 안에서도 못 닿는 놈(벽 너머 등)에 영원히
