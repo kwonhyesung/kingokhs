@@ -3021,6 +3021,8 @@ class LogicSvc(threading.Thread):
             if self.state.role == "술사" and self._run_sulsa_service_cycle():
                 continue
             if self._check_emergency(support_target):
+                if self._is_warrior_role():
+                    self._hunt_idle_reason("긴급(HP/MP) 처리 중 - 사냥 사이클까지 못 감")
                 self._handle_emergency(support_target)
                 continue
 
@@ -3028,6 +3030,14 @@ class LogicSvc(threading.Thread):
             combat_needed = self._should_handle_combat()
             self._set_combat_busy(combat_needed)
             if combat_needed:
+                if self._is_warrior_role():
+                    # 우선순위 1이라 여기서 continue하면 사냥 사이클(우선순위 2)이
+                    # 한 번도 안 돈다. 격수가 계속 '전투 중'으로 판정되면 몬스터가
+                    # 보여도 [Hunt]가 한 줄도 안 나오는데, 지금까지 이게 조용했다.
+                    self._hunt_idle_reason(
+                        f"전투 처리 중(우선순위 1) - 사냥 사이클 미실행 | "
+                        f"target_locked={getattr(self.state, 'target_locked', None)} "
+                        f"combat_start={getattr(self.state, 'combat_start_time', 0):.0f}")
                 self._handle_combat()
                 continue
 
@@ -3035,6 +3045,8 @@ class LogicSvc(threading.Thread):
             if self.state.auto_hunt or getattr(self.state, "service_active", False):
                 self._handle_moving()
                 continue
+            if self._is_warrior_role():
+                self._hunt_idle_reason("auto_hunt=False, service_active=False (F2가 안 켜짐)")
 
             # ?? ?湲??곹깭 (理쒖냼?뷀븯??鍮좊Ⅸ 諛섏쓳) ?????????????????????????????????????
             humanized_sleep(0.001)  # 1ms留??湲고븯??鍮좊Ⅸ 諛섏쓳 ?띾룄 ?뺜퓷
@@ -3781,6 +3793,11 @@ class LogicSvc(threading.Thread):
             # 사냥 사이클(접근 목표 세팅 + 회전/공격)을 함께 돌린다.
             if self._is_warrior_role():
                 self._run_dps_server_mode()
+            else:
+                self._hunt_idle_reason(
+                    f"격수 역할이 아니라고 판단됨 (role='{getattr(self.state, 'role', '')}')")
+        elif self._is_warrior_role():
+            self._hunt_idle_reason("is_combat_busy=True - 사냥 사이클 건너뜀")
 
     # ----------------------------------------------------------
     #  격수 모드: 데이터 공유 서버 역할 + 자동사냥
