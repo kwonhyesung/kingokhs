@@ -153,6 +153,7 @@ class LogicSvc(threading.Thread):
         self._hunt_target_since = 0.0
         self._hunt_giveup_until = {}      # pos -> 이 시각까지 무시
         self._item_giveup_until = {}      # 줍기 실패한 아이템 좌표 -> 무시 만료
+        self._hunt_started_map = None     # F2를 켠 시점의 맵
         self._item_job = None             # {"pos":(x,y), "tries":int, "name":str}
         self._last_hunt_log_time = 0.0
         self._red_tab_confirm_required_hits = 2
@@ -3910,11 +3911,28 @@ class LogicSvc(threading.Thread):
         """격수 자동사냥 한 사이클. 이동은 RouteSvc가 하고 여기선 목표만 정한다."""
         if not bool(getattr(self.state, "service_active", False)):
             self._hunt_idle_reason("service_active=False (F2로 서비스가 안 켜짐)")
+            self._hunt_started_map = None
             return
         cfg = self._hunt_cfg()
         if not cfg.get("enabled", True):
             self._hunt_idle_reason("config hunt.enabled=False")
             return
+
+        # 사냥터를 벗어났으면 멈춘다. 실측: 흉가1의 벽을 왼쪽으로 우회하다
+        # x=0의 포탈을 밟아 '천안궁성흉가입구'로 넘어갔고, 거기서도 사냥
+        # 로직이 계속 돌았다. 다른 맵의 좌표계로 몬스터를 쫓으면 엉뚱한 데를
+        # 헤매고 벽 학습까지 오염된다.
+        cur_map = str(getattr(self.state, "current_map", "") or "")
+        if cur_map:
+            if self._hunt_started_map is None:
+                self._hunt_started_map = cur_map
+            elif cur_map != self._hunt_started_map:
+                self._hunt_idle_reason(
+                    f"사냥터를 벗어남: '{self._hunt_started_map}' -> '{cur_map}' "
+                    "- 사냥 정지 (F2를 껐다 켜면 여기서 다시 시작)")
+                self._clear_hunt_move_target()
+                self._item_job = None
+                return
 
         # 캐릭터 패턴을 못 찾은 프레임은 몬스터/아이템 pos를 만들 수 없다
         # (뺄셈의 한쪽이 없음). 추정하지 않고 사냥 판단만 쉰다 - 순찰

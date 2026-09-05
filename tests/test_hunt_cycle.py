@@ -68,6 +68,7 @@ def make_logic(**state_kwargs):
     logic._hunt_target_since = 0.0
     logic._hunt_giveup_until = {}
     logic._item_giveup_until = {}
+    logic._hunt_started_map = None
     logic._item_job = None
     logic._last_hunt_log_time = 0.0
     logic._warrior_next_attack_at = 0.0
@@ -201,6 +202,21 @@ def test_failed_pickup_spot_is_ignored_for_a_while():
     logic._item_giveup_until = {k: 0.0 for k in logic._item_giveup_until}
     logic._run_warrior_attack_loot_cycle()
     assert state.item_pickup_target == (12, 10)
+
+
+def test_hunt_stops_after_leaving_the_map():
+    """포탈을 밟아 다른 맵으로 넘어가면 멈춘다 - 실측에서 넘어간 뒤에도
+    그 맵 좌표로 계속 사냥해서 엉뚱한 데를 헤맸다."""
+    logic, state, keys = make_logic(
+        current_map="흉가1",
+        detected_monsters_world=[{"name": "처녀귀신", "world": (13, 10)}])
+    logic._run_warrior_attack_loot_cycle()
+    assert state.item_pickup_target is not None      # 흉가1에서는 쫓는다
+
+    state.current_map = "천안궁성흉가입구"            # 포탈로 넘어감
+    logic._clear_hunt_move_target()
+    logic._run_warrior_attack_loot_cycle()
+    assert state.item_pickup_target is None, "맵을 벗어났는데 계속 쫓는다"
 
 
 def test_char_pattern_lost_stops_hunt_judgement():

@@ -506,11 +506,13 @@ class RouteSvc(threading.Thread):
             cells |= {(int(c[0]), int(c[1])) for c in walls}
         except Exception:
             pass
-        try:
-            preset = (self._hunt_maps_cfg().get("known_walls") or {}).get(map_name) or []
-            cells |= {(int(c[0]), int(c[1])) for c in preset}
-        except Exception:
-            pass
+        cfg = self._hunt_maps_cfg()
+        for section in ("known_walls", "avoid_cells"):
+            try:
+                preset = (cfg.get(section) or {}).get(map_name) or []
+                cells |= {(int(c[0]), int(c[1])) for c in preset}
+            except Exception:
+                pass
         return cells
 
     def _hunt_maps_cfg(self) -> dict:
