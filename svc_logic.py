@@ -73,6 +73,7 @@ from support_runtime_rules import (
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+RESTORE_GATE_DIAG_INTERVAL_SEC = 3.0
 
 
 def _ts() -> str:
@@ -436,6 +437,8 @@ class LogicSvc(threading.Thread):
             return 0
 
     def _needs_hp_recovery(self) -> bool:
+        if self._is_warrior_role():
+            return False  # 격수는 자힐 스킬 없음 - 기본키'3'(공격키) 오발동 방지
         """
         자기자신 HP 회복 필요 여부 판별
         
@@ -463,6 +466,8 @@ class LogicSvc(threading.Thread):
         return bool(getattr(self.state, "hp_trig_active", False))
 
     def _needs_mp_recovery(self) -> bool:
+        if self._is_warrior_role():
+            return False  # 격수는 자힐 스킬 없음
         """
         자기자신 MP 회복 필요 여부 판별
         
@@ -691,11 +696,12 @@ class LogicSvc(threading.Thread):
                 if int(getattr(self.state, "hp", 0) or 0) > self._self_hp_emergency_threshold:
                     break
 
-            self._mark_self_status_scan_window()
-            if self._press_hw_key("s", variance=0.10, skip_focus_guard=True):
-                self.state.last_self_status_open_time = time.time()
-                self._sleep_ui_gap(0.16)
-                self._wait_for_user_pattern(self._support_self_pattern, timeout=0.80)
+            if self._is_dosa_f2_follow_service():
+                self._mark_self_status_scan_window()
+                if self._press_hw_key("s", variance=0.10, skip_focus_guard=True):
+                    self.state.last_self_status_open_time = time.time()
+                    self._sleep_ui_gap(0.16)
+                    self._wait_for_user_pattern(self._support_self_pattern, timeout=0.80)
 
             self._refresh_self_cooltime_view("[Recovery] post-revive status refresh.")
             self._execute_self_geumgang_cycle(skip_refresh=True, force_cast=True)
@@ -1762,7 +1768,7 @@ class LogicSvc(threading.Thread):
 
     def _is_dosa_f2_follow_service(self) -> bool:
         return (
-            self.state.role in ("도사", "도사1")
+            self.state.role in ("도사", "도사1", "도사2")
             and bool(getattr(self.state, "service_active", False))
             and bool(getattr(self.state, "nav_follow_enabled", False))
             and bool(getattr(self.state, "auto_hunt", False))
@@ -1802,6 +1808,8 @@ class LogicSvc(threading.Thread):
 
     def _refresh_self_status_if_needed(self, force: bool = False) -> bool:
         if self._is_support_lock_search_active():
+            return self._is_self_status_visible()
+        if not self._is_dosa_f2_follow_service():
             return self._is_self_status_visible()
         if not self._is_hw_ready() or not self._is_game_window_active():
             return self._is_self_status_visible()
@@ -1863,6 +1871,8 @@ class LogicSvc(threading.Thread):
 
     def _refresh_self_cooltime_view(self, reason_log: str | None = None) -> bool:
         if self._is_support_lock_search_active():
+            return bool(getattr(self.state, "self_bm_detected", False)) or bool(getattr(self.state, "self_gg_detected", False))
+        if not self._is_dosa_f2_follow_service():
             return bool(getattr(self.state, "self_bm_detected", False)) or bool(getattr(self.state, "self_gg_detected", False))
         if not self._is_hw_ready() or not self._is_game_window_active():
             return False
@@ -3180,7 +3190,7 @@ class LogicSvc(threading.Thread):
     def _restore_dosa_service_if_follow_autohunt(self) -> bool:
         if not is_support_role(getattr(self.state, "network_role", "") or self.state.role):
             now_diag = time.time()
-            if now_diag - float(getattr(self, "_last_restore_gate_diag_time", 0.0) or 0.0) >= 0.5:
+            if now_diag - float(getattr(self, "_last_restore_gate_diag_time", 0.0) or 0.0) >= RESTORE_GATE_DIAG_INTERVAL_SEC:
                 self._last_restore_gate_diag_time = now_diag
                 print(f"[RestoreGateDiag] blocked: not support role (network_role={getattr(self.state, 'network_role', '')!r} role={self.state.role!r})")
             return False
@@ -3192,7 +3202,7 @@ class LogicSvc(threading.Thread):
             # 되살리면 그 안전장치와 계속 밀당하며 켜짐/꺼짐이 반복된다
             # (로그에 [F2Watchdog] restored가 수백 번 찍히는 원인).
             now_diag = time.time()
-            if now_diag - float(getattr(self, "_last_restore_gate_diag_time", 0.0) or 0.0) >= 0.5:
+            if now_diag - float(getattr(self, "_last_restore_gate_diag_time", 0.0) or 0.0) >= RESTORE_GATE_DIAG_INTERVAL_SEC:
                 self._last_restore_gate_diag_time = now_diag
                 print("[RestoreGateDiag] blocked: game window not active")
             return False
