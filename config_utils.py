@@ -134,13 +134,26 @@ def load_network_config() -> dict:
         # 격수 로직이 통째로 안 도는데 로그는 정상으로 보인다. PC 이름은
         # 그 PC에서 안 바뀌므로 여기에 못을 박는다.
         by_pc = _load_json_file(PC_ROLES_FILE).get("role_by_pc", {})
-        if isinstance(by_pc, dict):
-            role = by_pc.get(pysocket.gethostname())
+        if isinstance(by_pc, dict) and by_pc:
+            # PC 이름을 읽는 곳이 두 군데다: 이 표는 gethostname()으로 찾고,
+            # 로그의 pc=는 os.environ["COMPUTERNAME"]이다. 대소문자만 달라도
+            # 표를 못 찾는데, 그러면 아무 말 없이 config.json의 role(저장소
+            # 기본값 도사1)로 실행된다 - 실측에서 격수 PC(DESKTOP2)가 그렇게
+            # 도사1로 돌아서 추적/사냥/타겟팅이 통째로 엉켰다. 두 이름을 다
+            # 대문자로 맞춰 찾고, 못 찾으면 조용히 넘어가지 않는다.
+            lookup = {str(k).strip().upper(): v for k, v in by_pc.items()}
+            names = [pysocket.gethostname(), os.environ.get("COMPUTERNAME", "")]
+            role = next((lookup[n.strip().upper()] for n in names
+                         if n and n.strip().upper() in lookup), None)
             if role:
                 if str(role) != cfg["role"]:
                     print(f"[Net] role: config.json '{cfg['role']}' -> "
                           f"pc_roles.json '{role}' (PC 이름으로 결정)")
                 cfg["role"] = str(role)
+            else:
+                print(f"[Net] 경고: 이 PC 이름 {names}가 pc_roles.json에 없다 - "
+                      f"config.json의 role '{cfg['role']}'로 실행한다. "
+                      f"역할이 틀리면 원인은 여기다.")
         cfg["server_ip"] = str(merged_network.get("server_ip", cfg["server_ip"]) or cfg["server_ip"])
         cfg["bind_host"] = str(merged_network.get("bind_host", cfg["bind_host"]) or cfg["bind_host"])
         cfg["telemetry_port"] = int(merged_network.get("telemetry_port", cfg["telemetry_port"]) or cfg["telemetry_port"])

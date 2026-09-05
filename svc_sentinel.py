@@ -441,11 +441,16 @@ class SentinelThread(threading.Thread):
             # 초록을 안 쓰는 이유: 게임이 이미 파티원 머리 위에 초록 표시를
             # 쓴다. 같은 색이면 봇이 찍은 점과 게임이 그린 표시가 섞인다.
             pa_sx, pa_sy = int(_pa_cfg.get("sx", 0) or 0), int(_pa_cfg.get("sy", 0) or 0)
+            # 수명은 '지금'부터 잰다. now는 사이클 맨 위에서 찍은 값인데 한
+            # 바퀴가 실측 4초까지 걸려서, now+2.0으로 만들면 마커가 저장되는
+            # 순간 이미 2초 전에 만료된 상태가 된다 - GUI가 [MarkerDiag]
+            # markers=0 drawn=0으로 계속 찍던 원인이 이것이다.
+            mark_now = time.time()
             marks = [{"x": m.get("cx", 0) + pa_sx, "y": m.get("cy", 0) + pa_sy,
-                      "color": "red", "size": 12, "expiry": now + 2.0} for m in monsters]
+                      "color": "red", "size": 12, "expiry": mark_now + 2.0} for m in monsters]
             off_y = int(_pa_cfg.get("click_offset_y", 26) or 26)
             marks += [{"x": h.get("cx", 0) + pa_sx, "y": h.get("cy", 0) + pa_sy + off_y,
-                       "color": "magenta", "size": 12, "expiry": now + 2.0}
+                       "color": "magenta", "size": 12, "expiry": mark_now + 2.0}
                       # 이름표는 '내 이름'과 '남의 이름'이 다른 색으로 그려져서
                       # 패턴이 갈린다(점프_name = 도사 화면의 격수, 점프_name_self
                       # = 격수 화면의 자기 자신). 어느 쪽이든 클릭 지점은 같으니
