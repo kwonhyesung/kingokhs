@@ -421,7 +421,11 @@ class SentinelThread(threading.Thread):
             off_y = int(_pa_cfg.get("click_offset_y", 26) or 26)
             marks += [{"x": h.get("cx", 0) + pa_sx, "y": h.get("cy", 0) + pa_sy + off_y,
                        "color": "magenta", "size": 12, "expiry": now + 0.5}
-                      for h in party_hits if str(h.get("name", "")).endswith("_name")]
+                      # 이름표는 '내 이름'과 '남의 이름'이 다른 색으로 그려져서
+                      # 패턴이 갈린다(점프_name = 도사 화면의 격수, 점프_name_self
+                      # = 격수 화면의 자기 자신). 어느 쪽이든 클릭 지점은 같으니
+                      # 접미사로 끝나는지가 아니라 포함하는지로 본다.
+                      for h in party_hits if "_name" in str(h.get("name", ""))]
             if marks:
                 with self.state._lock:
                     self.state.visual_markers.extend(marks)
