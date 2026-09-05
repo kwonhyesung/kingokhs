@@ -15,7 +15,7 @@ def _monitor_log(*args, **kwargs):
 def click_offset_y() -> int:
     """패턴 중심에서 '실제로 클릭해야 하는 지점'까지의 y 픽셀.
 
-    기준점은 이름표(점프_name/졈프_name)다. 실측: 이름표에서 26px 아래를
+    기준점은 이름표(점프_name/졈프_name)다. 실측값은 config.json의 play_area.click_offset_y다.
     찍어야 캐릭터가 잡히고, 더 내려가면 한 칸 아래에 있는 다른 대상(다른
     캐릭터나 몬스터)이 잡히므로 맞는 구간이 좁다 - config로 뺀다
     (play_area.click_offset_y, 기본 26). 오버레이 마젠타 점이 바로 이
