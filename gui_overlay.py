@@ -197,10 +197,11 @@ class ROIIndicator(tk.Toplevel):
         self.withdraw()
 
     def update_position(self, regions):
+        """실제로 그린 마커 개수를 돌려준다 (호출부 진단용)."""
         has_markers = len(self.state.visual_markers) > 0
         if not self.visible and not has_markers:
             self.withdraw()
-            return
+            return 0
 
         try:
             # ROI 사각형도 마커도 좌표계가 '캡처 프레임 = 화면'이다
@@ -228,14 +229,18 @@ class ROIIndicator(tk.Toplevel):
                 markers = list(self.state.visual_markers)
                 self.state.visual_markers = [m for m in self.state.visual_markers if m["expiry"] > now]
 
+            drawn = 0
             for m in markers:
                 if m["expiry"] > now:
                     r = m.get("size", 10) // 2
                     color = m.get("color", "red")
                     self.canvas.create_oval(m["x"] - r, m["y"] - r, m["x"] + r, m["y"] + r, fill=color, outline="white", width=1)
+                    drawn += 1
+            return drawn
         except Exception as e:
             print(f"[Overlay] ROI update error: {e}")
             self.withdraw()
+            return 0
 
 class GridIndicator(tk.Toplevel):
     """Docstring."""

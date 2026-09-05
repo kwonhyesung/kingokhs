@@ -3632,18 +3632,16 @@ class AppView:
         ROIIndicator는 visible=False면 ROI 사각형은 빼고 마커만 그리도록 이미
         만들어져 있었는데, 갱신 호출이 전부 visible일 때만 돌아서 그 동작이
         한 번도 실행된 적이 없었다."""
+        # 오버레이는 조건 없이 한 번 만들고 계속 갱신한다. 예전엔 "마커가
+        # 있을 때만" 만들었는데, 그 순간을 0.1초 폴링으로 잡아채는 구조라
+        # 도사 PC에선 한 번도 안 걸렸다(격수 PC는 걸려서 점이 나왔다).
+        # update_position이 비었을 땐 알아서 창을 숨기므로 게이트가 필요 없다.
         if not hasattr(self, "indicator"):
-            # 오버레이가 아직 없을 때만 마커 유무로 건너뛴다. 이미 만들어진
-            # 뒤에도 건너뛰면, 마커가 만료돼 목록이 비는 순간 update_position이
-            # 안 불려서 캔버스에 마지막 점이 지워지지 않고 그대로 남는다.
-            if not getattr(self.state, "visual_markers", None):
-                return
-            # 게임창을 찾을 필요가 없다 - 오버레이는 화면 전체를 덮고 화면
-            # 좌표로 그린다. 제목 검색은 크롬 탭까지 잡아서 틀린 창에 맞춰졌다.
             self.indicator = ROIIndicator(self.root, getattr(self.state, "hwnd", None), self.state)
-            self._marker_log_once("[GUI] 마커 오버레이 생성 (화면 전체)")
         reader_thread = getattr(self, "reader_thread", None)
-        self.indicator.update_position(getattr(reader_thread, "regions", {}) or {})
+        drawn = self.indicator.update_position(getattr(reader_thread, "regions", {}) or {})
+        if drawn:
+            self._marker_log_once(f"[GUI] 마커 표시 시작 (첫 프레임 {drawn}개)")
 
     def _marker_log_once(self, msg):
         """마커 경로는 0.1초마다 도는 루프라 그냥 print하면 로그가 잠긴다."""
