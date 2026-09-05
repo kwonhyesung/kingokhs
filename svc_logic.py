@@ -2209,15 +2209,12 @@ class LogicSvc(threading.Thread):
                 self._last_focus_skip_log_time = now
             return False
         if force_support_input:
-            actual_key = display_game_hotkey(key)
-            # 눌림이 실제로 나갔는지를 그대로 돌려준다. 예전엔 결과를 버리고
+            # press_once가 이 PC의 ESP32가 인식하는 형식(K, 또는 D:/U:)을 고른다.
+            # 눌림이 실제로 나갔는지를 그대로 돌려준다 - 예전엔 결과를 버리고
             # 무조건 True를 돌려줘서, 호출한 쪽이 "키를 눌렀다"고 로그를 찍고
             # 쿨다운까지 걸어놓는데 실제로는 아무것도 안 나간 경우가 있었다
             # (실측: 공격 로그는 찍히는데 게임에선 공격이 일어나지 않음).
-            pressed = hw.send_force(f"D:{actual_key}")
-            humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
-            hw.send_force(f"U:{actual_key}")
-            return pressed
+            return bool(hw.press_once(display_game_hotkey(key), variance=variance))
         return bool(hw.fast_press(key, variance=variance))
 
     def _sleep_ntab_gap(self):

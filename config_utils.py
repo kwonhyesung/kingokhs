@@ -135,6 +135,53 @@ def load_network_config() -> dict:
         print(f"[Net] config load failed: {e}")
     return cfg
 
+def load_hardware_config() -> dict:
+    """이 PC의 하드웨어 설정. network과 같은 3단계 병합을 쓴다.
+
+    지금 담는 값은 move_command_form 하나다: 이 PC에 붙은 ESP32가 실제로
+    인식하는 키 입력 형식("DU" = D:<키>/U:<키>, "K" = K,<키>).
+    실측으로 둘이 정반대인 PC가 확인됐다 - 격수 PC(COM3)는 K,만 먹히고
+    D:/U:는 무시되며, 도사 PC(COM11)는 D:/U:로 문을 통과하는데 K,로는
+    한 번도 안 됐다(svc_route.py의 포탈 진입 주석 참고). 그래서 이건
+    코드에 박을 수 없고 PC마다 달라야 한다.
+
+    기본값은 "DU"다 - 지금까지의 동작 그대로라, 검사를 안 돌린 PC는
+    아무것도 안 바뀐다.
+    """
+    cfg = {"move_command_form": "DU"}
+    try:
+        merged = {}
+        for data in (_load_json_file(CONFIG_FILE),
+                     _load_json_file(LEGACY_LOCAL_CONFIG_FILE),
+                     _load_json_file(LOCAL_CONFIG_FILE)):
+            section = data.get("hardware", {})
+            if isinstance(section, dict):
+                merged.update(section)
+        form = str(merged.get("move_command_form", "") or "").upper()
+        if form in ("DU", "K"):
+            cfg["move_command_form"] = form
+    except Exception as e:
+        print(f"[Hardware] config load failed: {e}")
+    return cfg
+
+
+def save_hardware_config(updates: dict) -> None:
+    """하드웨어 설정을 저장소 밖(홈 디렉터리)에 쓴다 - git pull이 못 건드린다."""
+    try:
+        data = _load_json_file(LOCAL_CONFIG_FILE)
+        section = data.get("hardware", {})
+        if not isinstance(section, dict):
+            section = {}
+        for key, value in dict(updates or {}).items():
+            if value is not None:
+                section[key] = value
+        data["hardware"] = section
+        _save_json_file(LOCAL_CONFIG_FILE, data)
+        print(f"[Hardware] 설정 저장: {section} -> {LOCAL_CONFIG_FILE}")
+    except Exception as e:
+        print(f"[Hardware] config save failed: {e}")
+
+
 def save_network_config(network_updates: dict) -> None:
     try:
         data = _load_json_file(LOCAL_CONFIG_FILE) or _load_json_file(CONFIG_FILE)

@@ -782,17 +782,30 @@ def main(
 
                         moved_a = after_a != before_a
                         moved_b = after_b != before_b
+                        # 먹히는 형식을 이 PC에 기억시킨다. 두 PC의 ESP32가
+                        # 정반대라 코드에 못 박고, 저장 위치가 홈 디렉터리라
+                        # git pull이 덮지 않는다 - 이 검사를 한 번 돌린 PC는
+                        # 이후 이동/공격이 알아서 맞는 형식으로 나간다.
+                        form = None
                         if moved_a and not moved_b:
+                            form = "K"
                             print("[HWTest] 판정: K,만 먹힘 -> 펌웨어가 D:/U: 를 처리하지 않음. "
                                   "이동/공격이 전부 D:/U: 라서 아무것도 안 움직인 것.")
                         elif moved_b and not moved_a:
-                            print("[HWTest] 판정: D:/U:만 먹힘 (예상과 반대)")
+                            form = "DU"
+                            print("[HWTest] 판정: D:/U:만 먹힘")
                         elif moved_a and moved_b:
                             print("[HWTest] 판정: 둘 다 먹힘 -> 이동 명령 자체는 문제 없음. "
-                                  "원인은 그 위 로직(게이트/타이밍).")
+                                  "원인은 그 위 로직(게이트/타이밍). 설정은 그대로 둡니다.")
                         else:
                             print("[HWTest] 판정: 둘 다 안 먹힘 -> 방향키가 게임에 안 닿음. "
                                   "(esc/tab/home은 먹혔으므로 방향키 매핑 문제일 가능성)")
+                        if form:
+                            from config_utils import save_hardware_config
+                            save_hardware_config({"move_command_form": form})
+                            hw._move_command_form = form  # 재시작 없이 즉시 적용
+                            print(f"[HWTest] 이 PC의 이동 명령 형식을 '{form}'로 저장했습니다. "
+                                  "이제 F2를 눌러보세요.")
                         print("[HWTest]   * 좌표는 화면 OCR로 읽으므로, 화면에서 실제로 움직였는지도 같이 봐주세요.")
                     except Exception as e:
                         print(f"[HWTest] error: {e}")

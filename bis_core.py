@@ -1166,6 +1166,10 @@ class BisHardware:
         self._auto_reconnect_enabled = True
         self._last_connect_attempt = 0
         self._last_send_failure_log_time = 0.0
+        # 이 PC의 ESP32가 인식하는 키 입력 형식. "DU"=D:<키>/U:<키>, "K"=K,<키>.
+        # 실측으로 PC마다 정반대인 게 확인돼서 코드에 못 박는다 - '/' 자체
+        # 검사가 어느 쪽이 먹히는지 재서 홈 디렉터리에 저장한다.
+        self._move_command_form = None
         self._preferred_port = None
         self._last_announced_input_backend = None
         self._software_input_event_logged = False
@@ -1177,6 +1181,14 @@ class BisHardware:
         if not (self.ser and self.ser.is_open):
             self.auto_reconnect()
         self.announce_input_backend()
+        # 이 PC의 ESP32가 인식하는 명령 형식 로드
+        if self._move_command_form is None:
+            try:
+                from config_utils import load_hardware_config
+                cfg = load_hardware_config()
+                self._move_command_form = cfg.get("move_command_form", "DU")
+            except Exception:
+                self._move_command_form = "DU"  # 기본값
 
     def is_hardware_ready(self) -> bool:
         return bool(self.ser and self.ser.is_open)
@@ -1426,6 +1438,24 @@ class BisHardware:
         with self._lock:
             return self._deliver(str(cmd or ""))
 
+    def press_once(self, key: str, duration: float = None, variance: float = 0.15) -> bool:
+        """이 PC의 ESP32가 실제로 인식하는 형식으로 키를 한 번 누른다.
+
+        두 PC의 ESP32가 정반대로 동작하는 게 실측으로 확인됐다:
+        격수 PC(COM3)는 'K,<키>'만 먹히고 'D:/U:'는 무시하며, 도사 PC(COM11)는
+        'D:/U:'로 문을 통과하는데 'K,'로는 한 번도 안 됐다. 그래서 형식을
+        코드에 못 박고 PC별 설정(홈 디렉터리, git 밖)에서 읽는다."""
+        if self._move_command_form == "K":
+            # 단발 명령이라 duration을 못 준다 - 이 게임의 한 걸음이 곧 한 탭이다.
+            return self.send_force(f"K,{key}")
+        pressed = self.send_force(f"D:{key}")
+        try:
+            humanized_sleep(float(duration) if duration is not None
+                            else TIMING_CONFIG["key_down_hold"], variance)
+        finally:
+            self.send_force(f"U:{key}")
+        return pressed
+
     def _reset_serial_buffers(self):
         """Best-effort: clear buffered serial I/O to reduce stuck input risk."""
         if self.ser and self.ser.is_open:
@@ -1515,17 +1545,14 @@ class BisHardware:
                 return False
 
         _hw_log(f"[Move] 방향키: {direction}{' (force)' if force else ''}")
-        try:
-            # 눌림이 실제로 나갔는지가 유일하게 중요한 값이다. 예전엔 결과를
-            # 버리고 무조건 True를 돌려줘서, 시리얼이 죽어 있어도 호출한 쪽은
-            # "이동시켰다"고 믿고 다음 판단을 이어갔다.
-            pressed = self.send_force(f"D:{direction}")
-            if duration is not None:
-                humanized_sleep(float(duration), variance)
-            else:
-                humanized_sleep(TIMING_CONFIG[hold_key], variance)
-        finally:
-            self.send_force(f"U:{direction}")
+        # 눌림이 실제로 나갔는지가 유일하게 중요한 값이다. 예전엔 결과를
+        # 버리고 무조건 True를 돌려줘서, 시리얼이 죽어 있어도 호출한 쪽은
+        # "이동시켰다"고 믿고 다음 판단을 이어갔다.
+        pressed = self.press_once(
+            direction,
+            duration=duration if duration is not None else TIMING_CONFIG[hold_key],
+            variance=variance,
+        )
         # 이동키가 실제로 나간 시각. 2D라 캐릭터가 칸과 칸 사이를 픽셀로
         # 걸어가므로, 걷는 도중에 계산한 몬스터/아이템 pos는 반 칸씩
         # 어긋난다. 아이템처럼 좌표를 고정해야 하는 쪽은 이 값으로
