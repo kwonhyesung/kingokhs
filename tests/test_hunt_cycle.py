@@ -97,16 +97,15 @@ def test_approaches_adjacent_cell_not_the_monster_tile():
 def test_attacks_when_orthogonally_adjacent():
     logic, state, keys = make_logic(
         detected_monsters_world=[{"name": "달걀", "world": (11, 10)}])
-    # 1회차: 붙었지만 아직 target_locked가 아니다 - Tab으로 lock부터 하고
-    # 이번 사이클엔 공격하지 않는다 (대상선택박스 방지, red_tab 없이 공격
-    # 스킬을 쏘면 박스가 뜨고 그 뒤 방향키가 캐릭터 대신 박스를 움직인다).
+    # 붙으면 그 사이클에 바로 때린다. 예전엔 첫 사이클을 tab>up>enter(대상
+    # 지정)에 쓰고 공격은 다음 사이클로 미뤘는데, 격수의 공격 마법은 대상
+    # 지정이 필요 없어서 그 한 사이클과 대기 3번이 통째로 낭비였다.
     logic._run_warrior_attack_loot_cycle()
     assert MOVES == ["right"], MOVES      # 몬스터 쪽으로 회전
-    assert keys == [], keys               # 아직 공격 안 함
-    assert state.target_locked is True    # lock 됨
+    assert keys == ["3"], keys            # 같은 사이클에 공격까지
     assert state.item_pickup_target is None   # 붙었으니 이동 목표는 해제
 
-    # 2회차: 이미 lock된 상태 - 이제 공격키가 나간다.
+    # 바로 이어 부르면 연타 간격(attack_repeat_sec) 때문에 안 쏜다
     logic._run_warrior_attack_loot_cycle()
     assert keys == ["3"], keys
 
@@ -256,12 +255,12 @@ def test_target_lock_released_when_monster_wanders_away_from_adjacent():
     # 만 보고 이동을 계속 거부해 캐릭터가 영원히 제자리에 묶인다.
     logic, state, keys = make_logic(
         detected_monsters_world=[{"name": "달걀", "world": (11, 10)}])
-    logic._run_warrior_attack_loot_cycle()   # 인접 -> lock
-    assert state.target_locked is True
-    assert keys == []                        # 이번 사이클은 lock만, 공격 X
-
-    logic._run_warrior_attack_loot_cycle()   # 여전히 인접 -> 공격
+    logic._run_warrior_attack_loot_cycle()   # 인접 -> 바로 공격
     assert keys == ["3"]
+    assert state.target_locked is False, "사냥은 더 이상 lock을 켜지 않는다"
+
+    # 다른 경로(도사 지원/red_tab 검토)가 켜둔 lock이 남아 있는 상황을 흉내낸다
+    state.target_locked = True
 
     # 몬스터가 두 칸 밖으로 멀어짐 - 이제 다시 걸어가야 한다
     state.detected_monsters_world = [{"name": "달걀", "world": (13, 10)}]
@@ -273,8 +272,8 @@ def test_target_lock_released_when_monster_wanders_away_from_adjacent():
 def test_target_lock_released_when_target_dies():
     logic, state, keys = make_logic(
         detected_monsters_world=[{"name": "달걀", "world": (11, 10)}])
-    logic._run_warrior_attack_loot_cycle()   # lock
-    assert state.target_locked is True
+    logic._run_warrior_attack_loot_cycle()   # 인접 -> 공격
+    state.target_locked = True               # 다른 경로가 켜둔 lock을 흉내
     state.detected_monsters_world = []       # 죽음/이탈
     # 놓친 직후(유예 1.5s 이내)는 아직 살아있는 것으로 취급한다 - 실전에서
     # 움직이는 몬스터는 한 프레임 정도 인식이 흔들릴 수 있고, 그때마다 바로

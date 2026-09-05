@@ -4060,16 +4060,12 @@ class LogicSvc(threading.Thread):
             # 우회한다. 격수 전용 경로라 도사 지원 입력과 겹치지 않는다.
             hw.hold_move(direction, force=True)
 
-            if not self.state.target_locked:
-                # 공격 스킬이 "대상선택형"이면 타겟을 미리 lock해두지 않은 채
-                # 그냥 쏘면 화면에 대상선택박스가 뜨고, 그 뒤로는 방향키가
-                # 캐릭터 대신 그 박스를 움직인다(실측: red_tab 없이 공격 →
-                # 이동 불능). 기존 도사/술사/기본모드가 전투 전 항상 하던
-                # Tab 락(_search_target_v3)을 여기서도 한 번 하고 이번
-                # 사이클은 공격 없이 넘어간다 - 다음 사이클부터 락된 채로 공격.
-                self._search_target_v3()
-                return True
-
+            # tab>up>enter(_search_target_v3)를 여기서 부르지 않는다. 그건
+            # '다른 대상을 찾아 red_tab을 세우는' 검토 절차이고, 격수의 공격
+            # 마법에는 대상 지정이 필요 없다 - 그냥 방향만 보고 쏘면 된다.
+            # 빼면서 같이 없어지는 것: tab_wait + up_wait + ocr_wait 대기와,
+            # target_locked가 켜진 채로 남아 RouteSvc가 "전투 중"으로 보고
+            # 이동을 통째로 거부하던 경로(아래 실측 버그 주석 참고).
             if now >= float(getattr(self, "_warrior_next_attack_at", 0.0) or 0.0):
                 role = str(getattr(self.state, "role", "") or "")
                 attack_key = str((cfg.get("attack_key") or {}).get(role, "3"))
@@ -4080,7 +4076,7 @@ class LogicSvc(threading.Thread):
                     # 결과와 무관하게 이 줄을 찍어서, 게임에선 아무 일도 없는데
                     # 로그만 공격했다고 말하고 있었다.
                     if struck:
-                        print(f"[Hunt] 공격 {direction} -> {target_pos} (target_locked)")
+                        print(f"[Hunt] 공격 {direction} -> {target_pos}")
                     else:
                         print(f"[Hunt] 공격키 '{attack_key}' 전송 실패 - 공격 안 나감 "
                               f"({direction} -> {target_pos})")
