@@ -158,6 +158,7 @@ def _start_remote_log_receiver():
 
     def _run():
         import socket as _socket
+        from datetime import datetime as _dt
         logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
         os.makedirs(logs_dir, exist_ok=True)
         files: dict = {}
@@ -179,10 +180,14 @@ def _start_remote_log_receiver():
             try:
                 f = files.get(sender_role)
                 if f is None:
-                    # 매 프로세스 시작마다 새로 덮어쓴다(로컬 claude_debug_*.log와
-                    # 동일한 정책) - Claude는 항상 이 파일 하나만 읽으면 된다.
+                    # append로 이어붙인다. 예전엔 "w"로 덮어썼는데, 그러면
+                    # 허브(도사1)를 재시작할 때마다 격수 PC 로그가 통째로
+                    # 지워졌다 - 실제로 격수 사냥 로그를 받아놓고도 허브
+                    # 재시작 한 번에 다 날려서 진단할 게 아무것도 안 남았다.
+                    # 격수 PC는 별개 프로세스라 이 파일의 수명과 무관하다.
                     path = os.path.join(logs_dir, f"remote_{sender_role}.log")
-                    f = open(path, "w", encoding="utf-8", buffering=1)
+                    f = open(path, "a", encoding="utf-8", buffering=1)
+                    f.write(f"\n===== hub session start {_dt.now():%Y-%m-%d %H:%M:%S} =====\n")
                     files[sender_role] = f
                 f.write(line + "\n")
                 f.flush()

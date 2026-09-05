@@ -249,22 +249,38 @@ class FindText:
             return []
             
         results = []
+        # gray는 화면만 보면 정해지는 값이라 패턴이 몇 개든 똑같다. 패턴마다
+        # 다시 계산하면(예전 동작) 26패턴짜리 스캔에서 917x787 uint32 곱셈을
+        # 26번 반복해서 사이클당 ~175ms를 그냥 버렸다. 여기서 한 번만 만들어
+        # 넘긴다 - 패턴별 이진화(gray < 임계값)는 그대로 패턴마다 한다.
+        gray = None
         for p in patterns:
             if p.get('mode') == 'color':
                 res = self._template_match_color(screenshot, p, err1, find_all)
             else:
-                res = self._template_match_native(screenshot, p, err1, err0, find_all)
+                if gray is None:
+                    gray = self._to_gray(screenshot)
+                res = self._template_match_native(screenshot, p, err1, err0, find_all,
+                                                  gray=gray)
             results.extend(res)
             if not find_all and results:
                 break
 
         return results
 
+    @staticmethod
+    def _to_gray(roi_bgr: np.ndarray) -> np.ndarray:
+        """ft.ahk의 gray = R*38+G*75+B*15 (BGR 순서이므로 B=0, G=1, R=2)."""
+        return (roi_bgr[:, :, 2].astype(np.uint32) * 38
+                + roi_bgr[:, :, 1].astype(np.uint32) * 75
+                + roi_bgr[:, :, 0].astype(np.uint32) * 15)
+
     def _template_match_native(self,
                              roi_bgr: np.ndarray,
                              p: Dict[str, Any],
                              err1: float = 0.1, err0: float = 0.1,
-                             find_all: bool = True) -> List[Dict[str, Any]]:
+                             find_all: bool = True,
+                             gray: Optional[np.ndarray] = None) -> List[Dict[str, Any]]:
         """
         ft.ahk Native 방식의 템플릿 매칭 (mode=2 Gray Threshold, 픽셀 단위 정확 매칭).
 
@@ -285,8 +301,11 @@ class FindText:
         """
         thr = p.get('color', 127)
         c = (thr + 1) << 7  # ft.ahk: c=(c+1)<<7
-        # ft.ahk: gray = R*38+G*75+B*15 ; BGR 순서이므로 B=0, G=1, R=2
-        gray = roi_bgr[:,:,2].astype(np.uint32)*38 + roi_bgr[:,:,1].astype(np.uint32)*75 + roi_bgr[:,:,0].astype(np.uint32)*15
+        # gray는 패턴과 무관하므로 호출자가 프레임당 한 번 계산해서 넘겨줄 수
+        # 있다(find_text가 그렇게 한다). 직접 호출하는 쪽(svc_monitor의 숫자
+        # 인식)을 위해 없으면 여기서 만든다.
+        if gray is None:
+            gray = self._to_gray(roi_bgr)
         screen_bin = (gray < c).astype(np.float32)
 
         pattern_bin = (p['bitmap'] > 0).astype(np.float32)

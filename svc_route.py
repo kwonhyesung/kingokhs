@@ -246,6 +246,7 @@ class RouteSvc(threading.Thread):
         self._walls = WallMemory(_MAPS_JSON_PATH)
         self._last_walked_cell = None
         self._last_pickup_blocked_by_follow_log_time = 0.0
+        self._last_combat_busy_block_log_time = 0.0
         # 순찰 포인트 도달 실패 감시
         self._patrol_point_idx_seen = None
         self._patrol_point_started_at = 0.0
@@ -1648,13 +1649,22 @@ class RouteSvc(threading.Thread):
         # caused by one of those looked identical in the log to "not moving
         # for no reason". Route all of them through the same 1s-throttled
         # line so a live stall is diagnosable from the log alone.
-        if not bool(getattr(self, "_portal_follow_active", False)):
-            return
+        #
+        # 예전엔 portal_follow_active일 때만 찍었다. 그래서 사냥 이동이 이
+        # 게이트(특히 target_locked로 인한 is_in_combat)에 막히면 로그에
+        # 단서가 전혀 안 남았고, 그 하나 때문에 원인 추적이 세 커밋을
+        # 잡아먹었다(64e5fbb 커밋 메시지 참고). 어느 상황이든 찍는다.
         now = time.time()
         if now - float(getattr(self, "_last_portal_move_block_log_time", 0.0) or 0.0) < 1.0:
             return
         self._last_portal_move_block_log_time = now
-        print(f"[NavBlock] portal-follow movement withheld: {reason}")
+        portal = bool(getattr(self, "_portal_follow_active", False))
+        where = "portal-follow" if portal else "movement"
+        extra = ""
+        if reason == "is_in_combat":
+            extra = (f" (target_locked={bool(getattr(self.state, 'target_locked', False))}"
+                     f" combat_start_time={float(getattr(self.state, 'combat_start_time', 0.0) or 0.0):.0f})")
+        print(f"[NavBlock] {where} withheld: {reason}{extra}")
 
     def _move_toward(self, tx: int, ty: int) -> bool:
         """Move one step toward a world target, avoiding walls / monsters / users."""
@@ -2156,6 +2166,17 @@ class RouteSvc(threading.Thread):
 
             # ?? 0?쒖쐞: ?꾪닾 以??대룞 ?뺤? (is_combat_busy ?뚮옒洹?媛먯떆) ??
             if in_combat or support_input_blocked:
+                # 이 continue는 아래 사냥 이동(item_pickup_target)까지 통째로
+                # 건너뛰는데 지금까지 로그가 한 줄도 안 나갔다 - 격수가 안
+                # 움직일 때 여기서 막힌 건지조차 알 수가 없었다(1초 제한).
+                if getattr(self.state, "item_pickup_target", None):
+                    now_blk = time.time()
+                    if now_blk - self._last_combat_busy_block_log_time >= 1.0:
+                        self._last_combat_busy_block_log_time = now_blk
+                        print(f"[NavBlock] 사냥 이동 목표 "
+                              f"{self.state.item_pickup_target} 보류: "
+                              f"is_combat_busy={in_combat} "
+                              f"support_input_blocked={support_input_blocked}")
                 humanized_sleep(TIMING_CONFIG["nav_loop"])
                 continue
 

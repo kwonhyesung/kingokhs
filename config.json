@@ -249,6 +249,10 @@
   "stationary_gap_sec": 0.25,
   "wall_confirm_hits": 3,
   "inventory_full_pattern": "가득",
-  "target_miss_grace_sec": 4.0
+  "target_miss_grace_sec": 4.0,
+  "monsters_by_map": {
+   "흉가": ["처녀귀신", "달걀", "불귀신"],
+   "도삭산": ["갈산신"]
+  }
  }
 }

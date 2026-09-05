@@ -117,7 +117,8 @@ class PatternMatcher:
                 _monitor_log(f"[Error] findtext_patterns.json 로드 실패: {e}")
 
     def find_text_scan(self, play_area_rgb: np.ndarray, category: str, ent_type: str,
-                        err1: float = 0.10, err0: float = 0.10) -> list[dict]:
+                        err1: float = 0.10, err0: float = 0.10,
+                        only_names: set | None = None) -> list[dict]:
         """findtext_patterns.json의 category(map/item/monster/party/magic)에 저장된
         패턴을 전부 '|'로 결합해 한 번에 스캔한다. 각 패턴에 이미 박혀있는
         <comment>가 그대로 엔티티 이름(id)이 된다 (ft.py 저장 시 comment=이름
@@ -131,6 +132,14 @@ class PatternMatcher:
         patterns = self.findtext_patterns.get(category, {})
         if not patterns:
             return []
+        if only_names is not None:
+            # 패턴 이름은 '처녀귀신_left'처럼 <몬스터>_<방향> 형태다.
+            # only_names에는 방향 없는 이름('처녀귀신')만 들어온다.
+            patterns = {n: v for n, v in patterns.items()
+                        if n in only_names
+                        or n.rsplit("_", 1)[0] in only_names}
+            if not patterns:
+                return []
         combined = "".join(patterns.values())
         # find_text()/findtext_wrapper는 BGR을 가정한다(ft.py도 mss가 준 BGR을
         # 그대로 넘긴다 - gray=R*38+G*75+B*15 계산 자체가 채널0=B를 전제).

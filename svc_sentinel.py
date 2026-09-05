@@ -31,11 +31,64 @@ class SentinelThread(threading.Thread):
         self._monster_history = {}  # {"x_y": [frame_count, last_seen_time]}
         self._char_pattern_lost_since = 0.0
         self._last_slow_cycle_log_time = 0.0
+        self._cfg_cache = (None, 0.0)
+        self._last_no_monster_scan_log = 0.0
         # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (매 프레임 스팸 방지)
         self._last_announced_item_names = set()
         self._last_announced_monster_names = set()
         self._last_announced_party_names = set()
         self._debounce_frames = 3  # 연속 감지 필요 프레임 수
+
+    def _cfg(self) -> dict:
+        """config.json (5초 캐시). 예전엔 매 사이클 디스크에서 json.load 했다 -
+        30fps를 목표로 도는 루프에서 초당 30번 파일을 여는 짓이라, 설정 반영이
+        최대 5초 늦어지는 대가로 없앤다."""
+        cfg, loaded_at = self._cfg_cache
+        now = time.time()
+        if cfg is not None and now - loaded_at < 5.0:
+            return cfg
+        try:
+            with open(self.config_file, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+        self._cfg_cache = (cfg, now)
+        return cfg
+
+    def _monsters_for_map(self, cfg: dict, map_name: str) -> set | None:
+        """이 맵에서 찾을 몬스터 이름들 (config.json hunt.monsters_by_map).
+
+        키는 맵 이름의 앞부분으로 맞춘다 - '흉가' 하나로 흉가1/흉가2가 다
+        걸리고, 층이 30개인 도삭산도 한 줄로 끝난다.
+
+        반환값 세 가지를 구분한다:
+          None      설정 자체가 없다(구버전 config) -> 예전처럼 전부 스캔.
+                    이걸 빈 set과 같이 취급하면, 설정을 아직 안 넣은 PC에서
+                    모든 맵의 몬스터가 통째로 안 잡힌다(조용한 전면 중단).
+          빈 set    설정은 있는데 이 맵이 목록에 없다 -> 스캔하지 않는다.
+          이름들    그 몬스터만 스캔한다.
+        """
+        table = (cfg.get("hunt", {}) or {}).get("monsters_by_map", {}) or {}
+        if not table:
+            return None
+        for prefix, names in table.items():
+            if map_name.startswith(str(prefix)):
+                return {str(n) for n in (names or [])}
+        return set()
+
+    def _log_no_monster_scan(self, map_name: str):
+        """몬스터를 안 찾기로 한 이유를 남긴다(1초 제한). 이게 없으면 '몬스터를
+        못 찾는' 진짜 버그와 '안 찾기로 한 맵'이 로그에서 똑같이 보인다."""
+        now = time.time()
+        if now - self._last_no_monster_scan_log < 1.0:
+            return
+        self._last_no_monster_scan_log = now
+        if not map_name or map_name == "기본맵":
+            # 맵 이름을 아직 한 번도 못 읽은 상태. '몬스터가 없는 맵'이 아니라
+            # '모르는 상태'라서 조용히 넘기면 안 된다.
+            print("[Hunt] 맵 미확정(기본맵) - 몬스터 스캔 대기")
+        else:
+            print(f"[Hunt] '{map_name}'는 hunt.monsters_by_map에 없음 - 몬스터 스캔 안 함")
 
     @staticmethod
     def _crop_around(image, center, radius_px):
@@ -86,19 +139,12 @@ class SentinelThread(threading.Thread):
             if play_area_rgb is None or play_area_rgb.size == 0:
                 continue
 
-            # config.json에서 grid_size/반경/내 캐릭터 이름 설정 읽기
-            try:
-                with open(self.config_file, 'r', encoding='utf-8') as _cfg_f:
-                    _pa_cfg = json.load(_cfg_f).get("play_area", {})
-                    grid_pixel_size = float(_pa_cfg.get("grid_size", 48.2))
-                    item_radius_tiles = float(_pa_cfg.get("item_radius_tiles", 5))
-                    monster_radius_tiles = float(_pa_cfg.get("monster_radius_tiles", 12))
-                    self_pattern_name = str(_pa_cfg.get("self_pattern_name", "") or "")
-            except Exception:
-                grid_pixel_size = 48.2
-                item_radius_tiles = 5
-                monster_radius_tiles = 12
-                self_pattern_name = ""
+            # config.json에서 grid_size/내 캐릭터 이름 설정 읽기 (5초 캐시)
+            cfg = self._cfg()
+            _pa_cfg = cfg.get("play_area", {}) or {}
+            grid_pixel_size = float(_pa_cfg.get("grid_size", 48.2) or 48.2)
+            self_pattern_name = str(_pa_cfg.get("self_pattern_name", "") or "")
+            map_name = str(getattr(self.state, "current_map", "") or "")
 
             # 내 캐릭터 위치: 새로 캡처할 필요 없이, party 카테고리에 이미 저장된
             # 내 캐릭터 이름의 방향별 패턴(예: 점프_left/right/back/top - 다른
@@ -143,11 +189,23 @@ class SentinelThread(threading.Thread):
             # 타임슬라이스를 뺏어, follow 이동 입력이 밀려서 "Stuck" 감지가
             # 실측 세션당 1회 -> 6~12회로 급증했다 (스캔속도 1.55배 향상보다
             # 이동 안정성이 훨씬 중요해서 되돌림).
-            scan_results = (
-                self._offset_results(
-                    self.matcher.find_text_scan(monster_crop, category="monster", ent_type="MONSTER"),
+            # 이 맵에 안 나오는 몬스터는 찾지 않는다 - 패턴 15개를 전부 훑으면
+            # 흉가에서 안 나오는 갈산신 4방향까지 매 프레임 상관연산을 돌린다.
+            # None = 설정 없음(전부 스캔), 빈 set = 이 맵은 스캔 안 함
+            monster_names = self._monsters_for_map(cfg, map_name)
+            if monster_names is None or monster_names:
+                monster_hits = self._offset_results(
+                    self.matcher.find_text_scan(monster_crop, category="monster",
+                                                ent_type="MONSTER",
+                                                only_names=monster_names),
                     monster_ox, monster_oy,
                 )
+            else:
+                monster_hits = []
+                self._log_no_monster_scan(map_name)
+
+            scan_results = (
+                monster_hits
                 + self._offset_results(
                     self.matcher.find_text_scan(item_crop, category="item", ent_type="ITEM"),
                     item_ox, item_oy,
@@ -361,6 +419,6 @@ class SentinelThread(threading.Thread):
             # 속도가 30fps 설계와 크게 어긋나는 사례가 나와서, 정확히 한
             # 사이클(스캔+매칭 전체)이 몇 ms 걸리는지 직접 찍는다(1초 제한).
             cycle_ms = (time.time() - now) * 1000.0
-            if cycle_ms > 150.0 and time.time() - self._last_slow_cycle_log_time >= 1.0:
+            if cycle_ms > 50.0 and time.time() - self._last_slow_cycle_log_time >= 1.0:
                 self._last_slow_cycle_log_time = time.time()
                 print(f"[SentinelPerf] 사이클 {cycle_ms:.0f}ms (30fps 목표=33ms)")
