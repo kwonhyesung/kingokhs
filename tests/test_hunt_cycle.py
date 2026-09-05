@@ -67,6 +67,7 @@ def make_logic(**state_kwargs):
     logic._hunt_sticky_last_seen = 0.0
     logic._hunt_target_since = 0.0
     logic._hunt_giveup_until = {}
+    logic._item_giveup_until = {}
     logic._item_job = None
     logic._last_hunt_log_time = 0.0
     logic._warrior_next_attack_at = 0.0
@@ -175,6 +176,31 @@ def test_pickup_retries_on_neighbour_when_item_still_there():
     assert keys == [",", "0"]
     assert state.item_pickup_target == (12, 11)     # 옆칸으로 재시도
     assert logic._item_job["tries"] == 1
+
+
+def test_failed_pickup_spot_is_ignored_for_a_while():
+    """줍기를 포기한 좌표를 곧바로 다시 잡으면, 패턴 오탐일 때 '사라졌다'를
+    성공으로 기록하며 영원히 맴돈다. 실측에서 그 가짜 '줍기 완료'가 찍혔다."""
+    logic, state, keys = make_logic(
+        detected_items_world=[{"name": "진호박", "world": (12, 10)}],
+        last_move_time=time.time() - 1.0)
+    logic._run_warrior_attack_loot_cycle()
+    # 몇 번을 눌러도 아이템이 그대로 = 못 줍는 자리
+    # (재시도할 때마다 옆칸으로 다시 걸어가므로 도착을 매번 세워준다)
+    for _ in range(4):
+        state.item_pickup_arrived = True
+        logic._run_warrior_attack_loot_cycle()
+    assert logic._item_job is None                       # 포기했고
+    assert logic._item_giveup_until                      # 그 자리를 기억한다
+
+    state.item_pickup_target = None
+    logic._run_warrior_attack_loot_cycle()
+    assert state.item_pickup_target is None, "포기한 자리를 곧바로 다시 잡았다"
+
+    # 무시 시간이 지나면 다시 시도한다
+    logic._item_giveup_until = {k: 0.0 for k in logic._item_giveup_until}
+    logic._run_warrior_attack_loot_cycle()
+    assert state.item_pickup_target == (12, 10)
 
 
 def test_char_pattern_lost_stops_hunt_judgement():

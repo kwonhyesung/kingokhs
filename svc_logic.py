@@ -152,6 +152,7 @@ class LogicSvc(threading.Thread):
         self._hunt_sticky_last_seen = 0.0  # 마지막으로 실제 본 시각 (소멸 유예용)
         self._hunt_target_since = 0.0
         self._hunt_giveup_until = {}      # pos -> 이 시각까지 무시
+        self._item_giveup_until = {}      # 줍기 실패한 아이템 좌표 -> 무시 만료
         self._item_job = None             # {"pos":(x,y), "tries":int, "name":str}
         self._last_hunt_log_time = 0.0
         self._red_tab_confirm_required_hits = 2
@@ -4079,6 +4080,14 @@ class LogicSvc(threading.Thread):
                 print("[Hunt] 소지품이 가득 - 줍기 건너뜀 (사냥은 계속)")
                 self._last_hunt_log_time = time.time()
             return
+        now_i = time.time()
+        self._item_giveup_until = {k: v for k, v in self._item_giveup_until.items() if v > now_i}
+        if self._item_giveup_until:
+            items = [i for i in items
+                     if not any(hunt.chebyshev(i.get("world") or (0, 0), k) <= 1
+                                for k in self._item_giveup_until)]
+            if not items:
+                return
         item = min(items, key=lambda i: hunt.chebyshev(me, i.get("world") or (0, 0)))
         pos = (int(item["world"][0]), int(item["world"][1]))
         # 아이템 칸에 직접 올라서서 ',' 로 줍는다. '0' 획득 마법(바라보는 방향
@@ -4136,9 +4145,14 @@ class LogicSvc(threading.Thread):
                  if i.get("world") and hunt.chebyshev(i["world"], job["pos"]) <= 1]
         if not still or job["tries"] >= int(cfg.get("pickup_retry", 3)):
             if still:
-                print(f"[Hunt] 줍기 실패 {job['tries']}회 -> 포기: {job['pos']}")
+                # 포기한 좌표를 30초간 무시한다. 예전엔 바로 다음 사이클에
+                # 같은 칸을 또 목표로 잡았고, 그게 패턴 오탐이면 아이템이
+                # '사라져' 보여서 아래 '줍기 완료'로 기록됐다 - 실제로는
+                # 아무것도 안 주웠는데 로그만 성공이라 원인 추적이 막혔다.
+                print(f"[Hunt] 줍기 실패 {job['tries']}회 -> 포기: {job['pos']} (30초 무시)")
+                self._item_giveup_until[job["pos"]] = time.time() + 30.0
             else:
-                print(f"[Hunt] 줍기 완료: {job.get('name','')}")
+                print(f"[Hunt] 줍기 완료: {job.get('name','')} @ {job['pos']}")
             self._item_job = None
             return
         nxt = (int(still[0]["world"][0]), int(still[0]["world"][1]))
