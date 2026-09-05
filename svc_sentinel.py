@@ -407,21 +407,21 @@ class SentinelThread(threading.Thread):
                     e["world_pos"] = (wx, wy)
                     detected_entities.append(e)
 
-            # 게임창 오버레이 점(0.5초). 로그의 숫자만 보면 "기준점이 어긋난
-            # 것"과 "몬스터 좌표 변환이 틀린 것"을 구분할 수 없다 - 초록점이
-            # 캐릭터 위에 오는지, 빨간점이 몬스터 위에 오는지를 눈으로 보면
-            # 한 화면에서 갈린다. 초록점은 봇이 '클릭할' 지점(패턴 중심 +
-            # click_offset_y)에 찍는다 - 그래야 그 숫자를 보고 맞출 수 있다.
-            # 초록이 아니라 마젠타인 이유: 게임이 이미 파티원 머리 위에 초록
-            # 표시를 쓴다. 같은 색이면 '봇이 찍은 점'과 '게임이 그린 표시'가
-            # 섞여서, 정작 맞추려는 오프셋을 못 본다.
+            # 게임창 오버레이 점(0.5초). 로그 숫자만으로는 "기준점이 어긋난
+            # 것"과 "몬스터 좌표 변환이 틀린 것"을 구분할 수 없다 - 눈으로 보면
+            # 한 화면에서 갈린다.
+            #   마젠타 = 봇이 클릭할 지점 (이름표 + click_offset_y). 이 점이
+            #            캐릭터 위에 오도록 config 숫자만 맞추면 된다.
+            #   빨강   = 감지된 몬스터.
+            # 초록을 안 쓰는 이유: 게임이 이미 파티원 머리 위에 초록 표시를
+            # 쓴다. 같은 색이면 봇이 찍은 점과 게임이 그린 표시가 섞인다.
             pa_sx, pa_sy = int(_pa_cfg.get("sx", 0) or 0), int(_pa_cfg.get("sy", 0) or 0)
             marks = [{"x": m.get("cx", 0) + pa_sx, "y": m.get("cy", 0) + pa_sy,
                       "color": "red", "size": 12, "expiry": now + 0.5} for m in monsters]
-            if my_screen_pos != (0, 0):
-                marks.append({"x": my_screen_pos[0] + pa_sx,
-                              "y": my_screen_pos[1] + pa_sy + int(_pa_cfg.get("click_offset_y", 25) or 25),
-                              "color": "magenta", "size": 12, "expiry": now + 0.5})
+            off_y = int(_pa_cfg.get("click_offset_y", 26) or 26)
+            marks += [{"x": h.get("cx", 0) + pa_sx, "y": h.get("cy", 0) + pa_sy + off_y,
+                       "color": "magenta", "size": 12, "expiry": now + 0.5}
+                      for h in party_hits if str(h.get("name", "")).endswith("_name")]
             if marks:
                 with self.state._lock:
                     self.state.visual_markers.extend(marks)

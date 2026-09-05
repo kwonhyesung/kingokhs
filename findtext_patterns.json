@@ -37,7 +37,6 @@
     "도삭산_2": "|<도삭산_2>*233$9.UNtzbwzbwzbxzDvyTbtyTbw"
   },
   "party": {
-    "점프": "|<점프>*133$28.0Azzzjnw0CzDxvtkzrj7nzSxjDxvDAzrjzzw0Dzzzzk0zzzTnzzxzD00rwzzy",
     "점프_user": "|<점프_user>*53$41.zz70001zyC1zzwC0Q3zzsQ0s0M60s1k0kA1szU1UM7kz030kBkC061UlkQ0A37Vss0M6A1lk1kAE03UDzz0000Tzy0000000Tzw0000k0s0001U1k000303UTzz6071zzyA0C0000Tzw0004",
     "졈프_user": "|<졈프_user>*24$41.zz300003U60zzw63w061UC7s0A30Q0k0M61s1U0kA3Mz01UMAty030kksA061b0MM0A3A00k3wTU0007zz00000007zy0000A0A0000M0M0000k0k0001U1UTzz303000066S0002",
     "점프_stat": "|<점프_stat>*99$38.zwA3iTkk30zzwA0k1UM30A0M61sz061US0k1UMAkA0M6663061XUsk1UMU4A0QDk000zzw000000Dzw0003U30000k0k000A0ADzzn033zzwk0k000Dzw0008",
@@ -45,7 +44,9 @@
     "점프_back": "|<점프_back>*112$12.U0U0zzzzs3s3U0U0U0U",
     "점프_left": "|<점프_left>*151$15.Azs0w07U0k0600D01s0z0Ts3zzU7w0z07s0w07U0w07U0w01U0A01U0A01U0A00000000000000000000000000000001U0A04",
     "점프_top": "|<점프_top>*207$36.y0000My1zw0My1zw0My603bwU",
-    "점프_right": "|<점프_right>*139$29.zzw07zzs1nzzk3Vzzzz8"
+    "점프_right": "|<점프_right>*139$29.zzw07zzs1nzzk3Vzzzz8",
+    "졈프_name": "|<졈프_name>*228$29.0Qzzy0Nw03i3zSzDbyxwTDxvmETvrCQzriztw07zzzzy07zzxzDzzvyS00U",
+    "점프_name": "|<점프_name>*173$28.0Azzzbns0CzDxvtkzrj7nzSxDDxvDAzrhzns0Dzzzzk0zzzTnzzxzD00U"
   },
   "magic": {
     "금강불체": "|<금강불체>*28$72.00TU7bwTlzrvzyTz7bw01zXvzyTzbbwzty0PzyTzbXwTty0vzyTzDVw01znvzyTyDbzzzznvzwTwTbzzzzX3007szbk00TX3zzzXzbzszzXvzzzjzbzwzz1vzzzzzzw01zAv00Ty0Ty01yQP7wTszDzztwyPDyTtzby01zzvDyTtzbw03zzvDyTtzbwzzzzvU"

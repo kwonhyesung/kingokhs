@@ -2439,7 +2439,15 @@ class LogicSvc(threading.Thread):
             time.sleep(0.02 if self._ntab_in_progress else 0.03)
         return "no_match"
 
-    _WARRIOR_MARKER_PATTERNS = ("점프_back", "점프_top", "점프_left", "점프_right")
+    # 이름표(격수 캐릭터 머리 위, 항상 떠 있음). 스프라이트(점프_back/top/
+    # left/right)로 찾다가 이름표로 바꿨다 - 이유 둘:
+    #   1. 스프라이트는 방향별로 크기가 제각각(폭 12/15/29/36px)이라 '중심에서
+    #      캐릭터까지'의 오프셋이 방향마다 달라진다. 이름표는 방향이 없어서
+    #      숫자 하나로 끝난다.
+    #   2. 몬스터에 둘러싸이면 스프라이트는 이팩트에 묻히는데 이름표는 UI라
+    #      안 묻힌다.
+    # 이름이 곧 신원이라, 파티원 이름표가 옆에 붙어 있어도 구분이 필요 없다.
+    _WARRIOR_NAME_PATTERNS = ("점프_name",)
 
     def _get_config_roi_crop(self, frame, roi_name: str):
         """전체 프레임 대신 config.json의 roi_name 영역만 잘라 반환한다
@@ -2470,12 +2478,13 @@ class LogicSvc(threading.Thread):
     def _click_warrior_marker_and_lock(self) -> bool | None:
         """마우스 직접 클릭 방식(S/W, win32api - 아두이노 하드웨어 신호 아님):
         esc(다른 대상에게 걸려있을 red_tab 비활성화) -> tab(대상박스 활성화)
-        -> 화면에서 격수 캐릭터 자체(방향별로 캡처된
-        점프_back/top/left/right, 마커 아니라 캐릭터 스프라이트 그 자체)를
-        find_text_scan으로 찾아 클릭 -> tab(=_promote_ntab_to_red_tab과
+        -> 화면에서 격수 이름표(점프_name)를 find_text_scan으로 찾아 그
+        아래 click_offset_y(26px)를 클릭 -> tab(=_promote_ntab_to_red_tab과
         같은 역할의 promote/lock, enter 아님)으로 red_tab을 최종 확정한다.
-        클릭으로 이미 어떤 패턴(점프_* = 격수 전용)이 매칭됐는지로 신원이
-        확정되므로 User_info 팝업으로 다시 확인할 필요가 없다.
+        이름표 위치를 그대로 클릭하면 캐릭터가 안 잡힌다 - 실측으로 26px
+        아래여야 잡히고, 더 내려가면 한 칸 아래 대상이 잡힌다.
+        이름이 곧 신원이라(점프_name = 격수 전용) User_info 팝업으로 다시
+        확인할 필요가 없다.
         클릭이 실제로 이 PC의 커서를 옮기는지는 hw.click_pixel() 안에서
         GetCursorPos로 되읽어 [Click] 로그로 남긴다.
         반환값: True/False = 캐릭터를 찾아서 클릭까지 시도함(성공/실패),
@@ -2512,9 +2521,12 @@ class LogicSvc(threading.Thread):
         scan_crop, offset_x, offset_y = self._get_play_area_crop(frame)
         hits = [
             h for h in matcher.find_text_scan(scan_crop, "party", "USER")
-            if str(h.get("name", "")) in self._WARRIOR_MARKER_PATTERNS
+            if str(h.get("name", "")) in self._WARRIOR_NAME_PATTERNS
         ]
         if not hits:
+            # 이름표가 아예 안 보이는 상태. 게임에서 이름 상시 표시가 꺼져
+            # 있으면 이 경로 전체가 죽으므로, 조용히 넘기지 않는다.
+            print("[TargetConfirm] 격수 이름표(점프_name)를 못 찾음 - 게임의 이름 상시 표시 설정 확인")
             return None
         hits.sort(key=lambda h: -float(h.get("score", 0.0) or 0.0))
         best = hits[0]

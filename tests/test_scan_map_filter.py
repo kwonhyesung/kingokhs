@@ -111,6 +111,18 @@ def test_only_names_filters_direction_suffixes():
     assert "갈산신" in captured["combined"]
 
 
+def test_warrior_name_pattern_is_captured():
+    """격수 클릭은 이름표 패턴 하나에 통째로 걸려 있다 - 이 패턴이 없거나
+    이름이 바뀌면 도사가 격수를 영영 못 잡는데, 로그에는 '못 찾음' 한 줄만
+    남아서 원인이 안 보인다."""
+    import json
+    from svc_logic import LogicSvc
+
+    party = json.load(open("findtext_patterns.json", encoding="utf-8"))["party"]
+    for name in LogicSvc._WARRIOR_NAME_PATTERNS:
+        assert name in party, f"{name} 패턴이 findtext_patterns.json에 없다"
+
+
 def test_known_walls_file_covers_the_blocked_row():
     """흉가1의 y=15는 x=1~10이 막혀 있다 - 이걸 미리 알아야 첫 실행부터 돈다."""
     import json
@@ -147,6 +159,7 @@ if __name__ == "__main__":
     test_monsters_for_map_matches_by_prefix()
     test_hunt_maps_json_wins_over_config_json()
     test_only_names_filters_direction_suffixes()
+    test_warrior_name_pattern_is_captured()
     test_known_walls_file_covers_the_blocked_row()
     test_portal_cells_are_not_walked_into()
     print("test_scan_map_filter OK")
