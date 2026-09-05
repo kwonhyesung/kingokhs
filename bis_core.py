@@ -210,15 +210,34 @@ class Region:
         ox, oy = offset
         return (self.sx + ox, self.sy + oy, self.dx + ox, self.dy + oy)
 
+# 브라우저/Electron 창은 게임창이 아니다. 제목만 보면 크롬 탭 제목
+# "• Discord | 사냥 1 | '신화&시' 바람의나라 클래식 - Chrome"이 토큰
+# "바람"에 그대로 걸려서, 봇이 크롬 창을 게임창으로 잡았다(실측 로그).
+# 클래스 이름은 제목과 달리 사용자가 못 바꾸므로 이걸로 거른다.
+NON_GAME_WINDOW_CLASSES = ("Chrome_WidgetWin_", "MozillaWindowClass", "IEFrame")
+
+
 def find_game_window(substring: str) -> Optional[int]:
+    """제목에 substring이 든 보이는 창 중 브라우저가 아닌 첫 창을 돌려준다."""
     found_hwnd = None
+
     def enum_cb(hwnd, _):
         nonlocal found_hwnd
         title = win32gui.GetWindowText(hwnd)
-        if substring in title and win32gui.IsWindowVisible(hwnd):
-            found_hwnd = hwnd
-            return False
-        return True
+        if substring not in title or not win32gui.IsWindowVisible(hwnd):
+            return True
+        try:
+            cls = win32gui.GetClassName(hwnd)
+        except Exception:
+            cls = ""
+        if any(cls.startswith(c) for c in NON_GAME_WINDOW_CLASSES):
+            # 여기서 print를 하면 안 된다. 한글 창 제목이 cp949 콘솔에
+            # 안 실리면 UnicodeEncodeError가 나고, 그게 아래 EnumWindows의
+            # except로 삼켜져서 창 탐색 전체가 조용히 실패한다(실측).
+            return True
+        found_hwnd = hwnd
+        return False
+
     try:
         win32gui.EnumWindows(enum_cb, None)
     except Exception:

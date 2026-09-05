@@ -19,15 +19,7 @@ SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
 OUT_DIR     = os.path.join(SCRIPT_DIR, "templates", "default")
 
-def find_game_window(substring):
-    found = [None]
-    def cb(hwnd, _):
-        if substring in win32gui.GetWindowText(hwnd) and win32gui.IsWindowVisible(hwnd):
-            found[0] = hwnd; return False
-        return True
-    try: win32gui.EnumWindows(cb, None)
-    except: pass
-    return found[0]
+from bis_core import find_game_window  # 창 탐색은 bis_core 한 곳에만 둔다
 
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)

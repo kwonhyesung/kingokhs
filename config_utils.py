@@ -329,21 +329,7 @@ DEFAULT_REGIONS = {
 }
 
 # --- Window Management ---
-def find_game_window(substring: str) -> Optional[int]:
-    found_hwnd = None
-    def enum_cb(hwnd, _):
-        nonlocal found_hwnd
-        title = win32gui.GetWindowText(hwnd)
-        if substring in title and win32gui.IsWindowVisible(hwnd):
-            found_hwnd = hwnd
-            return False # 李얠븯?쇰?濡?以묐떒
-        return True
-    
-    try:
-        win32gui.EnumWindows(enum_cb, None)
-    except Exception:
-        pass
-    return found_hwnd
+from bis_core import find_game_window  # 창 탐색은 bis_core 한 곳에만 둔다
 
 def grab_window_bg(hwnd: int, rect_ignored=None) -> Optional[Image.Image]:
     """Docstring."""
