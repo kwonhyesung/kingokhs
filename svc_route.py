@@ -397,6 +397,18 @@ class RouteSvc(threading.Thread):
         return True
 
     # ----------------------------------------------------------
+    def _forget_neighbours(self, cx: int, cy: int):
+        """지금 칸의 상하좌우 '막힘' 기억을 지운다(맵 학습 벽은 안 건드린다)."""
+        cleared = []
+        for direction in ("up", "down", "left", "right"):
+            cell = _nav_step_from_dir(cx, cy, direction)
+            if self._blocked_cells_until.pop(cell, None) is not None:
+                self._blocked_cell_hits.pop(cell, None)
+                cleared.append(cell)
+        if cleared:
+            print(f"[NavMem] ({cx},{cy}) 사방이 막힘으로 기억됨 - 잘못된 기억으로 보고 "
+                  f"{len(cleared)}칸 해제: {cleared}")
+
     def _forget_blocked_cells_on_map_change(self):
         """맵이 바뀌면 벽 기억을 버린다. 좌표계가 맵마다 달라서, 안 버리면
         새 맵의 멀쩡한 칸이 이전 맵의 벽 때문에 막힌 것으로 취급된다."""
@@ -1848,6 +1860,21 @@ class RouteSvc(threading.Thread):
                     picked_unblocked = True
                     break
             if not picked_unblocked:
+                # 사방이 다 막혔다고 기억하고 있다면 그 기억이 틀렸다 - 지금
+                # 서 있는 칸까지 걸어온 길이 반드시 있다. 실측에서 벽 기억을
+                # 60초로 늘린 뒤 오판(좌표 OCR 지연으로 성공한 이동을 실패로
+                # 셈)까지 오래 남아 이 상태로 갇혔다. 주변 기억만 지우고
+                # 다시 배우게 한다(진짜 벽이면 곧 다시 채워진다).
+                self._forget_neighbours(int(cx), int(cy))
+                blocked_cells_roi = self._get_blocked_cells()
+                for candidate in (primary_dir, secondary_dir, *fallback_dirs):
+                    if candidate is None:
+                        continue
+                    if _nav_step_from_dir(int(cx), int(cy), candidate) not in blocked_cells_roi:
+                        step_dir = candidate
+                        picked_unblocked = True
+                        break
+            if not picked_unblocked:
                 # All 4 neighbor cells are in blocked_cells_roi memory -
                 # step_dir falls back to primary_dir above and this branch
                 # still issues that (possibly-blocked) move below (unlike
@@ -1916,7 +1943,13 @@ class RouteSvc(threading.Thread):
         # 못 푼다 (실측: down 355번 시도해서 13번 성공, y=15로 끝내 못 감).
         # 4방향이 전부 막혀야만 step_dir이 None이 되는데 좌우는 늘 열려
         # 있어서, 우회로 계산이 호출조차 되지 않았다.
-        if not follow_mode and not portal_follow:
+        # follow_mode는 nav_follow_enabled + is_connected 만으로도 켜져서,
+        # 따라갈 대상이 없는 격수까지 follow 분기로 들어간다. 그 분기는 목표
+        # 쪽 방향만 고르고 우회로를 계산하지 않아서 BFS가 영영 호출되지 않았다
+        # (실측: [Nav] 우회 경로 0줄, 대신 all-4-blocked 만 반복). 실제로
+        # 따라갈 상대가 있을 때만 제외한다 - 도사 동작은 그대로다.
+        chasing_someone = self._calc_follow_target() is not None
+        if not chasing_someone and not portal_follow:
             known_blocked = self._get_blocked_cells() | self._known_wall_cells()
             if len(known_blocked) >= 3:
                 detour = hunt.path_step((cx, cy), (tx, ty), known_blocked, radius=24)
