@@ -752,6 +752,48 @@ def main(
                         print("[HWTest] ===== 게임 화면에서 내 캐릭터에 red_tab이 켜졌는지 눈으로 확인하세요 =====")
                         print("[HWTest]   켜졌다  -> PC~ESP32~게임 신호 경로 정상. 원인은 봇 로직.")
                         print("[HWTest]   안 켜졌다 -> 신호가 게임까지 안 닿음. ESP32/USB/키매핑 문제.")
+
+                        # ── 2단계: 이동 명령 두 방식 A/B ──────────────────
+                        # esc/tab/home은 'K,<키>'(단발)로 나가고 실제로 먹혔다.
+                        # 이동은 'D:<키>' + 'U:<키>'(눌렀다 뗌)로만 나가는데,
+                        # 실측에서 캐릭터가 방향조차 안 틀었다. 같은 시리얼,
+                        # 같은 포트, 같은 함수를 쓰므로 남은 차이는 명령 형식
+                        # 뿐이다 - 어느 쪽이 먹히는지 여기서 직접 가른다.
+                        def _pos():
+                            return (int(getattr(state, "x", 0) or 0),
+                                    int(getattr(state, "y", 0) or 0))
+
+                        print("[HWTest] --- 이동 명령 A/B 테스트 (오른쪽으로 이동 시도) ---")
+                        before_a = _pos()
+                        ok_a = hw.send_force("K,right")
+                        time.sleep(1.0)
+                        after_a = _pos()
+                        print(f"[HWTest] [A] 'K,right'(단발)    전송={'성공' if ok_a else '실패'} "
+                              f"{before_a} -> {after_a}  {'움직임' if after_a != before_a else '변화없음'}")
+
+                        before_b = _pos()
+                        ok_b1 = hw.send_force("D:right")
+                        time.sleep(0.12)
+                        ok_b2 = hw.send_force("U:right")
+                        time.sleep(1.0)
+                        after_b = _pos()
+                        print(f"[HWTest] [B] 'D:right'+'U:right'(홀드) 전송={'성공' if (ok_b1 and ok_b2) else '실패'} "
+                              f"{before_b} -> {after_b}  {'움직임' if after_b != before_b else '변화없음'}")
+
+                        moved_a = after_a != before_a
+                        moved_b = after_b != before_b
+                        if moved_a and not moved_b:
+                            print("[HWTest] 판정: K,만 먹힘 -> 펌웨어가 D:/U: 를 처리하지 않음. "
+                                  "이동/공격이 전부 D:/U: 라서 아무것도 안 움직인 것.")
+                        elif moved_b and not moved_a:
+                            print("[HWTest] 판정: D:/U:만 먹힘 (예상과 반대)")
+                        elif moved_a and moved_b:
+                            print("[HWTest] 판정: 둘 다 먹힘 -> 이동 명령 자체는 문제 없음. "
+                                  "원인은 그 위 로직(게이트/타이밍).")
+                        else:
+                            print("[HWTest] 판정: 둘 다 안 먹힘 -> 방향키가 게임에 안 닿음. "
+                                  "(esc/tab/home은 먹혔으므로 방향키 매핑 문제일 가능성)")
+                        print("[HWTest]   * 좌표는 화면 OCR로 읽으므로, 화면에서 실제로 움직였는지도 같이 봐주세요.")
                     except Exception as e:
                         print(f"[HWTest] error: {e}")
 

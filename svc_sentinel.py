@@ -195,11 +195,13 @@ class SentinelThread(threading.Thread):
                 if self_hits:
                     best_self = max(self_hits, key=lambda h: h["score"])
                     my_screen_pos = (best_self["cx"], best_self["cy"])
-                    # 내 캐릭터가 지금 어느 쪽을 보고 있는지(점프_left/right/
-                    # top/back 중 뭐가 잡혔는지). 이동 키를 눌렀는데 좌표가
-                    # 안 변할 때, 캐릭터가 '제자리에서 돌기만 한 것'인지
-                    # '아예 아무 반응이 없는 것'인지를 가르는 유일한 단서다.
-                    self.state.my_facing = str(best_self.get("name", ""))
+                    # 내 캐릭터가 어느 쪽을 보고 있는지. find_text_scan은 모든
+                    # 결과의 score를 1.0으로 고정해서 돌려주므로 best_self
+                    # 하나만 쓰면 '점수가 가장 높은 방향'이 아니라 '먼저 나온
+                    # 것'이 뽑힌다 - 그걸 방향이라고 찍으면 안 바뀌는 것처럼
+                    # 보일 수 있다. 잡힌 방향 패턴을 전부 남긴다.
+                    self.state.my_facing = ",".join(sorted(
+                        h["name"].rsplit("_", 1)[-1] for h in self_hits))
             self.state.my_screen_pos = my_screen_pos
 
             # ponytail: 반경 크롭을 뺐다 - party(전체 play_area 스캔)는 항상
