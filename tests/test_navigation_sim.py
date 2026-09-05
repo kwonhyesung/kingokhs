@@ -115,6 +115,26 @@ def test_gives_up_instead_of_looping_when_sealed():
     assert steps < 80, "길이 없는데 걸음 수를 다 쓸 때까지 맴돌았다"
 
 
+def test_every_movement_path_sees_the_configured_walls():
+    """설정에 적어둔 벽/포탈은 '모든' 이동 판단에 들어가야 한다.
+
+    실측 사고: avoid_cells에 포탈을 적어뒀는데도 열 번 왕복했다. 원인은
+    _get_blocked_cells()가 학습분만 돌려주고 설정분은 BFS 호출부에서만
+    따로 합쳐진 것 - 평소 경로는 포탈을 몰랐다. 경로 계산이 여러 갈래여도
+    막힌 칸 집합은 한 곳에서 나와야 한다.
+    """
+    import svc_route
+
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "svc_route.py"), encoding="utf-8").read()
+    body = src.split("def _get_blocked_cells")[1].split("def ")[0]
+    assert "_known_wall_cells()" in body,         "_get_blocked_cells()가 설정 벽/포탈을 포함하지 않는다"
+
+    # 그리고 그 함수 밖에서 따로 합치는 곳이 남아 있으면 안 된다(빠뜨리기 쉽다)
+    others = src.count("_known_wall_cells()")
+    assert others == 1, f"_known_wall_cells()를 {others}곳에서 쓴다 - 한 곳으로 모을 것"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

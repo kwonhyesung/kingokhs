@@ -430,8 +430,13 @@ class RouteSvc(threading.Thread):
             self._blocked_cell_hits.pop(cell, None)
 
     def _get_blocked_cells(self) -> set[tuple[int, int]]:
+        """지나갈 수 없는 칸 전부. 학습한 것 + 설정에 적어둔 것(벽/포탈).
+
+        예전엔 학습분만 돌려줬고, 설정에 적어둔 벽/포탈은 BFS를 부를 때만
+        따로 합쳤다. 그래서 평소 이동 경로는 포탈을 몰랐고, 실측에서 흉가1과
+        천안궁성흉가입구 사이를 열 번 왕복했다 - avoid_cells에 적어두고도."""
         self._prune_blocked_cells()
-        return set(self._blocked_cells_until.keys())
+        return set(self._blocked_cells_until.keys()) | self._known_wall_cells()
 
     def _learning_map_name(self) -> str:
         """벽 학습에 쓸 맵 이름. '방금 확실히 읽은' 경우에만 돌려준다.
@@ -1952,7 +1957,7 @@ class RouteSvc(threading.Thread):
         # 따라갈 상대가 있을 때만 제외한다 - 도사 동작은 그대로다.
         chasing_someone = self._calc_follow_target() is not None
         if not chasing_someone and not portal_follow:
-            known_blocked = self._get_blocked_cells() | self._known_wall_cells()
+            known_blocked = self._get_blocked_cells()
             if len(known_blocked) >= 3:
                 detour = hunt.path_step((cx, cy), (tx, ty), known_blocked, radius=24)
                 if detour and detour != step_dir:
@@ -1968,8 +1973,7 @@ class RouteSvc(threading.Thread):
         if step_dir is None:
             # greedy도 BFS도 길을 못 찾았다.
             detour = hunt.path_step((cx, cy), (tx, ty),
-                                    self._get_blocked_cells() | self._known_wall_cells(),
-                                    radius=24)
+                                    self._get_blocked_cells(), radius=24)
             if detour:
                 print(f"[Nav] 우회 경로: {detour} (({cx},{cy}) -> ({tx},{ty}))")
                 step_dir = detour
