@@ -22,6 +22,7 @@ from bis_core import (
     hw, GameState, TIMING_CONFIG, humanized_sleep, GridManager, discord_notify,
 )
 from patrol_routes import parse_route_point
+import svc_hunt as hunt
 from svc_hunt import WallMemory
 _MAPS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "maps.json")
 _CONFIG_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
@@ -462,6 +463,14 @@ class RouteSvc(threading.Thread):
             except Exception:
                 pass
         self._walls.save()
+
+    def _known_wall_cells(self) -> set:
+        """이 맵에서 학습된 영구 벽. BFS가 우회로를 찾을 때 쓴다."""
+        try:
+            walls = (self.state.maps_db.get(self._learning_map_name()) or {}).get("walls") or []
+            return {(int(c[0]), int(c[1])) for c in walls}
+        except Exception:
+            return set()
 
     def _remember_blocked_cell(self, gx: int, gy: int, reason: str = "stuck"):
         self._prune_blocked_cells()
@@ -1846,6 +1855,16 @@ class RouteSvc(threading.Thread):
         elif step_dir is not None:
             self._follow_blocked_memory_count = 0
 
+        if step_dir is None:
+            # 한 칸 앞만 보는 선택(greedy)이 막혔다. 목표까지 벽을 돌아가는
+            # 경로가 있는지 BFS로 본다 - 실측에서 격수가 y=14에 갇혔는데,
+            # 아래로 내려가는 통로가 x축으로 몇 칸 떨어져 있어서 "아래로"만
+            # 고르는 방식으로는 원리적으로 못 가는 배치였다.
+            detour = hunt.path_step((cx, cy), (tx, ty),
+                                    self._get_blocked_cells() | self._known_wall_cells())
+            if detour:
+                print(f"[Nav] 우회 경로: {detour} (({cx},{cy}) -> ({tx},{ty}))")
+                step_dir = detour
         if step_dir is None:
             if blockers:
                 print(f"[Nav] blocked: {','.join(blockers)}")

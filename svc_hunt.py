@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import deque
 
 _DIRS = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 
@@ -47,6 +48,55 @@ def approach_cell(my_pos, target_pos, walls=()):
         return None
     return min(cands, key=lambda c: (chebyshev(my_pos, c),
                                      abs(c[0] - my_pos[0]) + abs(c[1] - my_pos[1])))
+
+
+_STEPS = (("up", 0, -1), ("down", 0, 1), ("left", -1, 0), ("right", 1, 0))
+
+
+def path_step(start, goal, blocked, radius: int = 12) -> str | None:
+    """start에서 goal로 가는 첫 걸음의 방향. 길이 없으면 None.
+
+    목표 쪽으로 한 칸씩 가는 방식(greedy)은 벽을 못 돈다 - 실측에서 격수가
+    y=14에 갇혔다. 아래로 내려가는 통로가 x축으로 몇 칸 떨어져 있는데, 매
+    사이클 "아래로" 를 고르니 원리적으로 영원히 못 간다. 폭이 좁은 격자라
+    BFS면 충분하고 A*까지 갈 이유가 없다.
+
+    radius: start 기준 이 칸수 밖은 탐색하지 않는다(맵 경계를 모르므로
+            무한히 퍼지는 것만 막는다).
+    """
+    start = (int(start[0]), int(start[1]))
+    goal = (int(goal[0]), int(goal[1]))
+    if start == goal:
+        return None
+    blocked = {(int(c[0]), int(c[1])) for c in (blocked or ())}
+    if goal in blocked:
+        return None
+
+    # 각 칸에 '거기 도달하려면 처음에 어느 쪽으로 갔어야 하나'를 같이 들고 다닌다.
+    seen = {start}
+    q = deque()
+    for name, dx, dy in _STEPS:
+        nxt = (start[0] + dx, start[1] + dy)
+        if nxt in blocked or nxt[0] < 0 or nxt[1] < 0:
+            continue
+        if nxt == goal:
+            return name
+        seen.add(nxt)
+        q.append((nxt, name))
+
+    while q:
+        (cx, cy), first = q.popleft()
+        for _, dx, dy in _STEPS:
+            nxt = (cx + dx, cy + dy)
+            if nxt in seen or nxt in blocked or nxt[0] < 0 or nxt[1] < 0:
+                continue
+            if abs(nxt[0] - start[0]) + abs(nxt[1] - start[1]) > radius:
+                continue
+            if nxt == goal:
+                return first
+            seen.add(nxt)
+            q.append((nxt, first))
+    return None
 
 
 def pick_target(monsters, my_pos, anchor, leash, sticky=None, sticky_name=None,
@@ -226,6 +276,24 @@ def demo():
     assert approach_cell((0, 5), (5, 5), walls=[(4, 5)]) in {(5, 4), (5, 6)}
     assert approach_cell((0, 5), (5, 5),
                          walls=[(4, 5), (5, 4), (5, 6), (6, 5)]) is None
+
+    # 경로: 벽을 돌아서 간다 (greedy로는 못 푸는 배치)
+    #   . . . .        (0,0)에서 (0,2)로 갈 때 (0,1)이 벽이면
+    #   # # . .        오른쪽으로 돌아가야 한다 - "아래로"만 고르면 영원히 못 간다.
+    #   . . . .
+    assert path_step((0, 0), (0, 2), blocked=[(0, 1), (1, 1)]) == "right"
+    assert path_step((0, 0), (2, 0), blocked=[]) == "right"
+    assert path_step((0, 0), (0, 0), blocked=[]) is None
+    assert path_step((0, 0), (5, 5), blocked=[(5, 5)]) is None      # 목표가 벽
+    # 사방이 막히면 길 없음
+    assert path_step((3, 3), (9, 9),
+                     blocked=[(2, 3), (4, 3), (3, 2), (3, 4)]) is None
+    # 벽이 탐색 반경 전체를 가로막으면 길 없음 (radius 밖은 안 본다)
+    wall = [(x, 1) for x in range(0, 20)]
+    assert path_step((5, 0), (5, 2), blocked=wall) is None
+    # 같은 벽이라도 끝이 뚫려 있으면 돌아서 간다
+    gap = [(x, 1) for x in range(0, 20) if x != 9]
+    assert path_step((5, 0), (5, 2), blocked=gap) == "right"
 
     # 타겟 선택: 가까운 놈, leash 밖은 무시, sticky는 유지
     mons = [{"name": "달걀", "world": (3, 0)}, {"name": "불귀신", "world": (1, 0)}]
