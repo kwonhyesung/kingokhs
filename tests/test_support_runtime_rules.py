@@ -11,6 +11,7 @@ from support_runtime_rules import (
     adjust_follow_target_by_axis_gap,
     build_f5_hon_sequence,
     confirm_support_lock_by_hp_gain,
+    should_retarget_support_lock_by_hp_gain,
     dir_between_coords,
     infer_dir_from_trail,
     is_confirmed_zero_hp_state,
@@ -620,3 +621,27 @@ def test_support_lock_requires_hp_gain_after_heal():
     assert confirm_support_lock_by_hp_gain(100000, 105000) is True
     assert confirm_support_lock_by_hp_gain(100000, 100000) is False
     assert confirm_support_lock_by_hp_gain(100000, 95000) is False
+
+
+def test_support_lock_retarget_waits_for_half_second_hp_gain_window():
+    assert should_retarget_support_lock_by_hp_gain(
+        baseline_hp=100000,
+        latest_hp=100000,
+        elapsed_sec=0.49,
+        required_gain=30000,
+        window_sec=0.50,
+    ) is False
+    assert should_retarget_support_lock_by_hp_gain(
+        baseline_hp=100000,
+        latest_hp=129999,
+        elapsed_sec=0.50,
+        required_gain=30000,
+        window_sec=0.50,
+    ) is True
+    assert should_retarget_support_lock_by_hp_gain(
+        baseline_hp=100000,
+        latest_hp=130000,
+        elapsed_sec=0.50,
+        required_gain=30000,
+        window_sec=0.50,
+    ) is False

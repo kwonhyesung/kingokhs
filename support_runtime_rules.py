@@ -448,6 +448,18 @@ def confirm_support_lock_by_hp_gain(before_hp: int, after_hp: int) -> bool:
     return int(after_hp) > int(before_hp)
 
 
+def should_retarget_support_lock_by_hp_gain(
+    baseline_hp: int,
+    latest_hp: int,
+    elapsed_sec: float,
+    required_gain: int = 30000,
+    window_sec: float = 0.50,
+) -> bool:
+    if float(elapsed_sec) < float(window_sec):
+        return False
+    return (int(latest_hp) - int(baseline_hp)) < int(required_gain)
+
+
 def next_zero_hp_count(previous_count: int, current_hp: int) -> int:
     current_hp = int(current_hp)
     if current_hp <= 0:

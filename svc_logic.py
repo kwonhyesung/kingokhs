@@ -68,6 +68,7 @@ from support_runtime_rules import (
     should_prioritize_self_mp,
     should_prioritize_self_mp_over_party_heal,
     should_prioritize_follow_distance,
+    should_retarget_support_lock_by_hp_gain,
     should_trigger_self_hp_emergency,
     speed_up_delay,
     support_retarget_block_duration,
@@ -236,20 +237,11 @@ class LogicSvc(threading.Thread):
         self._direct_heal_prepare_requested = False
         self._party_direct_heal_fail_count = 0
         self._party_direct_heal_fail_cap = 2
-        self._party_heal_stagnant_streak = 0
-        # 몬스터 종류가 너무 많아 이름표 이미지로 "몬스터를 잡았는지"를 다
-        # 걸러낼 수 없다 - 결국 격수가 직접 보고하는 실제 HP가 오르는지가
-        # 유일한 범용 증거다. 데미지 한 틱 정도로 안 오르는 건 봐주되,
-        # 이 이상 연속으로 안 오르면 바로 재확인한다.
-        # 2(≈0.4초)는 몬스터를 잘못 잡았을 때 오래 붙잡지 않으려고 낮춘
-        # 값이었는데, 그건 이제 _is_monster_target_selected()가 캐스트마다
-        # 별도로 잡아낸다(_recover_party_hp 초입) - 여기 남은 역할은 순수히
-        # "텔레메트리가 그냥 느려서 안 오른 것처럼 보이는" 오탐만 거르는
-        # 것뿐이다. 실측 로그: 실제 HP값은 약 2~3초에 한 번씩만 갱신되는데
-        # 힐은 0.15~0.2초마다 나가서, 2캐스트(~0.4초) 안에는 거의 항상
-        # "안 오른 것처럼" 보여 매번 불필요하게 재확인을 강제하고 있었다.
-        # 관측된 갱신 주기보다 확실히 긴 여유를 두고 15(~3초)로 올린다.
-        self._party_heal_stagnant_cap = 15
+        # redtab 재확인은 "힐 후 0.5초 동안 격수 HP 순증가가 3만 미만"일 때만 한다.
+        self._redtab_hp_gain_window_sec = 0.50
+        self._redtab_hp_gain_required = 30000
+        self._party_heal_gain_baseline_hp = 0
+        self._party_heal_gain_baseline_time = 0.0
         self._warrior_redtab_verified = False
         self._warrior_redtab_verified_hp = 0
         self.state.support_input_blocked_until = 0.0
@@ -1337,7 +1329,6 @@ class LogicSvc(threading.Thread):
             # 바뀐 건 확실한 신호라 즉시 재확인으로 넘어간다 - 몬스터한테
             # 계속 3키를 날리며 격수는 안 낫는 낭비를 막는다.
             print(f"[Support] {_ts()} target drifted to a monster mid-heal. Retargeting.")
-            self._party_heal_stagnant_streak = 0
             self._party_direct_heal_verified = False
             self._party_direct_heal_target_prepared = False
             self._register_direct_heal_prepare_failure()
@@ -1354,40 +1345,42 @@ class LogicSvc(threading.Thread):
                 f"[Support] {_ts()} self HP rose by {self_hp_rise} after warrior-targeted "
                 f"heal cast - red_tab is on self, not warrior. Forcing retarget."
             )
-            self._party_heal_stagnant_streak = 0
             self._party_direct_heal_verified = False
             self._party_direct_heal_target_prepared = False
             self._register_direct_heal_prepare_failure()
             return False
 
-        # 힐은 초당 5틱까지 낼 수 있으므로 캐스트마다 HP상승을 기다려서는
-        # 안 된다(그 자체로 다음 틱들을 잡아먹는다). 대신 직전 캐스트 시점
-        # HP와 이번 HP를 비교해서 "연속으로 안 오르는" 스트릭만 센다.
-        # 격수가 힐과 동시에 크게 맞아서 한두 틱 안 오르는 건 정상이라
-        # 무시하고, 스트릭이 cap을 넘을 때만(=한동안 계속 정체) 진짜
-        # 타겟을 잃은 것으로 보고 재확인한다.
-        if self._last_party_hp_value > 0 and before_hp <= self._last_party_hp_value:
-            self._party_heal_stagnant_streak += 1
-        else:
-            self._party_heal_stagnant_streak = 0
+        now = time.time()
+        if self._party_heal_gain_baseline_time <= 0.0:
+            self._party_heal_gain_baseline_hp = before_hp
+            self._party_heal_gain_baseline_time = now
+        elapsed = now - float(self._party_heal_gain_baseline_time or 0.0)
         self._last_party_hp_value = before_hp
 
         self._party_direct_heal_verified = True
         self._party_direct_heal_fail_count = 0
 
-        if self._party_heal_stagnant_streak >= self._party_heal_stagnant_cap:
-            # This path was silent - no way to tell from logs whether stagnant
-            # HP (real lost target) or follow-distance/monster-drift is what's
-            # actually forcing the retarget+movement-freeze during follow.
+        if should_retarget_support_lock_by_hp_gain(
+            self._party_heal_gain_baseline_hp,
+            before_hp,
+            elapsed,
+            required_gain=self._redtab_hp_gain_required,
+            window_sec=self._redtab_hp_gain_window_sec,
+        ):
             print(
-                f"[Support] {_ts()} HP stagnant for {self._party_heal_stagnant_cap} casts "
-                f"(hp={before_hp}). Forcing retarget."
+                f"[Support] {_ts()} warrior HP gain {before_hp - self._party_heal_gain_baseline_hp} "
+                f"< {self._redtab_hp_gain_required} in {elapsed:.2f}s. Forcing retarget."
             )
-            self._party_heal_stagnant_streak = 0
             self._party_direct_heal_verified = False
             self._party_direct_heal_target_prepared = False
+            self._party_heal_gain_baseline_hp = 0
+            self._party_heal_gain_baseline_time = 0.0
             self._register_direct_heal_prepare_failure()
             return False
+
+        if elapsed >= self._redtab_hp_gain_window_sec:
+            self._party_heal_gain_baseline_hp = before_hp
+            self._party_heal_gain_baseline_time = now
 
         self._party_direct_heal_target_prepared = True
         return True
@@ -1447,7 +1440,8 @@ class LogicSvc(threading.Thread):
         self._party_direct_heal_verified = False
         self._party_direct_heal_target_prepared = False
         self._party_direct_heal_fail_count = 0
-        self._party_heal_stagnant_streak = 0
+        self._party_heal_gain_baseline_hp = 0
+        self._party_heal_gain_baseline_time = 0.0
 
     def request_initial_direct_heal_target_prepare(self):
         self._invalidate_warrior_redtab_verification()
