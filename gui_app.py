@@ -3770,7 +3770,16 @@ class AppView:
             
             # 媛?대뱶 ?덉씠???숆린??
             try:
-                if hasattr(self, "indicator") and self.indicator.visible:
+                # 감지 마커(몬스터=빨강, 클릭 지점=마젠타)는 GUIDE 버튼과
+                # 무관하게 그린다. ROIIndicator는 visible=False면 ROI 사각형은
+                # 빼고 마커만 그리도록 이미 만들어져 있었는데, 갱신 호출이
+                # visible일 때만 돌아서 아무도 그 동작을 본 적이 없다.
+                if getattr(self.state, "visual_markers", None) and not hasattr(self, "indicator"):
+                    hwnd = find_game_window_any()
+                    if hwnd:
+                        self.indicator = ROIIndicator(self.root, hwnd, self.state)
+                if hasattr(self, "indicator") and (
+                        self.indicator.visible or getattr(self.state, "visual_markers", None)):
                     reader_thread = getattr(self, 'reader_thread', None)
                     if reader_thread is not None:
                         self.indicator.update_position(reader_thread.regions)

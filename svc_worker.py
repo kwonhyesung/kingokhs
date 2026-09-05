@@ -487,6 +487,13 @@ def main(
             _self_pat = str((json.load(_f).get("play_area") or {}).get("self_pattern_name", "") or "")
     except Exception:
         _self_pat = ""
+    # pc_roles.json의 역할별 표가 config.json을 이긴다(svc_sentinel과 같은 규칙).
+    # 여기서 config만 읽으면, 표 덕분에 멀쩡히 도는 PC가 '사냥 불가'로 찍힌다.
+    try:
+        with open(os.path.join(SCRIPT_DIR, "pc_roles.json"), encoding="utf-8") as _f:
+            _self_pat = str((json.load(_f).get("self_pattern_by_role") or {}).get(resolved_role, "") or _self_pat)
+    except Exception:
+        pass
     try:
         with open(os.path.join(SCRIPT_DIR, "hunt_maps.json"), encoding="utf-8") as _f:
             _maps = list((json.load(_f).get("monsters_by_map") or {}).keys())
