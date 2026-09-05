@@ -77,6 +77,27 @@ def test_role_comes_from_pc_name():
     assert "없는PC이름" not in table
 
 
+def test_self_pattern_comes_from_role_not_config():
+    """config.json은 저장소가 추적하는 파일이라 pull 한 번에 저장소 값으로
+    덮인다 - 실측으로 격수의 self_pattern_name이 ''이 되면서 자기 위치를
+    아예 못 찾았다. 역할별 표가 그걸 이겨야 한다."""
+    import json
+    from svc_sentinel import SentinelThread
+
+    cfg = json.load(open("pc_roles.json", encoding="utf-8"))
+    assert cfg["self_pattern_by_role"]["격수"] == "점프"
+    party = json.load(open("findtext_patterns.json", encoding="utf-8"))["party"]
+    for role, name in cfg["self_pattern_by_role"].items():
+        assert any(k == name or k.startswith(name + "_") for k in party),             f"{role}의 패턴 {name}_*가 findtext_patterns.json에 없다"
+
+    s = SentinelThread.__new__(SentinelThread)
+    s._role_table_cache = ({"격수": "점프"}, __import__("time").time())
+    s.state = type("S", (), {"network_role": "격수"})()
+    assert s._self_pattern_name({"self_pattern_name": ""}) == "점프", "덮인 config가 이겼다"
+    s.state = type("S", (), {"network_role": "술사"})()
+    assert s._self_pattern_name({"self_pattern_name": "술"}) == "술", "표에 없는 역할은 config를 써야 한다"
+
+
 if __name__ == "__main__":
     test_k_form_sends_single_shot()
     test_du_form_sends_down_then_up()
@@ -84,4 +105,5 @@ if __name__ == "__main__":
     test_default_form_is_du()
     test_non_force_press_uses_focus_checked_send()
     test_role_comes_from_pc_name()
+    test_self_pattern_comes_from_role_not_config()
     print("test_move_command_form OK")

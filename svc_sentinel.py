@@ -113,6 +113,31 @@ class SentinelThread(threading.Thread):
 
     SELF_POS_TTL = 3.0   # 캐릭터 패턴을 놓쳐도 기준점을 유지하는 시간(초)
 
+    def _self_pattern_name(self, pa_cfg: dict) -> str:
+        """자기 캐릭터를 찾을 패턴 이름. pc_roles.json의 표가 config.json을 이긴다.
+
+        config.json은 저장소에서 추적되는데 PC마다 값이 달라서, git pull 한 번에
+        저장소 값(빈 문자열)으로 덮인다 - 실측으로 그렇게 격수가 자기 위치를
+        아예 못 찾아 사냥이 통째로 멈췄다. role은 pc_roles.json이 PC 이름으로
+        이미 못을 박고 있으므로, 거기에 한 줄 더 얹는 게 제일 싸다."""
+        role = str(getattr(self.state, "network_role", "") or "")
+        return str(self._role_table().get(role) or pa_cfg.get("self_pattern_name", "") or "")
+
+    def _role_table(self) -> dict:
+        """pc_roles.json의 self_pattern_by_role (60초 캐시)."""
+        now = time.time()
+        cached, at = getattr(self, "_role_table_cache", (None, 0.0))
+        if cached is not None and now - at < 60.0:
+            return cached
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pc_roles.json")
+            with open(path, encoding="utf-8") as f:
+                cached = json.load(f).get("self_pattern_by_role") or {}
+        except Exception:
+            cached = {}
+        self._role_table_cache = (cached, now)
+        return cached
+
     def _anchor_with_fallback(self, found: tuple, now: float, world: tuple) -> tuple:
         """이번 프레임에 찾은 캐릭터 위치. 못 찾았으면 마지막 값을 쓴다.
 
@@ -208,7 +233,7 @@ class SentinelThread(threading.Thread):
             cfg = self._cfg()
             _pa_cfg = cfg.get("play_area", {}) or {}
             grid_pixel_size = float(_pa_cfg.get("grid_size", 48.2) or 48.2)
-            self_pattern_name = str(_pa_cfg.get("self_pattern_name", "") or "")
+            self_pattern_name = self._self_pattern_name(_pa_cfg)
             map_name = str(getattr(self.state, "current_map", "") or "")
 
             # 내 캐릭터 위치: 새로 캡처할 필요 없이, party 카테고리에 이미 저장된
