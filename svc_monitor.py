@@ -90,6 +90,7 @@ class MonitorSvc(threading.Thread):
         self._map_info_changed_at = 0.0
         # 동일 crop 재스캔 회피용 캐시 (map_info 스캔이 파이프라인에서 제일 비싸다).
         self._map_info_cache_signature = ""
+        self._map_candidate = ("", 0)   # (후보 맵 이름, 연속 횟수)
         self._map_info_cached_text = ""
         self._map_info_cached_score = 0.0
         self._map_info_cached_fingerprint = ""
@@ -2174,10 +2175,25 @@ class MonitorSvc(threading.Thread):
                         from bis_core import split_map_name_floor
                         map_name, map_floor = split_map_name_floor(map_text)
 
+                        # 맵 이름은 연속 3회 같아야 바꾼다. OCR이 한 프레임씩
+                        # 흔들리는 게 실측으로 확인됐다 - 캐릭터가 가만히 있는데
+                        # '흉가1'과 '천안궁성흉가입구'가 다섯 번 왕복했고(한
+                        # 프레임에 흉가1/도삭산_1/도삭산_2가 동시에 잡히기도 한다),
+                        # 그 흔들림이 곧바로 맵 변경으로 처리돼 사냥이 '사냥터를
+                        # 벗어남'으로 계속 멈췄다. 진짜 맵 이동은 몇 프레임 늦게
+                        # 반영돼도 문제없지만, 틀린 맵 이름은 몬스터 목록/벽
+                        # 학습/사냥 중단 판단을 통째로 어긋나게 한다.
                         if map_text != getattr(self.state, "current_map", ""):
-                            print(f"[Map] 맵 변경됨: {map_text}")
-                            self.state.current_map = map_text
-                            self.load_maps()
+                            cand, hits = self._map_candidate
+                            hits = hits + 1 if cand == map_text else 1
+                            self._map_candidate = (map_text, hits)
+                            if hits >= 3:
+                                print(f"[Map] 맵 변경됨: {map_text}")
+                                self.state.current_map = map_text
+                                self.load_maps()
+                                self._map_candidate = ("", 0)
+                        else:
+                            self._map_candidate = ("", 0)
 
                         res_updates["current_map"] = map_text
                         res_updates["map_name"] = map_name

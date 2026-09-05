@@ -2,7 +2,7 @@
 # 게임 없이 돌릴 수 있는 검사 전부. 로직 수정 후 이것부터 돌린다.
 cd "$(dirname "$0")"
 fail=0
-for f in tests/test_navigation_sim.py tests/test_hunt_cycle.py tests/test_scan_map_filter.py \
+for f in tests/test_navigation_sim.py tests/test_map_debounce.py tests/test_hunt_cycle.py tests/test_scan_map_filter.py \
          tests/test_move_command_form.py tests/test_patrol_routes.py \
          tests/test_support_runtime_rules.py test_findtext_wrapper.py svc_hunt.py; do
   printf '%-38s' "$f"
