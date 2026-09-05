@@ -173,6 +173,7 @@ class AppView:
         self.create_widgets()
         self.bind_global_zoom_controls()
         self.update_fast_labels()
+        self._marker_loop()
         self.process_hotkey_events()
         self.update_network_panel()
         self.update_slow_ui()
@@ -3643,6 +3644,26 @@ class AppView:
         if drawn:
             self._marker_log_once(f"[GUI] 마커 표시 시작 (첫 프레임 {drawn}개)")
 
+    def _marker_loop(self):
+        """마커 그리기 전용 0.1초 루프.
+
+        예전엔 update_fast_labels(대시보드 루프)에 얹어놨는데, 그 루프는 맨 위
+        winfo_exists 검사에서 한 번만 빠져나오면 재예약 없이 영영 죽는다 -
+        도사 PC에서 마커가 한 줄도 안 찍힌 게 이것 때문으로 보인다(핫키 루프는
+        finally에서 재예약해서 살아 있었다). 여기서는 무슨 일이 있어도
+        finally에서 다시 예약한다."""
+        try:
+            self._marker_log_once("[GUI] 마커 루프 시작")
+            self._draw_detection_markers()
+        except Exception as e:
+            self._marker_log_once(f"[GUI] 마커 오버레이 실패: {e!r}")
+        finally:
+            try:
+                if self.root.winfo_exists():
+                    self.root.after(100, self._marker_loop)
+            except tk.TclError:
+                pass
+
     def _marker_log_once(self, msg):
         """마커 경로는 0.1초마다 도는 루프라 그냥 print하면 로그가 잠긴다."""
         seen = getattr(self, "_marker_logged", None)
@@ -3658,20 +3679,6 @@ class AppView:
             if not self.root.winfo_exists(): return
         except tk.TclError:
             return  # ?덈룄???뚭눼 以묒씠硫?利됱떆 醫낅즺
-
-        # 감지 마커(빨강=몬스터, 마젠타=클릭 지점)는 0.1초마다 그린다.
-        # 매 프레임(16ms)은 캔버스를 통째로 지우고 다시 그리는 작업이라 과하고,
-        # 반대로 느린 루프(30초)에 두면 마커 수명(2초) 안에 한 번도 안 그려진다
-        # - 실제로 그래서 점이 안 보였다. 탭 스위치보다 위에 두는 이유는
-        # 대시보드 탭을 꺼도 게임 화면의 점은 보여야 하기 때문이다.
-        try:
-            if time.time() - getattr(self, "_last_marker_draw", 0.0) >= 0.1:
-                self._last_marker_draw = time.time()
-                self._draw_detection_markers()
-        except Exception as e:
-            # 여기서 조용히 삼키는 바람에 "점이 안 보인다"의 원인이 로그에
-            # 한 줄도 안 남았다. 같은 예외는 한 번만 찍는다.
-            self._marker_log_once(f"[GUI] 마커 오버레이 실패: {e!r}")
 
         # Tab ?뚮뜑留??ㅼ쐞移??뺤씤
         if not self.tab_enabled.get("dash", True):
