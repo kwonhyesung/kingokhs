@@ -10,6 +10,9 @@ from svc_monitor_common import _monitor_log
 from svc_pattern_matcher import PatternMatcher
 from svc_entity_tracker import EntityTracker
 
+_HUNT_MAPS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "hunt_maps.json")
+
 
 class SentinelThread(threading.Thread):
     """
@@ -32,6 +35,7 @@ class SentinelThread(threading.Thread):
         self._char_pattern_lost_since = 0.0
         self._last_slow_cycle_log_time = 0.0
         self._cfg_cache = (None, 0.0)
+        self._maps_cfg_cache = (None, 0.0)
         self._last_no_monster_scan_log = 0.0
         # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (매 프레임 스팸 방지)
         self._last_announced_item_names = set()
@@ -55,20 +59,50 @@ class SentinelThread(threading.Thread):
         self._cfg_cache = (cfg, now)
         return cfg
 
+    def _monsters_table(self, cfg: dict) -> dict:
+        """맵별 몬스터 목록. hunt_maps.json이 있으면 그걸 쓰고, 없으면 예전처럼
+        config.json의 hunt.monsters_by_map을 본다.
+
+        별도 파일을 두는 이유: config.json은 PC마다 role/self_pattern_name/
+        server_ip가 달라서 저장소 것과 항상 다르다. 거기에 공용 설정을 같이
+        넣으면 저장소가 config.json을 고칠 때마다 다른 PC의 git pull이 충돌
+        하거나 그 PC 고유 설정을 덮어쓴다. 공용 설정은 PC마다 다를 이유가
+        없는 이 파일에 두면 pull이 항상 조용히 끝난다."""
+        table = (self._maps_cfg() or {}).get("monsters_by_map")
+        if isinstance(table, dict) and table:
+            return table
+        return (cfg.get("hunt", {}) or {}).get("monsters_by_map", {}) or {}
+
+    def _maps_cfg(self) -> dict:
+        """hunt_maps.json (5초 캐시). 없으면 빈 dict."""
+        cfg, loaded_at = self._maps_cfg_cache
+        now = time.time()
+        if cfg is not None and now - loaded_at < 5.0:
+            return cfg
+        try:
+            with open(_HUNT_MAPS_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except Exception:
+            cfg = {}
+        self._maps_cfg_cache = (cfg, now)
+        return cfg
+
     def _monsters_for_map(self, cfg: dict, map_name: str) -> set | None:
-        """이 맵에서 찾을 몬스터 이름들 (config.json hunt.monsters_by_map).
+        """이 맵에서 찾을 몬스터 이름들.
 
         키는 맵 이름의 앞부분으로 맞춘다 - '흉가' 하나로 흉가1/흉가2가 다
         걸리고, 층이 30개인 도삭산도 한 줄로 끝난다.
 
         반환값 세 가지를 구분한다:
-          None      설정 자체가 없다(구버전 config) -> 예전처럼 전부 스캔.
-                    이걸 빈 set과 같이 취급하면, 설정을 아직 안 넣은 PC에서
+          None      설정 자체가 없다 -> 예전처럼 전부 스캔.
+                    이걸 빈 set과 같이 취급하면, 설정을 아직 안 받은 PC에서
                     모든 맵의 몬스터가 통째로 안 잡힌다(조용한 전면 중단).
           빈 set    설정은 있는데 이 맵이 목록에 없다 -> 스캔하지 않는다.
           이름들    그 몬스터만 스캔한다.
         """
-        table = (cfg.get("hunt", {}) or {}).get("monsters_by_map", {}) or {}
+        table = self._monsters_table(cfg)
         if not table:
             return None
         for prefix, names in table.items():

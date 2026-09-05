@@ -49,6 +49,7 @@ def test_precomputed_gray_gives_identical_results():
 def test_monsters_for_map_matches_by_prefix():
     """맵 이름 앞부분으로 목록을 고른다 - 흉가1/흉가2가 '흉가' 한 줄로 걸린다."""
     s = SentinelThread.__new__(SentinelThread)
+    s._maps_cfg = lambda: {}          # hunt_maps.json 없음 -> config.json 쪽을 본다
     cfg = {"hunt": {"monsters_by_map": {"흉가": ["처녀귀신", "달걀", "불귀신"],
                                         "도삭산": ["갈산신"]}}}
     assert s._monsters_for_map(cfg, "흉가1") == {"처녀귀신", "달걀", "불귀신"}
@@ -62,6 +63,21 @@ def test_monsters_for_map_matches_by_prefix():
     # 여기서 빈 set을 돌려주면 그 PC는 모든 맵에서 몬스터가 통째로 안 잡힌다.
     assert s._monsters_for_map({}, "흉가1") is None
     assert s._monsters_for_map({"hunt": {}}, "흉가1") is None
+
+
+def test_hunt_maps_json_wins_over_config_json():
+    """공용 설정은 hunt_maps.json에 둔다 - config.json은 PC마다 달라서 저장소가
+    건드리면 다른 PC의 git pull이 깨진다."""
+    s = SentinelThread.__new__(SentinelThread)
+    s._maps_cfg = lambda: {"monsters_by_map": {"흉가": ["달걀"]}}
+    stale = {"hunt": {"monsters_by_map": {"흉가": ["처녀귀신", "달걀", "불귀신"]}}}
+    assert s._monsters_for_map(stale, "흉가1") == {"달걀"}
+
+    # 저장소에 실제로 들어있는 hunt_maps.json이 읽히고 흉가가 들어있는지도 본다
+    real = SentinelThread.__new__(SentinelThread)
+    real._maps_cfg_cache = (None, 0.0)
+    assert real._monsters_for_map({}, "흉가1") == {"처녀귀신", "달걀", "불귀신"}
+    assert real._monsters_for_map({}, "도삭산551") == {"갈산신"}
 
 
 def test_only_names_filters_direction_suffixes():
@@ -98,5 +114,6 @@ def test_only_names_filters_direction_suffixes():
 if __name__ == "__main__":
     test_precomputed_gray_gives_identical_results()
     test_monsters_for_map_matches_by_prefix()
+    test_hunt_maps_json_wins_over_config_json()
     test_only_names_filters_direction_suffixes()
     print("test_scan_map_filter OK")

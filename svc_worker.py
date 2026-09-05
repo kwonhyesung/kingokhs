@@ -477,6 +477,24 @@ def main(
         f"gui_role={state.role} udp_role={state.network_role} "
         f"hub={state.network_server_ip}:{state.network_telemetry_port}"
     )
+    # PC마다 달라야 하는 값이 실제로 뭘로 잡혔는지 시작할 때 한 줄로 남긴다.
+    # 이게 없으면 "격수인데 왜 사냥을 안 하지"의 원인이 role인지,
+    # self_pattern_name(없으면 사냥 사이클이 조용히 return)인지, 맵별 몬스터
+    # 목록인지를 로그만 보고는 구분할 수 없다.
+    try:
+        with open(os.path.join(SCRIPT_DIR, "config.json"), encoding="utf-8") as _f:
+            _self_pat = str((json.load(_f).get("play_area") or {}).get("self_pattern_name", "") or "")
+    except Exception:
+        _self_pat = ""
+    try:
+        with open(os.path.join(SCRIPT_DIR, "hunt_maps.json"), encoding="utf-8") as _f:
+            _maps = list((json.load(_f).get("monsters_by_map") or {}).keys())
+    except Exception:
+        _maps = []
+    print(
+        f"[Net] hunt settings: self_pattern_name={_self_pat or '(없음 - 격수면 사냥 불가)'} "
+        f"hunt_maps={_maps or '(없음 - 몬스터 패턴 전체 스캔)'}"
+    )
 
     spell_db_file = os.path.join(SCRIPT_DIR, "spells_config.json")
 
