@@ -253,7 +253,7 @@ class RouteSvc(threading.Thread):
         # 한 방향만 0/N이면 그 쪽이 벽이거나 그 키가 안 먹는 것이고,
         # 둘 다 로그에선 똑같이 '보냈는데 안 움직임'으로 보인다.
         self._move_result_stats = {}   # dir -> [시도, 좌표변화]
-        self._pending_move = None      # (dir, 보낼 때 좌표)
+        self._pending_move = None      # (dir, 보낼 때 좌표, 보낸 시각)
         self._move_fail_streak = {}    # (좌표, 방향) -> 연속 실패 횟수
         self._last_move_stats_log = 0.0
         # 순찰 포인트 도달 실패 감시
@@ -537,6 +537,29 @@ class RouteSvc(threading.Thread):
         self._hunt_maps_cache = (cached, now)
         return cached
 
+    def _coord_fresh_since(self, t0: float) -> bool:
+        """t0 이후에 '캡처된' 화면으로 좌표를 다시 읽었는가.
+
+        좌표(state.x/y)는 화면 OCR이라 키를 보낸 뒤에도 한동안 이동 전 값이
+        남는다. 그 값으로 '안 움직였다'를 판정하면, 실제로 밟고 지나간 칸까지
+        벽으로 기억해서 스스로 길을 막는다. 실측 로그:
+          (10,11)에서 right 전송 -> 0.55초 만에 stuck 판정, (11,11)을 90초
+          차단 + 이웃 2칸까지 cluster 차단 -> 엉뚱한 방향(up)으로 탈출.
+          그런데 바로 다음 줄의 위치는 (12,11) - (11,11)을 지나간 것이다.
+        follow 중엔 stuck 한계가 0.35초까지 내려가는데(격수가 멀수록 짧아짐)
+        좌표 갱신 주기가 그보다 길면 100% 오판이 된다.
+
+        numeric_last_update_time = 숫자 OCR이 마지막으로 한 프레임을 처리한
+        시각, capture_age_ms = 그 프레임이 찍힌 뒤 흐른 시간. 둘을 빼면 그
+        좌표가 '언제 찍힌 화면'인지가 나온다."""
+        if t0 <= 0.0:
+            return True
+        last_read = float(getattr(self.state, "numeric_last_update_time", 0.0) or 0.0)
+        if last_read <= 0.0:
+            return True   # 이 신호가 없는 환경에서는 예전처럼 동작
+        age_sec = float(getattr(self.state, "capture_age_ms", 0.0) or 0.0) / 1000.0
+        return (last_read - age_sec) > t0
+
     def _remember_blocked_cell(self, gx: int, gy: int, reason: str = "stuck"):
         self._prune_blocked_cells()
         self._forget_blocked_cells_on_map_change()
@@ -645,6 +668,10 @@ class RouteSvc(threading.Thread):
             return False
 
         if self._nav_attempt_pos != current_pos:
+            return False
+
+        # 좌표가 아직 이동 전 값이면 '안 움직였다'를 판정할 수 없다.
+        if not self._coord_fresh_since(self._nav_attempt_started_at):
             return False
 
         stuck_time_limit = float(TIMING_CONFIG.get("stuck_time", 4.0))
@@ -2071,26 +2098,31 @@ class RouteSvc(threading.Thread):
         # 이 둘은 지금까지 로그에서 완전히 똑같이 보였다.
         now_mv = time.time()
         # 직전에 보낸 이동이 좌표를 실제로 바꿨는지 채점한다.
-        if self._pending_move:
-            prev_dir, prev_pos = self._pending_move
-            st = self._move_result_stats.setdefault(prev_dir, [0, 0])
-            st[0] += 1
-            if (cx, cy) != prev_pos:
-                st[1] += 1
-                self._move_fail_streak.clear()   # 움직였으면 실패 기록은 무효
-            else:
-                # 키는 나갔는데 좌표가 그대로다. 다만 한 번으로 벽이라고
-                # 단정하면 안 된다 - 좌표는 화면 OCR로 읽어서 이동보다 한
-                # 박자 늦게 갱신되고, 실측에서 캐릭터가 실제로 밟고 지나간
-                # 칸((8,13),(8,14))까지 막힘으로 기록해 스스로 길을 막았다.
-                # 같은 자리에서 같은 방향이 두 번 연속 실패해야 벽으로 본다.
-                key = (prev_pos, prev_dir)
-                fails = self._move_fail_streak.get(key, 0) + 1
-                self._move_fail_streak[key] = fails
-                if fails >= 2:
-                    bx, by = _nav_step_from_dir(prev_pos[0], prev_pos[1], prev_dir)
-                    self._remember_blocked_cell(bx, by, reason="no_move")
-        self._pending_move = (step_dir, (cx, cy))
+        if self._pending_move and not self._coord_fresh_since(self._pending_move[2]):
+            # 좌표가 아직 그 이동보다 오래된 화면에서 읽은 값이다. 채점하면
+            # 실제로 지나간 칸까지 벽으로 기억한다 - 갱신될 때까지 미룬다.
+            pass
+        else:
+            if self._pending_move:
+                prev_dir, prev_pos, _sent_at = self._pending_move
+                st = self._move_result_stats.setdefault(prev_dir, [0, 0])
+                st[0] += 1
+                if (cx, cy) != prev_pos:
+                    st[1] += 1
+                    self._move_fail_streak.clear()   # 움직였으면 실패 기록은 무효
+                else:
+                    # 키는 나갔는데 좌표가 그대로다. 다만 한 번으로 벽이라고
+                    # 단정하면 안 된다 - 좌표는 화면 OCR로 읽어서 이동보다 한
+                    # 박자 늦게 갱신되고, 실측에서 캐릭터가 실제로 밟고 지나간
+                    # 칸((8,13),(8,14))까지 막힘으로 기록해 스스로 길을 막았다.
+                    # 같은 자리에서 같은 방향이 두 번 연속 실패해야 벽으로 본다.
+                    key = (prev_pos, prev_dir)
+                    fails = self._move_fail_streak.get(key, 0) + 1
+                    self._move_fail_streak[key] = fails
+                    if fails >= 2:
+                        bx, by = _nav_step_from_dir(prev_pos[0], prev_pos[1], prev_dir)
+                        self._remember_blocked_cell(bx, by, reason="no_move")
+            self._pending_move = (step_dir, (cx, cy), now_mv)
         if now_mv - self._last_move_stats_log >= 10.0 and self._move_result_stats:
             self._last_move_stats_log = now_mv
             parts = " ".join(f"{d}={v[1]}/{v[0]}"

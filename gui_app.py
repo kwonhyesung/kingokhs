@@ -3641,8 +3641,7 @@ class AppView:
             self.indicator = ROIIndicator(self.root, getattr(self.state, "hwnd", None), self.state)
         reader_thread = getattr(self, "reader_thread", None)
         drawn = self.indicator.update_position(getattr(reader_thread, "regions", {}) or {})
-        if drawn:
-            self._marker_log_once(f"[GUI] 마커 표시 시작 (첫 프레임 {drawn}개)")
+        self._marker_last_drawn = drawn
 
     def _marker_loop(self):
         """마커 그리기 전용 0.1초 루프.
@@ -3653,16 +3652,41 @@ class AppView:
         finally에서 재예약해서 살아 있었다). 여기서는 무슨 일이 있어도
         finally에서 다시 예약한다."""
         try:
-            self._marker_log_once("[GUI] 마커 루프 시작")
             self._draw_detection_markers()
         except Exception as e:
-            self._marker_log_once(f"[GUI] 마커 오버레이 실패: {e!r}")
+            # ASCII로만 찍는다. 한글 print가 cp949 콘솔에서 터지면 그 예외가
+            # 다시 삼켜져서 로그에 아무것도 안 남는다(find_game_window에서
+            # 실제로 그렇게 당했다).
+            self._marker_log_once("[MarkerDiag] draw error: " + ascii(repr(e)))
         finally:
+            try:
+                self._marker_diag()
+            except Exception:
+                pass
             try:
                 if self.root.winfo_exists():
                     self.root.after(100, self._marker_loop)
             except tk.TclError:
                 pass
+
+    def _marker_diag(self):
+        """점이 왜 안 보이는지 2초마다 한 줄. 한 번이라도 그려지면 멈춘다.
+
+        마커 경로는 지금까지 세 번 연속으로 '로그에 아무것도 안 남는' 방식으로
+        실패했다 - 상태를 숫자로 찍지 않으면 또 추측하게 된다. ASCII 전용."""
+        if getattr(self, "_marker_diag_done", False):
+            return
+        now = time.time()
+        if now - getattr(self, "_marker_diag_at", 0.0) < 2.0:
+            return
+        self._marker_diag_at = now
+        n = len(getattr(self.state, "visual_markers", []) or [])
+        ind = getattr(self, "indicator", None)
+        drawn = getattr(self, "_marker_last_drawn", 0)
+        print(f"[MarkerDiag] markers={n} drawn={drawn} overlay={'yes' if ind else 'no'} "
+              f"mapped={ind.winfo_ismapped() if ind else 0}")
+        if drawn:
+            self._marker_diag_done = True
 
     def _marker_log_once(self, msg):
         """마커 경로는 0.1초마다 도는 루프라 그냥 print하면 로그가 잠긴다."""
