@@ -1162,6 +1162,7 @@ class BisHardware:
         self.state: Optional[GameState] = None  # 게임 상태
         self._auto_reconnect_enabled = True
         self._last_connect_attempt = 0
+        self._last_send_failure_log_time = 0.0
         self._preferred_port = None
         self._last_announced_input_backend = None
         self._software_input_event_logged = False
@@ -1360,58 +1361,6 @@ class BisHardware:
         if disconnect:
             self.disconnect()
 
-    def send(self, cmd: str):
-        """
-        패킷 크기 가변화 로직 적용:
-        명령어 뒤에 무작위 길이의 패딩(공백)을 추가하여 전송 데이터 크기를 불규칙하게 만듦.
-        """
-        with self._lock:
-            current_hwnd = win32gui.GetForegroundWindow()
-            window_text = win32gui.GetWindowText(current_hwnd)
-            is_focused = False
-            
-            if self.state is not None:
-                # 1. 핸들 직접 비교
-                if current_hwnd == self.state.hwnd:
-                    is_focused = True
-                # 2. 전체화면 대응: 창 제목 키워드 포함 여부 확인
-                elif any(x in window_text for x in ["바람", "AION", "ory"]):
-                    is_focused = True
-            
-            # ── 듀얼 모니터 지능형 차단 ────────────────────
-            if not is_focused:
-                # 키 떼기(U:) 명령은 비상 정지 및 사후 처리를 위해 무조건 허용
-                if not cmd.startswith("U:"):
-                    _hw_log(f"[Hardware] 차단: {cmd} (포커스 아님, hwnd={current_hwnd}, state.hwnd={self.state.hwnd if self.state else None})")
-                    return
-
-            if self.ser and self.ser.is_open:
-                try:
-                    # 무작위 패딩(1~16자) 추가하여 패킷 크기 가변화
-                    padding = ' ' * random.randint(1, 16)
-                    payload = f"{cmd}{padding}\n".encode('ascii')
-                    self.ser.write(payload)
-                    _hw_log(f"[Hardware] 전송: {cmd} ({len(payload)}바이트)")
-                except Exception as e:
-                    _hw_log(f"[Hardware] 전송 실패: {cmd} - {e}")
-            else:
-                _hw_log(f"[Hardware] 미전송: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
-            # 소프트웨어 폴백(pydirectinput)은 보안상 완전히 제거됨
-
-    def send_force(self, cmd: str):
-        """포커스 체크 없이 무조건 전송 (F1 이동 등 포커스 제어가 이미 된 상황에서 사용)"""
-        with self._lock:
-            if self.ser and self.ser.is_open:
-                try:
-                    padding = ' ' * random.randint(1, 16)
-                    payload = f"{cmd}{padding}\n".encode('ascii')
-                    self.ser.write(payload)
-                    _hw_log(f"[Hardware] 강제전송: {cmd} ({len(payload)}바이트)")
-                except Exception as e:
-                    _hw_log(f"[Hardware] 강제전송 실패: {cmd} - {e}")
-            else:
-                _hw_log(f"[Hardware] 강제전송 불가: {cmd} (ser={self.ser}, open={self.ser.is_open if self.ser else 'N/A'})")
-
     def _is_game_window_focused_for_input(self) -> bool:
         if self.state is None:
             return False
@@ -1427,29 +1376,48 @@ class BisHardware:
         padding = " " * random.randint(1, 16)
         self.ser.write(f"{cmd}{padding}\n".encode("ascii"))
 
-    def send(self, cmd: str):
+    def _log_send_failure(self, why: str) -> None:
+        """입력이 실제로는 안 나간 경우를 항상 남긴다(1초 제한).
+
+        예전엔 이 경로들이 전부 _hw_log(=SVC_HW_LOGS=1일 때만 출력)라, 시리얼이
+        끊겨 있어도/write가 터져도 로그가 완전히 조용했다. hold_move()는 그와
+        무관하게 True를 돌려주므로, '신호를 보냈다'와 '아무 데도 안 갔다'가
+        로그에서 똑같이 보였다 - 캐릭터가 30초 내내 제자리인데 단서가 없던
+        원인이다. 성공은 계속 조용히, 실패만 항상 보이게 한다."""
+        now = time.time()
+        if now - self._last_send_failure_log_time < 1.0:
+            return
+        self._last_send_failure_log_time = now
+        port = getattr(self.ser, "port", None) if self.ser else None
+        is_open = bool(self.ser and getattr(self.ser, "is_open", False))
+        print(f"[Hardware] 입력 전송 실패: {why} (port={port} open={is_open})")
+
+    def _deliver(self, command: str) -> bool:
+        """실제 전송. 성공했으면 True."""
+        try:
+            if self.is_hardware_ready():
+                self._write_hardware_command(command)
+                return True
+            self._send_software(command)
+            # 소프트웨어 폴백 드라이버가 없으면 아무것도 안 나간 것이다.
+            if direct_software_input is None and software_keyboard is None:
+                self._log_send_failure(f"시리얼 미연결 + 소프트웨어 입력 없음: {command}")
+                return False
+            return True
+        except Exception as exc:
+            self._log_send_failure(f"{command} - {exc}")
+            return False
+
+    def send(self, cmd: str) -> bool:
         with self._lock:
             command = str(cmd or "")
             if not self._is_game_window_focused_for_input() and not command.startswith("U:"):
-                return
-            try:
-                if self.is_hardware_ready():
-                    self._write_hardware_command(command)
-                else:
-                    self._send_software(command)
-            except Exception as exc:
-                _hw_log(f"[Input] send failed: {command} - {exc}")
+                return False
+            return self._deliver(command)
 
-    def send_force(self, cmd: str):
+    def send_force(self, cmd: str) -> bool:
         with self._lock:
-            command = str(cmd or "")
-            try:
-                if self.is_hardware_ready():
-                    self._write_hardware_command(command)
-                else:
-                    self._send_software(command)
-            except Exception as exc:
-                _hw_log(f"[Input] force send failed: {command} - {exc}")
+            return self._deliver(str(cmd or ""))
 
     def _reset_serial_buffers(self):
         """Best-effort: clear buffered serial I/O to reduce stuck input risk."""
@@ -1539,7 +1507,10 @@ class BisHardware:
 
         _hw_log(f"[Move] 방향키: {direction}{' (force)' if force else ''}")
         try:
-            self.send_force(f"D:{direction}")
+            # 눌림이 실제로 나갔는지가 유일하게 중요한 값이다. 예전엔 결과를
+            # 버리고 무조건 True를 돌려줘서, 시리얼이 죽어 있어도 호출한 쪽은
+            # "이동시켰다"고 믿고 다음 판단을 이어갔다.
+            pressed = self.send_force(f"D:{direction}")
             if duration is not None:
                 humanized_sleep(float(duration), variance)
             else:
@@ -1550,9 +1521,9 @@ class BisHardware:
         # 걸어가므로, 걷는 도중에 계산한 몬스터/아이템 pos는 반 칸씩
         # 어긋난다. 아이템처럼 좌표를 고정해야 하는 쪽은 이 값으로
         # "멈춘 상태"를 확인하고 나서 계산한다 (svc_hunt 설계 참고).
-        if self.state is not None:
+        if self.state is not None and pressed:
             self.state.last_move_time = time.time()
-        return True
+        return pressed
 
     def move_cursor(self, px: int, py: int) -> bool:
         """클릭 없이 커서만 이동 (grid 변환 없음). 격수 캐릭터를 클릭한 뒤
