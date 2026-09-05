@@ -3032,7 +3032,17 @@ class LogicSvc(threading.Thread):
                 continue
             if self._check_emergency(support_target):
                 if self._is_warrior_role():
-                    self._hunt_idle_reason("긴급(HP/MP) 처리 중 - 사냥 사이클까지 못 감")
+                    # 값을 같이 찍는다. '긴급 처리 중'만으로는 HP가 정말 낮은
+                    # 건지, OCR이 0을 읽고 있는 건지, 임계값이 잘못된 건지
+                    # 구분할 수 없다 - 이 셋은 대응이 전혀 다르다.
+                    self._hunt_idle_reason(
+                        "긴급(HP/MP) 처리 중 - 사냥 사이클까지 못 감 | "
+                        f"hp={getattr(self.state, 'hp', 0)}/{self._get_good_hp_threshold()} "
+                        f"mp={getattr(self.state, 'mp', 0)}/{self._get_good_mp_threshold()} "
+                        f"hp_trig={getattr(self.state, 'hp_trig_active', False)} "
+                        f"mp_trig={getattr(self.state, 'mp_trig_active', False)} "
+                        f"user={getattr(self.state, 'is_user_detected', False)} "
+                        f"chat={getattr(self.state, 'is_chat_active', False)}")
                 self._handle_emergency(support_target)
                 continue
 
