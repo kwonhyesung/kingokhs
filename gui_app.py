@@ -3626,12 +3626,40 @@ class AppView:
         self.f1_stuck_count = 0
         self.f1_stuck_timer = time.time()
 
+    def _draw_detection_markers(self):
+        """감지 마커를 게임창 위에 그린다. GUIDE 버튼과 무관하게 동작한다.
+
+        ROIIndicator는 visible=False면 ROI 사각형은 빼고 마커만 그리도록 이미
+        만들어져 있었는데, 갱신 호출이 전부 visible일 때만 돌아서 그 동작이
+        한 번도 실행된 적이 없었다."""
+        if not getattr(self.state, "visual_markers", None):
+            return
+        if not hasattr(self, "indicator"):
+            hwnd = find_game_window_any()
+            if not hwnd:
+                return
+            self.indicator = ROIIndicator(self.root, hwnd, self.state)
+        reader_thread = getattr(self, "reader_thread", None)
+        self.indicator.update_position(getattr(reader_thread, "regions", {}) or {})
+
     def update_fast_labels(self):
         """Docstring."""
         try:
             if not self.root.winfo_exists(): return
         except tk.TclError:
             return  # ?덈룄???뚭눼 以묒씠硫?利됱떆 醫낅즺
+
+        # 감지 마커(빨강=몬스터, 마젠타=클릭 지점)는 0.1초마다 그린다.
+        # 매 프레임(16ms)은 캔버스를 통째로 지우고 다시 그리는 작업이라 과하고,
+        # 반대로 느린 루프(30초)에 두면 마커 수명(2초) 안에 한 번도 안 그려진다
+        # - 실제로 그래서 점이 안 보였다. 탭 스위치보다 위에 두는 이유는
+        # 대시보드 탭을 꺼도 게임 화면의 점은 보여야 하기 때문이다.
+        try:
+            if time.time() - getattr(self, "_last_marker_draw", 0.0) >= 0.1:
+                self._last_marker_draw = time.time()
+                self._draw_detection_markers()
+        except Exception:
+            pass
 
         # Tab ?뚮뜑留??ㅼ쐞移??뺤씤
         if not self.tab_enabled.get("dash", True):
@@ -3770,16 +3798,7 @@ class AppView:
             
             # 媛?대뱶 ?덉씠???숆린??
             try:
-                # 감지 마커(몬스터=빨강, 클릭 지점=마젠타)는 GUIDE 버튼과
-                # 무관하게 그린다. ROIIndicator는 visible=False면 ROI 사각형은
-                # 빼고 마커만 그리도록 이미 만들어져 있었는데, 갱신 호출이
-                # visible일 때만 돌아서 아무도 그 동작을 본 적이 없다.
-                if getattr(self.state, "visual_markers", None) and not hasattr(self, "indicator"):
-                    hwnd = find_game_window_any()
-                    if hwnd:
-                        self.indicator = ROIIndicator(self.root, hwnd, self.state)
-                if hasattr(self, "indicator") and (
-                        self.indicator.visible or getattr(self.state, "visual_markers", None)):
+                if hasattr(self, "indicator") and self.indicator.visible:
                     reader_thread = getattr(self, 'reader_thread', None)
                     if reader_thread is not None:
                         self.indicator.update_position(reader_thread.regions)
