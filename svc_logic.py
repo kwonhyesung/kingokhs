@@ -3868,12 +3868,26 @@ class LogicSvc(threading.Thread):
         except Exception:
             return set()
 
+    def _hunt_idle_reason(self, why: str):
+        """사냥이 한 발도 못 나간 이유를 남긴다(5초 제한).
+
+        이 함수가 없던 동안 실패가 전부 조용한 return이라, '몬스터는 감지되는데
+        [Hunt] 로그가 한 줄도 없다'는 상태에서 원인을 로그로 좁힐 수가 없었다.
+        service_active부터 leash까지 어디서 멈췄는지 한 줄로 말하게 한다."""
+        now = time.time()
+        if now - getattr(self, "_last_hunt_idle_log", 0.0) < 5.0:
+            return
+        self._last_hunt_idle_log = now
+        print(f"[HuntIdle] {why}")
+
     def _run_warrior_attack_loot_cycle(self):
         """격수 자동사냥 한 사이클. 이동은 RouteSvc가 하고 여기선 목표만 정한다."""
         if not bool(getattr(self.state, "service_active", False)):
+            self._hunt_idle_reason("service_active=False (F2로 서비스가 안 켜짐)")
             return
         cfg = self._hunt_cfg()
         if not cfg.get("enabled", True):
+            self._hunt_idle_reason("config hunt.enabled=False")
             return
 
         # 캐릭터 패턴을 못 찾은 프레임은 몬스터/아이템 pos를 만들 수 없다
@@ -3881,10 +3895,14 @@ class LogicSvc(threading.Thread):
         # 이동은 RouteSvc가 pos(x,y)로 계속한다.
         my_screen = tuple(getattr(self.state, "my_screen_pos", (0, 0)) or (0, 0))
         if my_screen == (0, 0):
+            self._hunt_idle_reason(
+                "내 캐릭터 패턴(점프_*)을 못 찾음 - my_screen_pos=(0,0). "
+                "config play_area.self_pattern_name 확인")
             return
 
         me = (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
         if me == (0, 0):
+            self._hunt_idle_reason("좌표 OCR이 (0,0) - pos ROI를 못 읽음")
             return
 
         # 1) 줍는 중이면 그것부터 끝낸다
@@ -3911,8 +3929,18 @@ class LogicSvc(threading.Thread):
                         if not any(hunt.chebyshev(m.get("world") or (0, 0), k) <= 1
                                    for k in self._hunt_giveup_until)]
 
-        target = hunt.pick_target(monsters, me, self._hunt_anchor(), leash,
+        anchor = self._hunt_anchor()
+        target = hunt.pick_target(monsters, me, anchor, leash,
                                   sticky=self._hunt_sticky, sticky_name=self._hunt_sticky_name)
+        if not target and monsters:
+            # 몬스터는 보이는데 하나도 안 골랐다 - leash가 anchor(순찰 포인트)
+            # 기준이라, 순찰 포인트가 멀면 눈앞의 몬스터가 통째로 걸러진다.
+            worst = [(m.get("name", "?"), m.get("world"),
+                      hunt.chebyshev(anchor, m.get("world") or (0, 0)))
+                     for m in monsters[:4]]
+            self._hunt_idle_reason(
+                f"몬스터 {len(monsters)}마리 보이는데 타겟 없음 | me={me} "
+                f"anchor={anchor} leash={leash} | {worst}")
         if not target:
             if self._hunt_sticky is not None:
                 # 실측: 몬스터가 실제로 옆에 있어도 스캔 한 프레임 정도는

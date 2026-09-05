@@ -110,6 +110,15 @@ class SentinelThread(threading.Thread):
                 return {str(n) for n in (names or [])}
         return set()
 
+    def _log_bad_world_pos(self, entity, world, me):
+        """맵 밖 좌표로 계산된 감지를 버렸다고 남긴다(5초 제한).
+        조용히 버리면 '왜 저 몬스터를 안 쫓지'가 다시 미궁이 된다."""
+        now = time.time()
+        if now - getattr(self, "_last_bad_world_log", 0.0) < 5.0:
+            return
+        self._last_bad_world_log = now
+        print(f"[Sentinel] 맵 밖 좌표 무시: {entity.get('name', '?')}@{world} me={me} (패턴 오탐)")
+
     def _log_no_monster_scan(self, map_name: str):
         """몬스터를 안 찾기로 한 이유를 남긴다(1초 제한). 이게 없으면 '몬스터를
         못 찾는' 진짜 버그와 '안 찾기로 한 맵'이 로그에서 똑같이 보인다."""
@@ -353,10 +362,15 @@ class SentinelThread(threading.Thread):
                 self._char_pattern_lost_since = 0.0
                 detected_entities = []
                 for e in tracked_all:
-                    e["world_pos"] = (
-                        round(my_world_x + (e.get("cx", 0) - my_screen_x) / grid_pixel_size),
-                        round(my_world_y + (e.get("cy", 0) - my_screen_y) / grid_pixel_size),
-                    )
+                    wx = round(my_world_x + (e.get("cx", 0) - my_screen_x) / grid_pixel_size)
+                    wy = round(my_world_y + (e.get("cy", 0) - my_screen_y) / grid_pixel_size)
+                    # 음수 칸은 맵에 존재하지 않는다. 실측에서 me=(6,14)인데
+                    # 처녀귀신@(-2,22) 같은 좌표가 섞여 나왔다 - 패턴 오탐이라
+                    # 여기서 버리지 않으면 사냥이 화면 밖 유령을 쫓아간다.
+                    if wx < 0 or wy < 0:
+                        self._log_bad_world_pos(e, (wx, wy), (my_world_x, my_world_y))
+                        continue
+                    e["world_pos"] = (wx, wy)
                     detected_entities.append(e)
 
             # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (테스트 중 눈으로 확인하기 위함).

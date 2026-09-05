@@ -18,8 +18,10 @@ SECTIONS = [
     ("실행 정보", r"^\[Net\] (runtime identity|hunt settings)"),
     ("하드웨어",   r"^\[(Input\] backend|Hardware\])"),
     ("하드웨어 검사 '/'", r"^\[HWTest\]"),
+    ("모드/맵",    r"^\[(Hotkey|Map)\]"),
     ("이동 진단",  r"^\[(MoveDiag|MoveTest|NavBlock)\]"),
-    ("사냥",      r"^\[Hunt\]"),
+    ("사냥",      r"^\[(Hunt|HuntIdle)\]"),
+    ("감지",      r"^\[Sentinel\] (몬스터|파티원)"),
     ("막힘",      r"^\[(Stuck|NavMem|WallMem)\]"),
     ("에러",      r"(전송 실패|error:|Traceback|\[ERROR\])"),
 ]
