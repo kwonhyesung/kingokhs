@@ -12,6 +12,7 @@ import glob
 import os
 import re
 import sys
+import time
 
 # (제목, 정규식) - 순서가 곧 출력 순서다.
 SECTIONS = [
@@ -60,7 +61,15 @@ def main():
     with open(path, encoding="utf-8", errors="replace") as f:
         all_lines = [ln.rstrip("\n") for ln in f]
     lines = latest_session(all_lines)
+    # 신선도부터. 이 확인을 빼먹어서 이미 두 번, 허브가 꺼진 줄 모르고
+    # 옛날 로그를 새 실행 결과로 착각해 분석했다.
+    age = time.time() - os.path.getmtime(path)
+    stamp = time.strftime("%H:%M:%S", time.localtime(os.path.getmtime(path)))
     print(f"파일: {path}  (전체 {len(all_lines)}줄 / 최신 세션 {len(lines)}줄)")
+    print(f"마지막 기록: {stamp} ({age / 60:.0f}분 전)")
+    if age > 120:
+        print("  !! 2분 넘게 새 로그가 없습니다. 허브(이 PC)의 봇이 켜져 있는지,")
+        print("     격수 PC가 실행 중인지 먼저 확인하세요 - 아래는 옛날 기록입니다.")
 
     for title, pat in SECTIONS:
         rx = re.compile(pat)
