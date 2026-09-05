@@ -279,6 +279,8 @@ class FindText:
     # 한 패턴이 이보다 많은 곳에서 맞으면 식별력이 없는 것으로 본다.
     # 진짜 개체 하나의 매칭 덩어리는 수십~수백 픽셀이다.
     MAX_RAW_HITS = 5000
+    # 짧은 변이 이 값 이하면 오차를 허용하지 않는다(정확 일치).
+    STRICT_MIN_SIDE_PX = 6
 
     def _template_match_native(self,
                              roi_bgr: np.ndarray,
@@ -322,6 +324,14 @@ class FindText:
         len1 = int(np.sum(pattern_bin))
         len0 = ph * pw - len1
 
+        # 짧은 변이 6px 이하인 패턴은 스프라이트를 담을 수 없는 크기라,
+        # 기본 허용오차(10%)로는 화면 곳곳에서 맞는다 - 실측에서 점프_right
+        # (29x4)/점프_top(36x4)이 42,000군데씩 맞아 party 스캔이 1,286ms를
+        # 먹었고, NMS를 통과해 남는 상자는 사실상 무작위였다.
+        # 버리는 대신 임계값을 최대로 올린다(오차 0 = 정확 일치). 저장소의
+        # 다른 패턴은 짧은 변이 전부 12px 이상이라 영향을 받지 않는다.
+        if min(ph, pw) <= self.STRICT_MIN_SIDE_PX:
+            err1 = err0 = 0.0
         e1_max = (len1 * int(err1 * 1024)) >> 10
         e0_max = (len0 * int(err0 * 1024)) >> 10
         if e1_max >= len1:

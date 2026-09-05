@@ -50,6 +50,7 @@ class SentinelThread(threading.Thread):
         # 숫자(party/monster/item/rest)가 어디서 시간이 나가는지 말해준다.
         self._debounce_frames = 2
         self._logged_missing_self_patterns = False
+        self._last_frame_dump_time = 0.0
 
     def _cfg(self) -> dict:
         """config.json (5초 캐시). 예전엔 매 사이클 디스크에서 json.load 했다 -
@@ -119,12 +120,6 @@ class SentinelThread(threading.Thread):
         return set()
 
     SELF_POS_TTL = 3.0   # 캐릭터 패턴을 놓쳐도 기준점을 유지하는 시간(초)
-
-    @staticmethod
-    def _self_anchor_offset(pa_cfg: dict) -> int:
-        """이름표를 기준점으로 쓸 때 캐릭터 몸까지 내려야 하는 픽셀 수.
-        파티원을 클릭할 때 쓰는 값과 같은 값이다(config play_area.click_offset_y)."""
-        return int(pa_cfg.get("click_offset_y", 26) or 26)
 
     def _self_pattern_name(self, pa_cfg: dict) -> str:
         """자기 캐릭터를 찾을 패턴 이름. pc_roles.json의 표가 config.json을 이긴다.
@@ -242,6 +237,22 @@ class SentinelThread(threading.Thread):
             if play_area_rgb is None or play_area_rgb.size == 0:
                 continue
 
+            # 10초마다 지금 보고 있는 화면을 그대로 한 장 남긴다. "불귀신을
+            # 왜 못 잡느냐" 같은 질문은 진짜 프레임 없이는 추측밖에 안 되는데,
+            # 게임은 GPU로 그려서 창 캡처가 검게 나오고 캡처 장치는 봇이
+            # 잡고 있어서 밖에서 얻을 방법이 없었다.
+            if now - self._last_frame_dump_time >= 10.0:
+                self._last_frame_dump_time = now
+                try:
+                    import cv2 as _cv2, os as _os
+                    _d = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                                       "logs", "runtime")
+                    _os.makedirs(_d, exist_ok=True)
+                    _cv2.imwrite(_os.path.join(_d, "play_area.png"),
+                                 _cv2.cvtColor(play_area_rgb, _cv2.COLOR_RGB2BGR))
+                except Exception:
+                    pass
+
             # config.json에서 grid_size/내 캐릭터 이름 설정 읽기 (5초 캐시)
             cfg = self._cfg()
             _pa_cfg = cfg.get("play_area", {}) or {}
@@ -273,33 +284,17 @@ class SentinelThread(threading.Thread):
                     # 보일 수 있다. 잡힌 방향 패턴을 전부 남긴다.
                     self.state.my_facing = ",".join(sorted(
                         h["name"].rsplit("_", 1)[-1] for h in self_hits))
-                else:
-                    # 방향 패턴이 하나도 없는 PC가 있다. 실측: 도사(졈프)는
-                    # party에 졈프_name/졈프_user만 있고 졈프_left/right/back/
-                    # top이 없다 - 그래서 자기 위치가 영원히 (0,0)으로 남고,
-                    # 모든 몬스터/아이템이 월드 좌표 없이 "@?"로 나오며
-                    # (로그의 "아이템 감지: 호박@?"), 줍기도 사냥 판단도
-                    # 통째로 불가능해진다. 로그는 "캐릭터 패턴 미검출" 한 줄만
-                    # 남겨서 원인이 '안 보임'인지 '패턴이 없음'인지 구분이 안 됐다.
-                    #
-                    # 이름표는 캐릭터 머리 위 click_offset_y만큼 위에 있으므로,
-                    # 그만큼 내리면 캐릭터 몸이 된다 - TargetConfirm이 파티원을
-                    # 클릭할 때 쓰는 것과 똑같은 보정이다. 방향은 알 수 없다.
-                    name_hits = [h for h in party_hits
-                                 if h["name"] == f"{self_pattern_name}_name"]
-                    if name_hits:
-                        best_name = max(name_hits, key=lambda h: h["score"])
-                        my_screen_pos = (best_name["cx"],
-                                         best_name["cy"] + self._self_anchor_offset(_pa_cfg))
-                    elif not self._logged_missing_self_patterns:
-                        self._logged_missing_self_patterns = True
-                        have = sorted(n for n in self.matcher.findtext_patterns.get("party", {})
-                                      if n.startswith(self_pattern_name))
-                        print(f"[Sentinel] self '{self_pattern_name}': 방향 패턴도 이름표도 "
-                              f"화면에서 못 찾음 (저장된 패턴: {have or '없음'}) - 자기 위치를 "
-                              f"못 구해서 몬스터/아이템 월드 좌표가 전부 '?'가 되고 줍기/사냥 "
-                              f"판단이 멈춘다. 내 이름표는 남이 보는 것과 색이 달라서 "
-                              f"'{self_pattern_name}_name_self'를 따로 캡처해야 할 수 있다.")
+                elif not self._logged_missing_self_patterns:
+                    # self 패턴을 설정해 놓고 한 번도 못 찾으면 조용히 넘어가지
+                    # 않는다 - 그러면 격수의 사냥/줍기가 통째로 멈추는데 로그엔
+                    # "캐릭터 패턴 미검출" 한 줄만 남아 원인이 '안 보임'인지
+                    # '패턴이 저장돼 있지 않음'인지 구분이 안 됐다.
+                    self._logged_missing_self_patterns = True
+                    have = sorted(n for n in self.matcher.findtext_patterns.get("party", {})
+                                  if n.startswith(self_pattern_name))
+                    print(f"[Sentinel] self '{self_pattern_name}'의 방향 패턴을 화면에서 "
+                          f"못 찾음 (저장된 것: {have or '없음'}) - 이 좌표가 없으면 몬스터/"
+                          f"아이템 월드 좌표가 전부 '?'가 되어 격수의 줍기/사냥 판단이 멈춘다.")
             # 몬스터에 둘러싸이면 이팩트/스프라이트가 겹쳐 캐릭터 패턴이 통째로
             # 안 잡힌다 (실측: 사냥 중 '점프_* 못 찾음'이 반복되며 사냥이 멈춤).
             # 그런데 이 값은 매 프레임 새로 찾아야 하는 값이 아니다 - 카메라가
