@@ -42,7 +42,13 @@ class SentinelThread(threading.Thread):
         self._last_announced_item_names = set()
         self._last_announced_monster_names = set()
         self._last_announced_party_names = set()
-        self._debounce_frames = 3  # 연속 감지 필요 프레임 수
+        # 확정에 필요한 감지 횟수. '프레임'이 아니라 '사이클' 수다 - 설계는
+        # 30fps(3프레임=0.1초)였는데 실측 사이클이 3.5~4초라 3회면 첫 공격까지
+        # 10초가 넘는다. 2회로 내리면 3.5초(한 사이클)로 줄면서, 이 값이 막으려던
+        # '한 번 반짝하는 패턴 오탐'은 그대로 걸러진다.
+        # 진짜 해결은 사이클을 30fps에 되돌리는 것이다 - [SentinelPerf]의 단계별
+        # 숫자(party/monster/item/rest)가 어디서 시간이 나가는지 말해준다.
+        self._debounce_frames = 2
 
     def _cfg(self) -> dict:
         """config.json (5초 캐시). 예전엔 매 사이클 디스크에서 json.load 했다 -
@@ -243,7 +249,9 @@ class SentinelThread(threading.Thread):
             # 없다. config에 self_pattern_name이 없는 PC(도사/술사)는 그냥 계속
             # (0,0)=위치 모름으로 남는다 - 원래도 그 역할들은 이 좌표를 안 쓴다.
             # party는 아직 반경 제한 대상이 아니라(논의 안 됨) 전체 play_area를 그대로 쓴다.
+            _t = time.perf_counter()
             party_hits = self.matcher.find_text_scan(play_area_rgb, category="party", ent_type="PARTY")
+            self._stage_ms = {"party": (time.perf_counter() - _t) * 1000.0}
             my_screen_pos = (0, 0)
             if self_pattern_name:
                 self_names = {self_pattern_name, *(f"{self_pattern_name}_{d}" for d in ("left", "right", "back", "top"))}
@@ -301,6 +309,7 @@ class SentinelThread(threading.Thread):
             # 이 맵에 안 나오는 몬스터는 찾지 않는다 - 패턴 15개를 전부 훑으면
             # 흉가에서 안 나오는 갈산신 4방향까지 매 프레임 상관연산을 돌린다.
             # None = 설정 없음(전부 스캔), 빈 set = 이 맵은 스캔 안 함
+            _t = time.perf_counter()
             monster_names = self._monsters_for_map(cfg, map_name)
             if monster_names is None or monster_names:
                 monster_hits = self._offset_results(
@@ -313,6 +322,8 @@ class SentinelThread(threading.Thread):
                 monster_hits = []
                 self._log_no_monster_scan(map_name)
 
+            self._stage_ms["monster"] = (time.perf_counter() - _t) * 1000.0
+            _t = time.perf_counter()
             scan_results = (
                 monster_hits
                 + self._offset_results(
@@ -322,6 +333,8 @@ class SentinelThread(threading.Thread):
                 + party_hits  # 위에서 내 위치 찾을 때 이미 스캔한 결과를 재사용 (중복 스캔 방지)
             )
 
+            self._stage_ms["item"] = (time.perf_counter() - _t) * 1000.0
+            _t = time.perf_counter()
             whitelist = list(getattr(self.state, "whitelist_names", []))
             new_blobs = []
             for r in scan_results:
@@ -563,4 +576,10 @@ class SentinelThread(threading.Thread):
             cycle_ms = (time.time() - now) * 1000.0
             if cycle_ms > 50.0 and time.time() - self._last_slow_cycle_log_time >= 1.0:
                 self._last_slow_cycle_log_time = time.time()
-                print(f"[SentinelPerf] 사이클 {cycle_ms:.0f}ms (30fps 목표=33ms)")
+                # 총합만으로는 어디가 느린지 알 수 없다. 실측 스캔은 합쳐서
+                # 350ms인데 사이클은 3500ms까지 나온다 - 나머지 3초가 스캔
+                # 밖에 있다는 뜻이라, 단계별로 쪼개서 같이 찍는다.
+                st = getattr(self, "_stage_ms", {})
+                st["rest"] = (time.perf_counter() - _t) * 1000.0
+                parts = " ".join(f"{k}={v:.0f}" for k, v in st.items())
+                print(f"[SentinelPerf] 사이클 {cycle_ms:.0f}ms (30fps 목표=33ms) | {parts}")
