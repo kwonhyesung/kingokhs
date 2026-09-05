@@ -268,6 +268,8 @@ class RouteSvc(threading.Thread):
         self._blocked_cell_hits: dict[tuple[int, int], int] = {}
         self._blocked_cell_base_ttl = 6.0
         self._blocked_cell_max_ttl = 18.0
+        self._blocked_cell_wall_ttl = 300.0   # 벽은 안 움직인다
+        self._blocked_cells_map = None        # 이 기억이 어느 맵의 것인지
         self._last_box_collision_recover_request_time = 0.0
         self._support_follow_hold_distance = 1
         self._support_follow_soft_stuck_count = 0
@@ -395,6 +397,19 @@ class RouteSvc(threading.Thread):
         return True
 
     # ----------------------------------------------------------
+    def _forget_blocked_cells_on_map_change(self):
+        """맵이 바뀌면 벽 기억을 버린다. 좌표계가 맵마다 달라서, 안 버리면
+        새 맵의 멀쩡한 칸이 이전 맵의 벽 때문에 막힌 것으로 취급된다."""
+        now_map = self._learning_map_name()
+        if not now_map:
+            return
+        if self._blocked_cells_map != now_map:
+            if self._blocked_cells_map is not None and self._blocked_cells_until:
+                print(f"[NavMem] 맵 변경({self._blocked_cells_map} -> {now_map}) - 벽 기억 초기화")
+            self._blocked_cells_map = now_map
+            self._blocked_cells_until.clear()
+            self._blocked_cell_hits.clear()
+
     def _prune_blocked_cells(self):
         now = time.time()
         expired = [cell for cell, until in self._blocked_cells_until.items() if until <= now]
@@ -475,10 +490,20 @@ class RouteSvc(threading.Thread):
 
     def _remember_blocked_cell(self, gx: int, gy: int, reason: str = "stuck"):
         self._prune_blocked_cells()
+        self._forget_blocked_cells_on_map_change()
         cell = (int(gx), int(gy))
         hits = int(self._blocked_cell_hits.get(cell, 0)) + 1
         self._blocked_cell_hits[cell] = hits
-        ttl = min(self._blocked_cell_max_ttl, self._blocked_cell_base_ttl + (hits - 1) * 2.0)
+        # 몬스터가 서 있어서 막힌 칸은 곧 비워지므로 짧게 잡는다. 진짜 벽은
+        # 세션 내내 그 자리이므로 오래 기억해야 한다 - 6초로는 벽 하나를
+        # 배우는 데 걸리는 시간(2회 실패 = 약 3.4초)을 감안하면 열 칸짜리
+        # 벽면을 다 그리기도 전에 앞쪽을 잊어서, 지도가 영영 완성되지 않는다
+        # (실측: 흉가1의 y=15가 x=1~10까지 막혀 있는데 계속 다시 부딪힘).
+        if cell in self._detected_monster_cells():
+            ttl = self._blocked_cell_base_ttl
+        else:
+            ttl = min(self._blocked_cell_wall_ttl,
+                      60.0 + (hits - 1) * 30.0)
         until = time.time() + ttl
         prev_until = float(self._blocked_cells_until.get(cell, 0.0) or 0.0)
         self._blocked_cells_until[cell] = max(prev_until, until)
@@ -1864,7 +1889,7 @@ class RouteSvc(threading.Thread):
         if not follow_mode and not portal_follow:
             known_blocked = self._get_blocked_cells() | self._known_wall_cells()
             if len(known_blocked) >= 3:
-                detour = hunt.path_step((cx, cy), (tx, ty), known_blocked)
+                detour = hunt.path_step((cx, cy), (tx, ty), known_blocked, radius=24)
                 if detour and detour != step_dir:
                     now_d = time.time()
                     if now_d - getattr(self, "_last_detour_log", 0.0) >= 2.0:
@@ -1878,7 +1903,8 @@ class RouteSvc(threading.Thread):
         if step_dir is None:
             # greedy도 BFS도 길을 못 찾았다.
             detour = hunt.path_step((cx, cy), (tx, ty),
-                                    self._get_blocked_cells() | self._known_wall_cells())
+                                    self._get_blocked_cells() | self._known_wall_cells(),
+                                    radius=24)
             if detour:
                 print(f"[Nav] 우회 경로: {detour} (({cx},{cy}) -> ({tx},{ty}))")
                 step_dir = detour

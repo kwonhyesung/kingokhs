@@ -295,6 +295,15 @@ def demo():
     gap = [(x, 1) for x in range(0, 20) if x != 9]
     assert path_step((5, 0), (5, 2), blocked=gap) == "right"
 
+    # 실측 배치: 흉가1의 y=15가 x=1~10까지 막혀 있다. (5,14)에서 (9,17)로
+    # 가려면 x=11 쪽으로 크게 돌아야 하고, 그 경로는 12칸을 넘는다.
+    hyunga = [(x, 15) for x in range(1, 11)]
+    # 왼쪽(x=0)보다 오른쪽(x=11)이 가까우므로 그쪽으로 돈다
+    assert path_step((5, 14), (9, 17), blocked=hyunga, radius=24) == "right"
+    # 벽면이 넓어질수록 우회가 멀어져서 반경이 부족해질 수 있다
+    wide = [(x, 15) for x in range(0, 30)]
+    assert path_step((5, 14), (9, 17), blocked=wide, radius=24) is None
+
     # 타겟 선택: 가까운 놈, leash 밖은 무시, sticky는 유지
     mons = [{"name": "달걀", "world": (3, 0)}, {"name": "불귀신", "world": (1, 0)}]
     assert pick_target(mons, (0, 0), (0, 0), 6)["world"] == (1, 0)
