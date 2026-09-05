@@ -19,7 +19,7 @@ SECTIONS = [
     ("하드웨어",   r"^\[(Input\] backend|Hardware\])"),
     ("하드웨어 검사 '/'", r"^\[HWTest\]"),
     ("모드/맵",    r"^\[(Hotkey|Map)\]"),
-    ("이동 진단",  r"^\[(MoveDiag|MoveTest|NavBlock)\]"),
+    ("이동 진단",  r"^\[(MoveDiag|MoveTest|NavBlock|MoveStats)\]"),
     ("사냥",      r"^\[(Hunt|HuntIdle)\]"),
     ("감지",      r"^\[Sentinel\] (몬스터|파티원)"),
     ("막힘",      r"^\[(Stuck|NavMem|WallMem)\]"),

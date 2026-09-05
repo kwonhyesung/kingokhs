@@ -248,6 +248,12 @@ class RouteSvc(threading.Thread):
         self._last_pickup_blocked_by_follow_log_time = 0.0
         self._last_combat_busy_block_log_time = 0.0
         self._last_move_facing_log_time = 0.0
+        # 방향별로 '키를 보냈고 실제로 좌표가 바뀌었나'를 센다.
+        # 한 방향만 0/N이면 그 쪽이 벽이거나 그 키가 안 먹는 것이고,
+        # 둘 다 로그에선 똑같이 '보냈는데 안 움직임'으로 보인다.
+        self._move_result_stats = {}   # dir -> [시도, 좌표변화]
+        self._pending_move = None      # (dir, 보낼 때 좌표)
+        self._last_move_stats_log = 0.0
         # 순찰 포인트 도달 실패 감시
         self._patrol_point_idx_seen = None
         self._patrol_point_started_at = 0.0
@@ -1933,6 +1939,19 @@ class RouteSvc(threading.Thread):
         #   facing이 전혀 안 바뀐다 -> 키가 게임까지 안 갔다.
         # 이 둘은 지금까지 로그에서 완전히 똑같이 보였다.
         now_mv = time.time()
+        # 직전에 보낸 이동이 좌표를 실제로 바꿨는지 채점한다.
+        if self._pending_move:
+            prev_dir, prev_pos = self._pending_move
+            st = self._move_result_stats.setdefault(prev_dir, [0, 0])
+            st[0] += 1
+            if (cx, cy) != prev_pos:
+                st[1] += 1
+        self._pending_move = (step_dir, (cx, cy))
+        if now_mv - self._last_move_stats_log >= 10.0 and self._move_result_stats:
+            self._last_move_stats_log = now_mv
+            parts = " ".join(f"{d}={v[1]}/{v[0]}"
+                             for d, v in sorted(self._move_result_stats.items()))
+            print(f"[MoveStats] 방향별 이동성공 {parts}  (0/N인 방향 = 벽이거나 그 키가 안 먹음)")
         if now_mv - self._last_move_facing_log_time >= 1.0:
             self._last_move_facing_log_time = now_mv
             print(f"[MoveDiag] {step_dir} 키 전송됨 | pos=({cx},{cy}) "
