@@ -254,6 +254,7 @@ class RouteSvc(threading.Thread):
         # 둘 다 로그에선 똑같이 '보냈는데 안 움직임'으로 보인다.
         self._move_result_stats = {}   # dir -> [시도, 좌표변화]
         self._pending_move = None      # (dir, 보낼 때 좌표)
+        self._move_fail_streak = {}    # (좌표, 방향) -> 연속 실패 횟수
         self._last_move_stats_log = 0.0
         # 순찰 포인트 도달 실패 감시
         self._patrol_point_idx_seen = None
@@ -1981,15 +1982,19 @@ class RouteSvc(threading.Thread):
             st[0] += 1
             if (cx, cy) != prev_pos:
                 st[1] += 1
+                self._move_fail_streak.clear()   # 움직였으면 실패 기록은 무효
             else:
-                # 키는 나갔는데 좌표가 그대로 = 그 칸이 막혔다. 바로 기록해야
-                # 다음 선택에서 빠진다. 이게 없으면 목표 쪽 방향을 고르는
-                # 로직이 매번 같은 벽을 다시 고르고, 4방향이 다 막히는 일이
-                # 없으니 step_dir이 None이 안 되고, 그래서 BFS 우회로가
-                # 호출조차 안 된다 (실측: down 355번 시도 13번 성공,
-                # [Nav] 우회 경로 로그 0줄).
-                bx, by = _nav_step_from_dir(prev_pos[0], prev_pos[1], prev_dir)
-                self._remember_blocked_cell(bx, by, reason="no_move")
+                # 키는 나갔는데 좌표가 그대로다. 다만 한 번으로 벽이라고
+                # 단정하면 안 된다 - 좌표는 화면 OCR로 읽어서 이동보다 한
+                # 박자 늦게 갱신되고, 실측에서 캐릭터가 실제로 밟고 지나간
+                # 칸((8,13),(8,14))까지 막힘으로 기록해 스스로 길을 막았다.
+                # 같은 자리에서 같은 방향이 두 번 연속 실패해야 벽으로 본다.
+                key = (prev_pos, prev_dir)
+                fails = self._move_fail_streak.get(key, 0) + 1
+                self._move_fail_streak[key] = fails
+                if fails >= 2:
+                    bx, by = _nav_step_from_dir(prev_pos[0], prev_pos[1], prev_dir)
+                    self._remember_blocked_cell(bx, by, reason="no_move")
         self._pending_move = (step_dir, (cx, cy))
         if now_mv - self._last_move_stats_log >= 10.0 and self._move_result_stats:
             self._last_move_stats_log = now_mv
