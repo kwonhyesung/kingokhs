@@ -151,7 +151,7 @@ def test_inventory_full_skips_pickup_but_not_hunting():
 
 
 def test_pickup_presses_comma_on_exact_arrival():
-    """줍기는 아이템 칸에 올라서서 ',' - '0' 마법은 이동 중 실패할 수 있다."""
+    """줍기는 ','(같은 칸)와 '0'(1칸 앞)을 둘 다 눌러 성공률을 올린다."""
     logic, state, keys = make_logic(
         detected_items_world=[{"name": "호박", "world": (12, 10)}],
         last_move_time=time.time() - 1.0)
@@ -159,7 +159,7 @@ def test_pickup_presses_comma_on_exact_arrival():
     state.item_pickup_arrived = True
     state.detected_items_world = []                 # 주워져서 사라짐
     logic._run_warrior_attack_loot_cycle()
-    assert keys == [","], keys
+    assert keys == [",", "0"], keys
     assert logic._item_job is None                  # 줍기 완료
 
 
@@ -172,7 +172,7 @@ def test_pickup_retries_on_neighbour_when_item_still_there():
     # ',' 를 눌러도 아이템이 그대로 보임 = 좌표가 한 칸 어긋났다
     state.detected_items_world = [{"name": "호박", "world": (12, 11)}]
     logic._run_warrior_attack_loot_cycle()
-    assert keys == [","]
+    assert keys == [",", "0"]
     assert state.item_pickup_target == (12, 11)     # 옆칸으로 재시도
     assert logic._item_job["tries"] == 1
 

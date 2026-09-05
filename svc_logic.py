@@ -4104,17 +4104,29 @@ class LogicSvc(threading.Thread):
         if not getattr(self.state, "item_pickup_arrived", False):
             return
 
-        # 아이템과 같은 칸에 올라섰다 - 줍기 키
+        # 아이템과 같은 칸에 올라섰다 - 줍기 키를 순서대로 다 써본다.
+        # ','(같은 칸)와 '0'(바라보는 방향 1칸)은 닿는 범위가 서로 달라서,
+        # 좌표가 한 칸 어긋났을 때 어느 쪽이 맞을지 미리 알 수 없다. 둘 다
+        # 눌러 성공률을 올린다 - 헛손질 한 번이 못 줍는 것보다 싸다.
         pk = cfg.get("pickup_key")
         if isinstance(pk, dict):                      # attack_key와 같은 role별 표기
-            pickup_key = str(pk.get(getattr(self.state, "role", ""), ","))
+            pk = pk.get(getattr(self.state, "role", ""))
+        if isinstance(pk, (list, tuple)):
+            pickup_keys = [str(k) for k in pk if str(k)]      # config가 명시하면 그대로
+        elif self._is_warrior_role():
+            # 격수는 둘 다 쓴다. config에 옛 기본값 ','만 남아 있어도
+            # '0'을 빼먹지 않게 role로 결정한다.
+            pickup_keys = [",", "0"]
+        elif pk:
+            pickup_keys = [str(pk)]
         else:
-            pickup_key = str(pk or ",")
-        got = self._press_hw_key(pickup_key, variance=0.08, skip_focus_guard=True)
-        if not got:
-            # 전송 실패를 조용히 넘기면 "주웠는데 아이템이 그대로"로 보여서
-            # 좌표가 어긋난 것과 구별이 안 된다.
-            print(f"[Hunt] 줍기키 '{pickup_key}' 전송 실패 - 줍기 안 나감")
+            pickup_keys = [","]
+        for key in pickup_keys:
+            if not self._press_hw_key(key, variance=0.08, skip_focus_guard=True):
+                # 전송 실패를 조용히 넘기면 "주웠는데 아이템이 그대로"로 보여서
+                # 좌표가 어긋난 것과 구별이 안 된다.
+                print(f"[Hunt] 줍기키 '{key}' 전송 실패 - 줍기 안 나감")
+            humanized_sleep(TIMING_CONFIG["key_down_hold"])
         humanized_sleep(TIMING_CONFIG["enter_wait"])
         job["tries"] = int(job.get("tries", 0)) + 1
         self._clear_hunt_move_target()
