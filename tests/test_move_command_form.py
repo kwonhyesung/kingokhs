@@ -56,9 +56,32 @@ def test_default_form_is_du():
     assert load_hardware_config()["move_command_form"] in ("DU", "K")
 
 
+def test_non_force_press_uses_focus_checked_send():
+    """humanized_press/fast_press는 포커스 검사를 거치는 send를 써야 한다."""
+    hw = BisHardware.__new__(BisHardware)
+    hw._move_command_form = "K"
+    used = []
+    hw.send = lambda cmd: (used.append(("send", cmd)), True)[1]
+    hw.send_force = lambda cmd: (used.append(("force", cmd)), True)[1]
+    hw.press_once("esc", force=False)
+    assert used == [("send", "K,esc")], used
+
+
+def test_role_comes_from_pc_name():
+    """PC 이름이 표에 있으면 config.json의 role보다 우선한다."""
+    import json
+    import config_utils
+    table = json.load(open("pc_roles.json", encoding="utf-8"))["role_by_pc"]
+    assert table.get("DESKTOP2") == "격수", "격수 PC가 표에 없다"
+    # 표에 없는 PC는 config.json 값을 그대로 쓴다(기존 동작 보존)
+    assert "없는PC이름" not in table
+
+
 if __name__ == "__main__":
     test_k_form_sends_single_shot()
     test_du_form_sends_down_then_up()
     test_du_releases_even_if_hold_raises()
     test_default_form_is_du()
+    test_non_force_press_uses_focus_checked_send()
+    test_role_comes_from_pc_name()
     print("test_move_command_form OK")

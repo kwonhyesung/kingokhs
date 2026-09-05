@@ -1438,21 +1438,25 @@ class BisHardware:
         with self._lock:
             return self._deliver(str(cmd or ""))
 
-    def press_once(self, key: str, duration: float = None, variance: float = 0.15) -> bool:
+    def press_once(self, key: str, duration: float = None, variance: float = 0.15,
+                   force: bool = True) -> bool:
         """이 PC의 ESP32가 실제로 인식하는 형식으로 키를 한 번 누른다.
 
         두 PC의 ESP32가 정반대로 동작하는 게 실측으로 확인됐다:
         격수 PC(COM3)는 'K,<키>'만 먹히고 'D:/U:'는 무시하며, 도사 PC(COM11)는
         'D:/U:'로 문을 통과하는데 'K,'로는 한 번도 안 됐다. 그래서 형식을
         코드에 못 박고 PC별 설정(홈 디렉터리, git 밖)에서 읽는다."""
+        emit = self.send_force if force else self.send
         if self._move_command_form == "K":
             # 단발 명령이라 duration을 못 준다 - 이 게임의 한 걸음이 곧 한 탭이다.
-            return self.send_force(f"K,{key}")
-        pressed = self.send_force(f"D:{key}")
+            return emit(f"K,{key}")
+        pressed = emit(f"D:{key}")
         try:
             humanized_sleep(float(duration) if duration is not None
                             else TIMING_CONFIG["key_down_hold"], variance)
         finally:
+            # 키 떼기는 항상 강제로 - 포커스가 잠깐 흔들려도 눌린 채로 남으면
+            # 캐릭터가 계속 걷는다(send는 U: 를 통과시키지만 명시해 둔다).
             self.send_force(f"U:{key}")
         return pressed
 
@@ -1475,22 +1479,14 @@ class BisHardware:
         pause = HumanBehaviorSimulator.simulate_pause('click')
         time.sleep(pause)
 
-        actual_key = display_game_hotkey(key)
-        pressed = self.send(f"D:{actual_key}")
-        humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
-        self.send(f"U:{actual_key}")
-        return pressed
+        return self.press_once(display_game_hotkey(key), variance=variance, force=False)
 
     def fast_press(self, key: str, variance: float = 0.15) -> bool:
         """
         Ultra-fast key press (ft.ahk-style): no HumanBehaviorSimulator pause.
         Use this for trigger reactions where speed matters.
         """
-        actual_key = display_game_hotkey(key)
-        pressed = self.send(f"D:{actual_key}")
-        humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
-        self.send(f"U:{actual_key}")
-        return pressed
+        return self.press_once(display_game_hotkey(key), variance=variance, force=False)
 
     def force_press(self, key: str, variance: float = 0.15) -> bool:
         """포커스 체크 없이 1회 키 입력. 이동 중 테스트 마법처럼 강제 전송이 필요할 때 사용."""

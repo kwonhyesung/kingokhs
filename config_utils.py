@@ -98,6 +98,7 @@ DEFAULT_NETWORK_CONFIG = {
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 LOCAL_CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".system_parallel_sota.local.json")
 LEGACY_LOCAL_CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.local.json")
+PC_ROLES_FILE = os.path.join(SCRIPT_DIR, "pc_roles.json")
 GUI_STATE_FILE = os.path.join(SCRIPT_DIR, "gui_state.json")
 TEMPLATE_DIGIT_DIR = os.path.join(SCRIPT_DIR, "temple", "digits")
 
@@ -127,6 +128,19 @@ def load_network_config() -> dict:
             if isinstance(net, dict):
                 merged_network.update(net)
         cfg["role"] = str(merged_network.get("role", cfg["role"]) or cfg["role"])
+        # PC 이름이 pc_roles.json에 있으면 그게 이긴다. config.json의 role은
+        # PC마다 달라서 git pull 충돌을 푸는 과정에서 저장소 값(도사1)으로
+        # 되돌아가기 쉽고, 실제로 격수 PC가 그렇게 도사1로 실행됐다 - 그러면
+        # 격수 로직이 통째로 안 도는데 로그는 정상으로 보인다. PC 이름은
+        # 그 PC에서 안 바뀌므로 여기에 못을 박는다.
+        by_pc = _load_json_file(PC_ROLES_FILE).get("role_by_pc", {})
+        if isinstance(by_pc, dict):
+            role = by_pc.get(pysocket.gethostname())
+            if role:
+                if str(role) != cfg["role"]:
+                    print(f"[Net] role: config.json '{cfg['role']}' -> "
+                          f"pc_roles.json '{role}' (PC 이름으로 결정)")
+                cfg["role"] = str(role)
         cfg["server_ip"] = str(merged_network.get("server_ip", cfg["server_ip"]) or cfg["server_ip"])
         cfg["bind_host"] = str(merged_network.get("bind_host", cfg["bind_host"]) or cfg["bind_host"])
         cfg["telemetry_port"] = int(merged_network.get("telemetry_port", cfg["telemetry_port"]) or cfg["telemetry_port"])
