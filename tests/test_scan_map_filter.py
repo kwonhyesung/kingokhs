@@ -125,10 +125,28 @@ def test_known_walls_file_covers_the_blocked_row():
     assert path_step((5, 14), (9, 17), set(), radius=24) == "down"
 
 
+def test_portal_cells_are_not_walked_into():
+    """흉가1의 (0,12)/(0,13)은 포탈이다. 벽을 왼쪽으로 우회하다 이걸 밟아서
+    '천안궁성흉가입구'로 넘어가 버렸다 - 경로에서 빼야 한다."""
+    import json
+    from svc_hunt import path_step
+
+    cfg = json.load(open("hunt_maps.json", encoding="utf-8"))
+    portals = {(c[0], c[1]) for c in cfg["avoid_cells"]["흉가1"]}
+    walls = {(c[0], c[1]) for c in cfg["known_walls"]["흉가1"]}
+    assert portals == {(0, 12), (0, 13)}, portals
+
+    # (0,14)에서 위로 가려 할 때, 포탈을 알면 그쪽으로 발을 딛지 않는다
+    assert path_step((0, 14), (0, 11), portals | walls, radius=24) != "up"
+    # 모르면 곧장 포탈로 올라간다(= 맵을 벗어났던 동작)
+    assert path_step((0, 14), (0, 11), walls, radius=24) == "up"
+
+
 if __name__ == "__main__":
     test_precomputed_gray_gives_identical_results()
     test_monsters_for_map_matches_by_prefix()
     test_hunt_maps_json_wins_over_config_json()
     test_only_names_filters_direction_suffixes()
     test_known_walls_file_covers_the_blocked_row()
+    test_portal_cells_are_not_walked_into()
     print("test_scan_map_filter OK")
