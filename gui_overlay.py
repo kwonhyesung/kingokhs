@@ -203,9 +203,15 @@ class ROIIndicator(tk.Toplevel):
             return
 
         try:
-            left, top = win32gui.ClientToScreen(self.hwnd, (0, 0))
-            _, _, w, h = win32gui.GetClientRect(self.hwnd)
-            self.geometry(f"{w}x{h}+{left}+{top}")
+            # ROI 사각형도 마커도 좌표계가 '캡처 프레임 = 화면'이다
+            # (hw.click_pixel이 같은 값을 그대로 SetCursorPos에 넣는다).
+            # 예전엔 오버레이를 게임창 '클라이언트' 영역에 맞췄는데, 그러면
+            # 창 테두리 높이만큼 전부 어긋난다. 이 PC는 게임을 크롬 탭으로
+            # 띄워서 find_game_window_any가 크롬 창("...바람의나라 클래식
+            # - Chrome")을 게임창으로 잡았고, 그래서 마젠타 점이 엉뚱한
+            # 자리로 밀려 안 보였다. 화면 전체를 덮으면 변환이 필요 없다.
+            w, h = self.winfo_screenwidth(), self.winfo_screenheight()
+            self.geometry(f"{w}x{h}+0+0")
             self.deiconify()
             self.lift()
             self.canvas.delete("all")

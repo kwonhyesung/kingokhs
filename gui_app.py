@@ -3638,12 +3638,10 @@ class AppView:
             # 안 불려서 캔버스에 마지막 점이 지워지지 않고 그대로 남는다.
             if not getattr(self.state, "visual_markers", None):
                 return
-            hwnd = find_game_window_any()
-            if not hwnd:
-                self._marker_log_once("[GUI] 마커 오버레이: 게임창 못 찾음")
-                return
-            self.indicator = ROIIndicator(self.root, hwnd, self.state)
-            self._marker_log_once(f"[GUI] 마커 오버레이 생성 hwnd={hwnd}")
+            # 게임창을 찾을 필요가 없다 - 오버레이는 화면 전체를 덮고 화면
+            # 좌표로 그린다. 제목 검색은 크롬 탭까지 잡아서 틀린 창에 맞춰졌다.
+            self.indicator = ROIIndicator(self.root, getattr(self.state, "hwnd", None), self.state)
+            self._marker_log_once("[GUI] 마커 오버레이 생성 (화면 전체)")
         reader_thread = getattr(self, "reader_thread", None)
         self.indicator.update_position(getattr(reader_thread, "regions", {}) or {})
 
