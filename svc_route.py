@@ -1855,11 +1855,27 @@ class RouteSvc(threading.Thread):
         elif step_dir is not None:
             self._follow_blocked_memory_count = 0
 
+        # 막힌 칸을 이미 알고 있다면 BFS가 greedy보다 낫다. greedy는 한 칸
+        # 앞만 보므로, 목표 쪽이 벽이고 통로가 옆으로 몇 칸 떨어진 배치를
+        # 못 푼다 (실측: down 355번 시도해서 13번 성공, y=15로 끝내 못 감).
+        # 4방향이 전부 막혀야만 step_dir이 None이 되는데 좌우는 늘 열려
+        # 있어서, 우회로 계산이 호출조차 되지 않았다.
+        if not follow_mode and not portal_follow:
+            known_blocked = self._get_blocked_cells() | self._known_wall_cells()
+            if len(known_blocked) >= 3:
+                detour = hunt.path_step((cx, cy), (tx, ty), known_blocked)
+                if detour and detour != step_dir:
+                    now_d = time.time()
+                    if now_d - getattr(self, "_last_detour_log", 0.0) >= 2.0:
+                        self._last_detour_log = now_d
+                        print(f"[Nav] 우회 경로: {detour} (({cx},{cy}) -> ({tx},{ty}), "
+                              f"greedy={step_dir}, 막힌칸 {len(known_blocked)}개)")
+                    step_dir = detour
+                elif detour:
+                    step_dir = detour
+
         if step_dir is None:
-            # 한 칸 앞만 보는 선택(greedy)이 막혔다. 목표까지 벽을 돌아가는
-            # 경로가 있는지 BFS로 본다 - 실측에서 격수가 y=14에 갇혔는데,
-            # 아래로 내려가는 통로가 x축으로 몇 칸 떨어져 있어서 "아래로"만
-            # 고르는 방식으로는 원리적으로 못 가는 배치였다.
+            # greedy도 BFS도 길을 못 찾았다.
             detour = hunt.path_step((cx, cy), (tx, ty),
                                     self._get_blocked_cells() | self._known_wall_cells())
             if detour:
@@ -1965,6 +1981,15 @@ class RouteSvc(threading.Thread):
             st[0] += 1
             if (cx, cy) != prev_pos:
                 st[1] += 1
+            else:
+                # 키는 나갔는데 좌표가 그대로 = 그 칸이 막혔다. 바로 기록해야
+                # 다음 선택에서 빠진다. 이게 없으면 목표 쪽 방향을 고르는
+                # 로직이 매번 같은 벽을 다시 고르고, 4방향이 다 막히는 일이
+                # 없으니 step_dir이 None이 안 되고, 그래서 BFS 우회로가
+                # 호출조차 안 된다 (실측: down 355번 시도 13번 성공,
+                # [Nav] 우회 경로 로그 0줄).
+                bx, by = _nav_step_from_dir(prev_pos[0], prev_pos[1], prev_dir)
+                self._remember_blocked_cell(bx, by, reason="no_move")
         self._pending_move = (step_dir, (cx, cy))
         if now_mv - self._last_move_stats_log >= 10.0 and self._move_result_stats:
             self._last_move_stats_log = now_mv
