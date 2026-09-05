@@ -111,9 +111,24 @@ def test_only_names_filters_direction_suffixes():
     assert "갈산신" in captured["combined"]
 
 
+def test_known_walls_file_covers_the_blocked_row():
+    """흉가1의 y=15는 x=1~10이 막혀 있다 - 이걸 미리 알아야 첫 실행부터 돈다."""
+    import json
+    from svc_hunt import path_step
+
+    cfg = json.load(open("hunt_maps.json", encoding="utf-8"))
+    walls = {(c[0], c[1]) for c in cfg["known_walls"]["흉가1"]}
+    assert walls == {(x, 15) for x in range(1, 11)}, walls
+    # 그 벽을 알면 (5,14)에서 (9,17)로 가는 길을 찾는다
+    assert path_step((5, 14), (9, 17), walls, radius=24) == "right"
+    # 모르면 벽으로 곧장 들어간다(= 지금까지의 동작)
+    assert path_step((5, 14), (9, 17), set(), radius=24) == "down"
+
+
 if __name__ == "__main__":
     test_precomputed_gray_gives_identical_results()
     test_monsters_for_map_matches_by_prefix()
     test_hunt_maps_json_wins_over_config_json()
     test_only_names_filters_direction_suffixes()
+    test_known_walls_file_covers_the_blocked_row()
     print("test_scan_map_filter OK")

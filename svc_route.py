@@ -481,12 +481,42 @@ class RouteSvc(threading.Thread):
         self._walls.save()
 
     def _known_wall_cells(self) -> set:
-        """이 맵에서 학습된 영구 벽. BFS가 우회로를 찾을 때 쓴다."""
+        """이 맵의 벽. BFS가 우회로를 찾을 때 쓴다.
+
+        두 곳을 합친다: maps.json(봇이 부딪혀 배운 것)과 hunt_maps.json의
+        known_walls(사람이 확실히 아는 것을 미리 적어둔 것). 후자가 있으면
+        첫 실행부터 우회한다 - 벽 한 칸을 배우는 데 3초 넘게 걸려서, 열 칸짜리
+        벽면은 배우는 동안 계속 헤맨다."""
+        cells = set()
+        map_name = self._learning_map_name()
         try:
-            walls = (self.state.maps_db.get(self._learning_map_name()) or {}).get("walls") or []
-            return {(int(c[0]), int(c[1])) for c in walls}
+            walls = (self.state.maps_db.get(map_name) or {}).get("walls") or []
+            cells |= {(int(c[0]), int(c[1])) for c in walls}
         except Exception:
-            return set()
+            pass
+        try:
+            preset = (self._hunt_maps_cfg().get("known_walls") or {}).get(map_name) or []
+            cells |= {(int(c[0]), int(c[1])) for c in preset}
+        except Exception:
+            pass
+        return cells
+
+    def _hunt_maps_cfg(self) -> dict:
+        """hunt_maps.json (60초 캐시). 없으면 빈 dict."""
+        now = time.time()
+        cached, at = getattr(self, "_hunt_maps_cache", (None, 0.0))
+        if cached is not None and now - at < 60.0:
+            return cached
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hunt_maps.json")
+            with open(path, encoding="utf-8") as f:
+                cached = json.load(f)
+            if not isinstance(cached, dict):
+                cached = {}
+        except Exception:
+            cached = {}
+        self._hunt_maps_cache = (cached, now)
+        return cached
 
     def _remember_blocked_cell(self, gx: int, gy: int, reason: str = "stuck"):
         self._prune_blocked_cells()
