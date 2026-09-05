@@ -289,6 +289,7 @@ class GameState:
         self.last_debuff_y         = 0
         # 캐릭터 중심 상대 좌표계
         self.my_screen_pos         = (0, 0)  # my_arrow 화면 좌표 (screen_x, screen_y)
+        self.my_facing             = ""     # 내 캐릭터가 보는 방향 패턴 이름
         self.my_world_pos          = (0, 0)  # OCR로 읽은 월드 좌표 (world_x, world_y)
         self.detected_entities     = []      # 월드 좌표 역계산된 엔티티 리스트
         self.last_bomu_time        = 0.0

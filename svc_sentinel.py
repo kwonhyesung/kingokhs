@@ -195,6 +195,11 @@ class SentinelThread(threading.Thread):
                 if self_hits:
                     best_self = max(self_hits, key=lambda h: h["score"])
                     my_screen_pos = (best_self["cx"], best_self["cy"])
+                    # 내 캐릭터가 지금 어느 쪽을 보고 있는지(점프_left/right/
+                    # top/back 중 뭐가 잡혔는지). 이동 키를 눌렀는데 좌표가
+                    # 안 변할 때, 캐릭터가 '제자리에서 돌기만 한 것'인지
+                    # '아예 아무 반응이 없는 것'인지를 가르는 유일한 단서다.
+                    self.state.my_facing = str(best_self.get("name", ""))
             self.state.my_screen_pos = my_screen_pos
 
             # ponytail: 반경 크롭을 뺐다 - party(전체 play_area 스캔)는 항상

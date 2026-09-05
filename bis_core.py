@@ -504,6 +504,9 @@ class GameState:
     
     # 좌표 관리
     my_screen_pos: Tuple[int, int] = (0, 0)
+    # 내 캐릭터가 보고 있는 방향(점프_left/right/top/back 중 잡힌 패턴 이름).
+    # 이동 키를 눌렀는데 좌표가 안 변할 때 '돌기만 함'과 '무반응'을 가른다.
+    my_facing: str = ""
     my_world_pos: Tuple[float, float] = (0.0, 0.0)
     
     # 아이템 관리

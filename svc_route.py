@@ -247,6 +247,7 @@ class RouteSvc(threading.Thread):
         self._last_walked_cell = None
         self._last_pickup_blocked_by_follow_log_time = 0.0
         self._last_combat_busy_block_log_time = 0.0
+        self._last_move_facing_log_time = 0.0
         # 순찰 포인트 도달 실패 감시
         self._patrol_point_idx_seen = None
         self._patrol_point_started_at = 0.0
@@ -1925,6 +1926,17 @@ class RouteSvc(threading.Thread):
             # actual move ever attempted again.
             self._log_portal_move_block("hold_move_no_op")
             return False
+        # 키는 실제로 나갔다. 그런데도 좌표가 안 변하는 경우가 있어서, 그때
+        # 캐릭터가 어느 쪽을 보고 있는지를 같이 남긴다(1초 제한):
+        #   facing이 step_dir을 따라 바뀌는데 좌표만 그대로 -> 키는 게임에
+        #     닿았고 캐릭터는 '제자리에서 방향만 트는' 중이다(또는 진짜 벽).
+        #   facing이 전혀 안 바뀐다 -> 키가 게임까지 안 갔다.
+        # 이 둘은 지금까지 로그에서 완전히 똑같이 보였다.
+        now_mv = time.time()
+        if now_mv - self._last_move_facing_log_time >= 1.0:
+            self._last_move_facing_log_time = now_mv
+            print(f"[MoveDiag] {step_dir} 키 전송됨 | pos=({cx},{cy}) "
+                  f"facing={getattr(self.state, 'my_facing', '') or '?'}")
         self.state.last_move_dir = step_dir
         self._mark_nav_attempt()
         if portal_follow:
