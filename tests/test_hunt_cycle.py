@@ -309,6 +309,20 @@ def run_all():
     print(f"{len(fns)} passed")
 
 
+def test_anchor_survives_being_swarmed():
+    """몬스터에 둘러싸여 이팩트에 가리면 캐릭터 패턴이 통째로 안 잡힌다.
+    화면상 내 픽셀 위치는 카메라가 따라다녀 거의 안 변하는 기준점이라,
+    못 찾은 프레임은 마지막 값을 쓴다 - 단, 맵 스크롤로 어긋나므로 TTL까지만."""
+    from svc_sentinel import SentinelThread
+
+    s = SentinelThread.__new__(SentinelThread)
+    s._last_self_pos = ((0, 0), 0.0)
+    assert s._anchor_with_fallback((600, 400), 100.0) == (600, 400)
+    assert s._anchor_with_fallback((0, 0), 101.0) == (600, 400), "가려진 한 프레임에 기준점을 잃었다"
+    assert s._anchor_with_fallback((0, 0), 100.0 + SentinelThread.SELF_POS_TTL + 0.1) == (0, 0), \
+        "오래된 기준점을 계속 쓰면 엉뚱한 칸을 때린다"
+
+
 if __name__ == "__main__":
     hunt.demo()
     run_all()

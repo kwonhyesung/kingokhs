@@ -33,6 +33,7 @@ class SentinelThread(threading.Thread):
         # 디바운싱 로직: 3프레임 연속 감지 시 확정
         self._monster_history = {}  # {"x_y": [frame_count, last_seen_time]}
         self._char_pattern_lost_since = 0.0
+        self._last_self_pos = ((0, 0), 0.0)   # (마지막으로 찾은 my_screen_pos, 시각)
         self._last_slow_cycle_log_time = 0.0
         self._cfg_cache = (None, 0.0)
         self._maps_cfg_cache = (None, 0.0)
@@ -109,6 +110,17 @@ class SentinelThread(threading.Thread):
             if map_name.startswith(str(prefix)):
                 return {str(n) for n in (names or [])}
         return set()
+
+    SELF_POS_TTL = 3.0   # 캐릭터 패턴을 놓쳐도 기준점을 유지하는 시간(초)
+
+    def _anchor_with_fallback(self, found: tuple, now: float) -> tuple:
+        """이번 프레임에 찾은 캐릭터 위치. 못 찾았으면 마지막 값(TTL 안)."""
+        if found != (0, 0):
+            self._last_self_pos = (found, now)
+            return found
+        if now - self._last_self_pos[1] <= self.SELF_POS_TTL:
+            return self._last_self_pos[0]
+        return (0, 0)
 
     def _log_bad_world_pos(self, entity, world, me):
         """맵 밖 좌표로 계산된 감지를 버렸다고 남긴다(5초 제한).
@@ -211,6 +223,17 @@ class SentinelThread(threading.Thread):
                     # 보일 수 있다. 잡힌 방향 패턴을 전부 남긴다.
                     self.state.my_facing = ",".join(sorted(
                         h["name"].rsplit("_", 1)[-1] for h in self_hits))
+            # 몬스터에 둘러싸이면 이팩트/스프라이트가 겹쳐 캐릭터 패턴이 통째로
+            # 안 잡힌다 (실측: 사냥 중 '점프_* 못 찾음'이 반복되며 사냥이 멈춤).
+            # 그런데 이 값은 매 프레임 새로 찾아야 하는 값이 아니다 - 카메라가
+            # 캐릭터를 따라다녀서 화면상 픽셀 위치는 거의 안 변하는 '기준점'이다.
+            # 그래서 못 찾은 프레임은 마지막으로 찾은 값을 재사용한다.
+            # ponytail: TTL로 끊는 게 한계다 - 맵이 스크롤되면 기준점이 실제로
+            # 어긋나는데 그걸 알 방법이 지금은 없다. 어긋난 채로 계속 사냥하면
+            # 엉뚱한 칸을 때리므로, 오래된 값은 버리고 사냥을 쉬는 쪽을 택했다.
+            # 더 버텨야 하면 hp_bar(피격/회복 중엔 이팩트 위에 뜬다)를 party
+            # 패턴으로 하나 더 잡아서 2차 기준점으로 쓰면 된다.
+            my_screen_pos = self._anchor_with_fallback(my_screen_pos, now)
             self.state.my_screen_pos = my_screen_pos
 
             # ponytail: 반경 크롭을 뺐다 - party(전체 play_area 스캔)는 항상
@@ -372,6 +395,22 @@ class SentinelThread(threading.Thread):
                         continue
                     e["world_pos"] = (wx, wy)
                     detected_entities.append(e)
+
+            # 게임창 오버레이 점(0.5초). 로그의 숫자만 보면 "기준점이 어긋난
+            # 것"과 "몬스터 좌표 변환이 틀린 것"을 구분할 수 없다 - 초록점이
+            # 캐릭터 위에 오는지, 빨간점이 몬스터 위에 오는지를 눈으로 보면
+            # 한 화면에서 갈린다. 초록점은 봇이 '클릭할' 지점(패턴 중심 +
+            # click_offset_y)에 찍는다 - 그래야 그 숫자를 보고 맞출 수 있다.
+            pa_sx, pa_sy = int(_pa_cfg.get("sx", 0) or 0), int(_pa_cfg.get("sy", 0) or 0)
+            marks = [{"x": m.get("cx", 0) + pa_sx, "y": m.get("cy", 0) + pa_sy,
+                      "color": "red", "size": 12, "expiry": now + 0.5} for m in monsters]
+            if my_screen_pos != (0, 0):
+                marks.append({"x": my_screen_pos[0] + pa_sx,
+                              "y": my_screen_pos[1] + pa_sy + int(_pa_cfg.get("click_offset_y", 25) or 25),
+                              "color": "green", "size": 12, "expiry": now + 0.5})
+            if marks:
+                with self.state._lock:
+                    self.state.visual_markers.extend(marks)
 
             # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (테스트 중 눈으로 확인하기 위함).
             # 좌표(x,y)도 같이 찍는다 - 이름만으론 "감지는 되는데 위치가 맞는지"를

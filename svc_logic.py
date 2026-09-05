@@ -43,6 +43,7 @@ from bis_core import (
 )
 from bis_spell import RecoveryManager
 import svc_hunt as hunt
+from svc_monitor_common import click_offset_y
 
 _CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 from support_runtime_rules import (
@@ -73,6 +74,8 @@ from support_runtime_rules import (
 )
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
 RESTORE_GATE_DIAG_INTERVAL_SEC = 3.0
 
 
@@ -2516,7 +2519,7 @@ class LogicSvc(threading.Thread):
         hits.sort(key=lambda h: -float(h.get("score", 0.0) or 0.0))
         best = hits[0]
         px = int(best.get("cx", 0)) + offset_x
-        py = int(best.get("cy", 0)) + offset_y
+        py = int(best.get("cy", 0)) + offset_y + click_offset_y()
         print(f"[TargetConfirm] character click: name={best.get('name')} pos=({px},{py}) score={best.get('score')}")
         hw.click_pixel(px, py)
         self._sleep_ui_gap(0.03)
