@@ -3632,15 +3632,29 @@ class AppView:
         ROIIndicator는 visible=False면 ROI 사각형은 빼고 마커만 그리도록 이미
         만들어져 있었는데, 갱신 호출이 전부 visible일 때만 돌아서 그 동작이
         한 번도 실행된 적이 없었다."""
-        if not getattr(self.state, "visual_markers", None):
-            return
         if not hasattr(self, "indicator"):
+            # 오버레이가 아직 없을 때만 마커 유무로 건너뛴다. 이미 만들어진
+            # 뒤에도 건너뛰면, 마커가 만료돼 목록이 비는 순간 update_position이
+            # 안 불려서 캔버스에 마지막 점이 지워지지 않고 그대로 남는다.
+            if not getattr(self.state, "visual_markers", None):
+                return
             hwnd = find_game_window_any()
             if not hwnd:
+                self._marker_log_once("[GUI] 마커 오버레이: 게임창 못 찾음")
                 return
             self.indicator = ROIIndicator(self.root, hwnd, self.state)
+            self._marker_log_once(f"[GUI] 마커 오버레이 생성 hwnd={hwnd}")
         reader_thread = getattr(self, "reader_thread", None)
         self.indicator.update_position(getattr(reader_thread, "regions", {}) or {})
+
+    def _marker_log_once(self, msg):
+        """마커 경로는 0.1초마다 도는 루프라 그냥 print하면 로그가 잠긴다."""
+        seen = getattr(self, "_marker_logged", None)
+        if seen is None:
+            seen = self._marker_logged = set()
+        if msg not in seen:
+            seen.add(msg)
+            print(msg)
 
     def update_fast_labels(self):
         """Docstring."""
@@ -3658,8 +3672,10 @@ class AppView:
             if time.time() - getattr(self, "_last_marker_draw", 0.0) >= 0.1:
                 self._last_marker_draw = time.time()
                 self._draw_detection_markers()
-        except Exception:
-            pass
+        except Exception as e:
+            # 여기서 조용히 삼키는 바람에 "점이 안 보인다"의 원인이 로그에
+            # 한 줄도 안 남았다. 같은 예외는 한 번만 찍는다.
+            self._marker_log_once(f"[GUI] 마커 오버레이 실패: {e!r}")
 
         # Tab ?뚮뜑留??ㅼ쐞移??뺤씤
         if not self.tab_enabled.get("dash", True):
