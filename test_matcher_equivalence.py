@@ -49,7 +49,12 @@ def demo():
     for cat in ("monster", "item", "party", "map"):
         for name, text in pats.get(cat, {}).items():
             bgr, _ = _scene(text, rng)
-            p = ft._parse_single_pattern(text)
+            # 선행 '|'를 떼는 건 _parse_text_pattern의 일이다.
+            # _parse_single_pattern에 그대로 넘기면 임계값이 0으로
+            # 파싱돼서 현실과 다른 조건으로 검사하게 된다.
+            p = ft._parse_text_pattern(text)
+            if isinstance(p, list):
+                p = p[0]
             assert p is not None, name
             gray = ft._to_gray(bgr)
             screen_bin = (gray < ((p["color"] + 1) << 7)).astype(np.float32)
