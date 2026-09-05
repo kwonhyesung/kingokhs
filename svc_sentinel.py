@@ -33,7 +33,7 @@ class SentinelThread(threading.Thread):
         # 디바운싱 로직: 3프레임 연속 감지 시 확정
         self._monster_history = {}  # {"x_y": [frame_count, last_seen_time]}
         self._char_pattern_lost_since = 0.0
-        self._last_self_pos = ((0, 0), 0.0)   # (마지막으로 찾은 my_screen_pos, 시각)
+        self._last_self_pos = ((0, 0), 0.0, (0, 0))  # (my_screen_pos, 시각, 그때의 월드좌표)
         self._last_slow_cycle_log_time = 0.0
         self._cfg_cache = (None, 0.0)
         self._maps_cfg_cache = (None, 0.0)
@@ -113,13 +113,23 @@ class SentinelThread(threading.Thread):
 
     SELF_POS_TTL = 3.0   # 캐릭터 패턴을 놓쳐도 기준점을 유지하는 시간(초)
 
-    def _anchor_with_fallback(self, found: tuple, now: float) -> tuple:
-        """이번 프레임에 찾은 캐릭터 위치. 못 찾았으면 마지막 값(TTL 안)."""
+    def _anchor_with_fallback(self, found: tuple, now: float, world: tuple) -> tuple:
+        """이번 프레임에 찾은 캐릭터 위치. 못 찾았으면 마지막 값을 쓴다.
+
+        단, '내가 안 움직였을 때'만이다. 카메라는 캐릭터를 항상 따라다니지
+        않아서(맵 가장자리 등) 화면상 픽셀 위치는 고정값이 아니다 - 대신
+        캐릭터가 움직이지 않았으면 화면도 그대로다. 그래서 좌표 OCR(world)이
+        바뀌면 캐시를 버린다. 이팩트에 가려지는 상황은 둘러싸여 제자리에서
+        때리는 중이라, 정작 필요한 그 순간엔 world가 안 변한다.
+        TTL은 좌표 OCR 자체가 멎었을 때를 위한 2차 안전장치다."""
         if found != (0, 0):
-            self._last_self_pos = (found, now)
+            self._last_self_pos = (found, now, world)
             return found
-        if now - self._last_self_pos[1] <= self.SELF_POS_TTL:
-            return self._last_self_pos[0]
+        last_pos, last_at, last_world = self._last_self_pos
+        if last_world != world:
+            return (0, 0)
+        if now - last_at <= self.SELF_POS_TTL:
+            return last_pos
         return (0, 0)
 
     def _log_bad_world_pos(self, entity, world, me):
@@ -233,7 +243,8 @@ class SentinelThread(threading.Thread):
             # 엉뚱한 칸을 때리므로, 오래된 값은 버리고 사냥을 쉬는 쪽을 택했다.
             # 더 버텨야 하면 hp_bar(피격/회복 중엔 이팩트 위에 뜬다)를 party
             # 패턴으로 하나 더 잡아서 2차 기준점으로 쓰면 된다.
-            my_screen_pos = self._anchor_with_fallback(my_screen_pos, now)
+            my_screen_pos = self._anchor_with_fallback(
+                my_screen_pos, now, tuple(getattr(self.state, "my_world_pos", (0, 0)) or (0, 0)))
             self.state.my_screen_pos = my_screen_pos
 
             # ponytail: 반경 크롭을 뺐다 - party(전체 play_area 스캔)는 항상
@@ -401,13 +412,16 @@ class SentinelThread(threading.Thread):
             # 캐릭터 위에 오는지, 빨간점이 몬스터 위에 오는지를 눈으로 보면
             # 한 화면에서 갈린다. 초록점은 봇이 '클릭할' 지점(패턴 중심 +
             # click_offset_y)에 찍는다 - 그래야 그 숫자를 보고 맞출 수 있다.
+            # 초록이 아니라 마젠타인 이유: 게임이 이미 파티원 머리 위에 초록
+            # 표시를 쓴다. 같은 색이면 '봇이 찍은 점'과 '게임이 그린 표시'가
+            # 섞여서, 정작 맞추려는 오프셋을 못 본다.
             pa_sx, pa_sy = int(_pa_cfg.get("sx", 0) or 0), int(_pa_cfg.get("sy", 0) or 0)
             marks = [{"x": m.get("cx", 0) + pa_sx, "y": m.get("cy", 0) + pa_sy,
                       "color": "red", "size": 12, "expiry": now + 0.5} for m in monsters]
             if my_screen_pos != (0, 0):
                 marks.append({"x": my_screen_pos[0] + pa_sx,
                               "y": my_screen_pos[1] + pa_sy + int(_pa_cfg.get("click_offset_y", 25) or 25),
-                              "color": "green", "size": 12, "expiry": now + 0.5})
+                              "color": "magenta", "size": 12, "expiry": now + 0.5})
             if marks:
                 with self.state._lock:
                     self.state.visual_markers.extend(marks)
