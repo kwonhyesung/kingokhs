@@ -136,8 +136,7 @@ def test_item_target_only_taken_while_stationary():
 
     state.last_move_time = time.time() - 1.0  # 멈춘 지 1초
     logic._run_warrior_attack_loot_cycle()
-    # 획득 마법('0')은 1칸 앞에만 걸리므로 아이템 칸이 아니라 그 옆칸에 선다
-    assert state.item_pickup_target == (11, 10)
+    assert state.item_pickup_target == (12, 10)
     assert logic._item_job["pos"] == (12, 10)
 
 
@@ -151,17 +150,16 @@ def test_inventory_full_skips_pickup_but_not_hunting():
     assert logic._item_job is None
 
 
-def test_pickup_casts_zero_facing_the_item():
-    """격수의 줍기는 '0' 획득 마법 - 옆칸에서 아이템 쪽을 보고 쓴다."""
+def test_pickup_presses_comma_on_exact_arrival():
+    """줍기는 아이템 칸에 올라서서 ',' - '0' 마법은 이동 중 실패할 수 있다."""
     logic, state, keys = make_logic(
         detected_items_world=[{"name": "호박", "world": (12, 10)}],
         last_move_time=time.time() - 1.0)
     logic._run_warrior_attack_loot_cycle()          # 목표 설정
-    state.x, state.y = 11, 10                       # 옆칸 도착
     state.item_pickup_arrived = True
     state.detected_items_world = []                 # 주워져서 사라짐
     logic._run_warrior_attack_loot_cycle()
-    assert keys == ["0"], keys
+    assert keys == [","], keys
     assert logic._item_job is None                  # 줍기 완료
 
 
@@ -170,12 +168,11 @@ def test_pickup_retries_on_neighbour_when_item_still_there():
         detected_items_world=[{"name": "호박", "world": (12, 10)}],
         last_move_time=time.time() - 1.0)
     logic._run_warrior_attack_loot_cycle()
-    state.x, state.y = 11, 10                       # 옆칸 도착
     state.item_pickup_arrived = True
-    # 마법을 써도 아이템이 그대로 보임 = 좌표가 한 칸 어긋났다
+    # ',' 를 눌러도 아이템이 그대로 보임 = 좌표가 한 칸 어긋났다
     state.detected_items_world = [{"name": "호박", "world": (12, 11)}]
     logic._run_warrior_attack_loot_cycle()
-    assert keys == ["0"]
+    assert keys == [","]
     assert state.item_pickup_target == (12, 11)     # 옆칸으로 재시도
     assert logic._item_job["tries"] == 1
 

@@ -4081,18 +4081,12 @@ class LogicSvc(threading.Thread):
             return
         item = min(items, key=lambda i: hunt.chebyshev(me, i.get("world") or (0, 0)))
         pos = (int(item["world"][0]), int(item["world"][1]))
-        # 획득 마법('0')은 1칸 앞의, 바라보는 방향에만 걸린다. 그래서 아이템
-        # 칸이 아니라 그 옆칸으로 간다 - 아이템 칸을 목표로 주면 도착 판정과
-        # 시전 사거리가 서로 어긋난다.
-        stand = pos if hunt.attack_dir(me, pos) else hunt.approach_cell(
-            me, pos, walls=self._known_walls())
-        if stand is None:
-            self._hunt_idle_reason(f"아이템 {pos} 옆에 설 칸이 없음(사방이 벽)")
-            return
+        # 아이템 칸에 직접 올라서서 ',' 로 줍는다. '0' 획득 마법(바라보는 방향
+        # 1칸)도 있지만 이동 중에는 실패할 수 있어서, 확실한 ',' 를 쓴다.
         self._item_job = {"pos": pos, "tries": 0, "name": item.get("name", ""), "started": time.time()}
-        self.state.item_pickup_target = stand
-        self.state.item_pickup_arrived = (stand == me)
-        print(f"[Hunt] 아이템 줍기: {item.get('name','')} @ {pos} (설 자리 {stand})")
+        self.state.item_pickup_target = pos
+        self.state.item_pickup_arrived = False
+        print(f"[Hunt] 아이템 줍기: {item.get('name','')} @ {pos}")
 
     def _run_item_pickup_step(self, cfg: dict):
         job = self._item_job
@@ -4110,31 +4104,17 @@ class LogicSvc(threading.Thread):
         if not getattr(self.state, "item_pickup_arrived", False):
             return
 
-        # 옆칸에 섰다 - 아이템 쪽을 보게 한 다음 획득 마법을 쓴다.
-        # 획득 마법은 바라보는 방향 1칸에만 걸려서, 방향을 안 맞추면
-        # 키는 나가는데 아무것도 안 주워진다(로그만 주운 것처럼 보인다).
-        me_now = (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
-        facing = hunt.attack_dir(me_now, job["pos"])
-        if facing:
-            hw.hold_move(facing, force=True)
-            humanized_sleep(TIMING_CONFIG["key_down_hold"])
-        elif me_now != job["pos"]:
-            # 옆칸도 같은 칸도 아니다 - 좌표가 어긋났으니 다시 접근시킨다.
-            self.state.item_pickup_arrived = False
-            self.state.item_pickup_target = job["pos"]
-            return
+        # 아이템과 같은 칸에 올라섰다 - 줍기 키
         pk = cfg.get("pickup_key")
         if isinstance(pk, dict):                      # attack_key와 같은 role별 표기
-            pickup_key = str(pk.get(getattr(self.state, "role", ""), "0"))
-        elif self._is_warrior_role():
-            # 격수의 줍기는 '0' 획득 마법이다. config의 옛 기본값(',')이
-            # 남아 있어도 격수에서는 그걸 쓰면 안 된다.
-            pickup_key = "0"
+            pickup_key = str(pk.get(getattr(self.state, "role", ""), ","))
         else:
             pickup_key = str(pk or ",")
         got = self._press_hw_key(pickup_key, variance=0.08, skip_focus_guard=True)
         if not got:
-            print(f"[Hunt] 줍기키 '{pickup_key}' 전송 실패")
+            # 전송 실패를 조용히 넘기면 "주웠는데 아이템이 그대로"로 보여서
+            # 좌표가 어긋난 것과 구별이 안 된다.
+            print(f"[Hunt] 줍기키 '{pickup_key}' 전송 실패 - 줍기 안 나감")
         humanized_sleep(TIMING_CONFIG["enter_wait"])
         job["tries"] = int(job.get("tries", 0)) + 1
         self._clear_hunt_move_target()
