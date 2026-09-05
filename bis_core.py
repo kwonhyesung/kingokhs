@@ -1426,8 +1426,24 @@ class BisHardware:
         is_open = bool(self.ser and getattr(self.ser, "is_open", False))
         print(f"[Hardware] 입력 전송 실패: {why} (port={port} open={is_open})")
 
+    @staticmethod
+    def is_release_command(command: str) -> bool:
+        """키를 '떼는' 명령인가. 일시정지 중에도 이것만은 나가야 한다."""
+        cmd = str(command or "")
+        return cmd == "RELEASE_ALL" or cmd.startswith("U:")
+
     def _deliver(self, command: str) -> bool:
         """실제 전송. 성공했으면 True."""
+        # F3(일시정지) 중에는 '떼기'만 내보낸다. 예전엔 이 게이트가 없어서
+        # 긴 루틴(TargetConfirm의 마우스 3회 재시도, 회복 시퀀스, 힐 시전)이
+        # 자기 단계 사이에서 플래그를 안 보고 계속 키를 보냈다 - 실측 로그의
+        # "[Hotkey] Pause ON" 바로 다음 줄이 "[Support] HP heal casting on
+        # warrior: key=3"이다. 큰 루프마다 검사를 흩뿌리는 대신, 모든 출력이
+        # 반드시 지나는 여기 한 곳에서 막는다.
+        if (self.state is not None
+                and bool(getattr(self.state, "automation_paused", False))
+                and not self.is_release_command(command)):
+            return False
         try:
             if self.is_hardware_ready():
                 self._write_hardware_command(command)

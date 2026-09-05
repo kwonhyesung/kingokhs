@@ -3164,6 +3164,11 @@ class LogicSvc(threading.Thread):
         return not should_hold_follow_position(follow_x, follow_y, current_x, current_y)
 
     def _repair_dosa_f2_runtime_state(self):
+        # 일시정지 중엔 아무것도 되살리지 않는다. 이 워치독은 F3가 끈
+        # follow/auto_hunt/sentinel을 그대로 다시 켜버린다 - 실측 로그에서
+        # "[Hotkey] Pause ON" 뒤에 "[F2Watchdog] restored: follow,auto_hunt".
+        if bool(getattr(self.state, "automation_paused", False)):
+            return
         if not is_support_role(getattr(self.state, "network_role", "") or self.state.role) or not bool(getattr(self.state, "service_active", False)):
             return
 
@@ -3197,6 +3202,8 @@ class LogicSvc(threading.Thread):
                 self._last_dosa_f2_watchdog_log_time = now
 
     def _restore_dosa_service_if_follow_autohunt(self) -> bool:
+        if bool(getattr(self.state, "automation_paused", False)):
+            return False  # 일시정지 중엔 service_active를 되살리지 않는다
         if not is_support_role(getattr(self.state, "network_role", "") or self.state.role):
             now_diag = time.time()
             if now_diag - float(getattr(self, "_last_restore_gate_diag_time", 0.0) or 0.0) >= RESTORE_GATE_DIAG_INTERVAL_SEC:

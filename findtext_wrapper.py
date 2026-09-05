@@ -348,15 +348,26 @@ class FindText:
         if ok is None:
             ok = np.ones((out_h, out_w), dtype=bool)
 
-        ys, xs = np.where(ok)
         comment = p.get('comment', '')
         if not find_all:
+            ys, xs = np.where(ok)
             if len(ys) == 0:
                 return []
             return [{'x': int(xs[0]), 'y': int(ys[0]), 'w': pw, 'h': ph, 'id': comment}]
 
-        return [{'x': int(x), 'y': int(y), 'w': pw, 'h': ph, 'id': comment}
-                for y, x in zip(ys, xs)]
+        # 오차 허용(err1/err0) 때문에 진짜 매칭 한 개가 인접 픽셀 수백~수만
+        # 개로 잡힌다. 예전엔 그걸 전부 dict으로 만들어 NMS(O(n^2))에 넘겼다 -
+        # 실측 13,584히트에서 100ms, 33,578히트에서 446ms가 여기서 사라졌고,
+        # 아이템 패턴 2개가 281ms를 먹던 원인이 이것이다([SentinelPerf]
+        # item=281 party=345 monster=304).
+        # 붙어있는 픽셀은 어차피 같은 매칭이므로 C쪽에서 한 덩어리로 묶어
+        # 대표 한 점씩만 돌려준다(같은 일을 4.6ms에 한다). 떨어져 있는 개체는
+        # 스프라이트 한 칸(48px) 이상 벌어져서 따로 남는다.
+        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+            np.ascontiguousarray(ok).view(np.uint8), 8)
+        return [{'x': int(stats[i, cv2.CC_STAT_LEFT]), 'y': int(stats[i, cv2.CC_STAT_TOP]),
+                 'w': pw, 'h': ph, 'id': comment}
+                for i in range(1, n_labels)]
 
     def _template_match_color(self, roi_bgr: np.ndarray, p: Dict[str, Any],
                                err1: float = 0.1, find_all: bool = True) -> List[Dict[str, Any]]:

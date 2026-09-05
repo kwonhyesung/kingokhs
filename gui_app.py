@@ -3333,8 +3333,10 @@ class AppView:
         if getattr(self.state, "automation_paused", False):
             resume_mode = getattr(self, "_paused_control_mode", "NONE") or "NONE"
             self._paused_control_mode = "NONE"
-            self._apply_control_mode(resume_mode, announce=False)
+            # 재개 플래그를 먼저 내린다 - 하드웨어 출력이 이 플래그로 막히므로
+            # 순서가 반대면 재개 동작의 첫 입력들이 조용히 버려진다.
             self.state.automation_paused = False
+            self._apply_control_mode(resume_mode, announce=False)
             print(f"[Hotkey] Pause OFF -> {resume_mode}")
             self.show_toast(f"RESUMED: {resume_mode}")
             return

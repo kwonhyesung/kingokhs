@@ -1,7 +1,11 @@
-"""최적화한 매칭이 예전 알고리즘과 '똑같은 결과'를 내는지 대조한다.
+"""최적화한 매칭이 예전 알고리즘과 같은 것을 찾는지 대조한다.
 
-속도를 위해 중간 배열을 없애고 두 번째 상관연산을 건너뛰게 고쳤는데,
-그건 결과가 1픽셀도 달라지지 않아야만 허용되는 종류의 변경이다.
+두 가지를 고쳤고 검사 기준이 서로 다르다:
+  1) 중간 배열 제거 + 두 번째 상관연산 조기 탈출
+     -> 어느 픽셀이 '맞음'인지가 1픽셀도 달라지면 안 된다.
+  2) 붙어있는 히트를 한 덩어리로 묶어 대표 한 점만 반환
+     -> 반환 개수는 줄지만, 예전 결과의 '연결된 덩어리' 하나당 정확히
+        하나씩, 그 덩어리의 좌상단이 나와야 한다.
 """
 import json, io, re
 import numpy as np
@@ -22,7 +26,7 @@ def _reference(screen_bin, pattern_bin, len1, len0, e1_max, e0_max):
     if len0 > 0:
         c0 = cv2.matchTemplate(screen_bin, 1.0 - pattern_bin, cv2.TM_CCORR)
         ok &= (np.round(c0).astype(np.int32) <= e0_max)
-    return set(zip(*np.where(ok)))
+    return ok
 
 
 def _scene(pat_text, rng):
@@ -59,10 +63,15 @@ def demo():
                 len1 = 0
             if e0 >= len0:
                 len0 = 0
-            want = _reference(screen_bin, pb, len1, len0, e1, e0)
+            ok = _reference(screen_bin, pb, len1, len0, e1, e0)
+            # 예전 알고리즘이 고른 픽셀 집합을 덩어리로 묶어 기대값을 만든다
+            n, _, stats, _ = cv2.connectedComponentsWithStats(
+                np.ascontiguousarray(ok).view(np.uint8), 8)
+            want = {(int(stats[i, cv2.CC_STAT_TOP]), int(stats[i, cv2.CC_STAT_LEFT]))
+                    for i in range(1, n)}
             got = {(r["y"], r["x"])
                    for r in ft._template_match_native(bgr, p, 0.10, 0.10, True, gray=gray)}
-            assert got == want, (cat, name, len(got), len(want))
+            assert got == want, (cat, name, sorted(got)[:3], sorted(want)[:3])
             checked += 1
             hits_seen += len(want)
     assert checked >= 20 and hits_seen > 0, (checked, hits_seen)
