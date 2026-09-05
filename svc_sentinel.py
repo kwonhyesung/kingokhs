@@ -295,9 +295,11 @@ class SentinelThread(threading.Thread):
                         self._logged_missing_self_patterns = True
                         have = sorted(n for n in self.matcher.findtext_patterns.get("party", {})
                                       if n.startswith(self_pattern_name))
-                        print(f"[Sentinel] self 패턴 '{self_pattern_name}'의 방향/이름표 패턴이 "
-                              f"party에 없다 (있는 것: {have or '없음'}) - 자기 위치를 못 구해서 "
-                              f"몬스터/아이템 월드 좌표가 전부 '?'가 되고 줍기/사냥 판단이 멈춘다.")
+                        print(f"[Sentinel] self '{self_pattern_name}': 방향 패턴도 이름표도 "
+                              f"화면에서 못 찾음 (저장된 패턴: {have or '없음'}) - 자기 위치를 "
+                              f"못 구해서 몬스터/아이템 월드 좌표가 전부 '?'가 되고 줍기/사냥 "
+                              f"판단이 멈춘다. 내 이름표는 남이 보는 것과 색이 달라서 "
+                              f"'{self_pattern_name}_name_self'를 따로 캡처해야 할 수 있다.")
             # 몬스터에 둘러싸이면 이팩트/스프라이트가 겹쳐 캐릭터 패턴이 통째로
             # 안 잡힌다 (실측: 사냥 중 '점프_* 못 찾음'이 반복되며 사냥이 멈춤).
             # 그런데 이 값은 매 프레임 새로 찾아야 하는 값이 아니다 - 카메라가

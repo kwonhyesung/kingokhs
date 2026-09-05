@@ -26,6 +26,7 @@ class FindText:
     
     def __init__(self):
         self.cached_patterns: Dict[str, np.ndarray] = {}
+        self._noisy_patterns: set = set()   # 식별력 없다고 판정해 버린 패턴(로그 1회용)
         self.dll_engine = None
         
         # sys_core.dll이 존재하면 AHKEngine 사용 시도
@@ -275,6 +276,10 @@ class FindText:
                 + roi_bgr[:, :, 1].astype(np.uint32) * 75
                 + roi_bgr[:, :, 0].astype(np.uint32) * 15)
 
+    # 한 패턴이 이보다 많은 곳에서 맞으면 식별력이 없는 것으로 본다.
+    # 진짜 개체 하나의 매칭 덩어리는 수십~수백 픽셀이다.
+    MAX_RAW_HITS = 5000
+
     def _template_match_native(self,
                              roi_bgr: np.ndarray,
                              p: Dict[str, Any],
@@ -355,14 +360,27 @@ class FindText:
                 return []
             return [{'x': int(xs[0]), 'y': int(ys[0]), 'w': pw, 'h': ph, 'id': comment}]
 
-        # 오차 허용(err1/err0) 때문에 진짜 매칭 한 개가 인접 픽셀 수백~수만
-        # 개로 잡힌다. 예전엔 그걸 전부 dict으로 만들어 NMS(O(n^2))에 넘겼다 -
-        # 실측 13,584히트에서 100ms, 33,578히트에서 446ms가 여기서 사라졌고,
-        # 아이템 패턴 2개가 281ms를 먹던 원인이 이것이다([SentinelPerf]
-        # item=281 party=345 monster=304).
-        # 붙어있는 픽셀은 어차피 같은 매칭이므로 C쪽에서 한 덩어리로 묶어
-        # 대표 한 점씩만 돌려준다(같은 일을 4.6ms에 한다). 떨어져 있는 개체는
-        # 스프라이트 한 칸(48px) 이상 벌어져서 따로 남는다.
+        n_hits = int(np.count_nonzero(ok))
+        if n_hits == 0:
+            return []
+        if n_hits > self.MAX_RAW_HITS:
+            # 이만큼 맞는 패턴은 아무것도 식별하지 못한다. 실측: 높이가
+            # 4픽셀뿐인 점프_right(29x4)/점프_top(36x4)이 화면 곳곳에서
+            # 42,000군데씩 맞았다. 예전엔 그걸 전부 dict으로 만들어
+            # NMS(O(n^2))에 넘겼고, 살아남는 상자는 사실상 무작위였다
+            # (party 스캔이 1,286ms를 먹던 원인). 버리고 이름을 남긴다 -
+            # 그 패턴을 더 크게 다시 캡처하라는 뜻이다.
+            if comment not in self._noisy_patterns:
+                self._noisy_patterns.add(comment)
+                print(f"[FindText] 패턴 '{comment}'({pw}x{ph})이 {n_hits}군데에서 맞음 "
+                      f"- 식별력이 없어 버린다. 더 크게 다시 캡처할 것.")
+            return []
+
+        # 오차 허용(err1/err0) 때문에 진짜 매칭 한 개가 인접 픽셀 수십~수백
+        # 개로 잡힌다. 붙어있는 픽셀은 어차피 같은 매칭이므로 C쪽에서 한
+        # 덩어리로 묶어 대표 한 점씩만 돌려준다 - 예전처럼 전부 dict으로
+        # 만들어 NMS(O(n^2))에 넘기면 13,584히트에서 100ms가 그냥 나간다.
+        # 떨어져 있는 개체는 스프라이트 한 칸(48px) 이상 벌어져서 따로 남는다.
         n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
             np.ascontiguousarray(ok).view(np.uint8), 8)
         return [{'x': int(stats[i, cv2.CC_STAT_LEFT]), 'y': int(stats[i, cv2.CC_STAT_TOP]),

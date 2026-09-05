@@ -2359,52 +2359,6 @@ class LogicSvc(threading.Thread):
         monster_names = getattr(self.state, "target_monster_names", []) or []
         return any(name and name in current_text for name in monster_names)
 
-    def _attempt_ntab_confirm(
-        self,
-        expected_pattern: str,
-        confirm_timeout: float | None = None,
-    ) -> str:
-        baseline_user = self._get_current_user_pattern()
-        baseline_target_text = str(getattr(self.state, "target_info_text", "") or "")
-        baseline_target_kind = str(getattr(self.state, "target_kind", "") or "")
-
-        effective_timeout = float(confirm_timeout if confirm_timeout is not None else self._warrior_jump_confirm_timeout)
-        if self._ntab_in_progress and expected_pattern == self._support_warrior_pattern:
-            self._sleep_ui_gap(self._warrior_jump_settle_delay)
-
-        if self._wait_for_confident_user_pattern(expected_pattern, timeout=effective_timeout, min_hits=1):
-            return "user"
-
-        deadline = time.time() + max(0.08, effective_timeout)
-        soft_user_streak = 0
-        while time.time() < deadline:
-            current_user = self._get_current_user_pattern()
-            if current_user == expected_pattern:
-                if self._is_user_pattern_confident(expected_pattern, min_score=0.84):
-                    return "user"
-                # N-tab 중에는 bitwise도 허용해 락 반응속도를 높인다.
-                source = str(getattr(self.state, "user_info_source", "") or "")
-                score = float(getattr(self.state, "user_score", 0.0) or 0.0)
-                if source == "bitwise" and score >= 0.80 and not bool(getattr(self.state, "user_info_ambiguous", False)):
-                    return "user"
-                if self._ntab_in_progress and not bool(getattr(self.state, "user_info_ambiguous", False)):
-                    if source == "findtext" and score >= 0.76:
-                        soft_user_streak += 1
-                    elif source == "bitwise" and score >= 0.72:
-                        soft_user_streak += 1
-                    else:
-                        soft_user_streak = 0
-                    if soft_user_streak >= 2:
-                        return "user"
-            if current_user and current_user != baseline_user and self._is_user_pattern_confident(current_user):
-                if current_user == self._support_wizard_pattern:
-                    return "self"
-                return "other_user"
-            if self._is_monster_target_selected(baseline_target_text, baseline_target_kind):
-                return "monster"
-            time.sleep(0.02 if self._ntab_in_progress else 0.03)
-        return "no_match"
-
     # 이름표(격수 캐릭터 머리 위, 항상 떠 있음). 스프라이트(점프_back/top/
     # left/right)로 찾다가 이름표로 바꿨다 - 이유 둘:
     #   1. 스프라이트는 방향별로 크기가 제각각(폭 12/15/29/36px)이라 '중심에서
@@ -2514,55 +2468,22 @@ class LogicSvc(threading.Thread):
             self._ntab_in_progress = prev_ntab_in_progress
 
     def _confirm_and_lock_warrior_target(self) -> bool:
-        """esc(모든 동작 중지) -> tab(대상박스 활성화) -> 방향키(대상박스 이동)
-        -> enter(대상 선택 확정) -> User_info ROI에서 점프_user 패턴 확인.
-        확인되면 esc -> tab -> tab으로 red_tab을 최종 lock한다. 확인 안 되면
-        (자기 자신/다른 유저/몬스터/불일치) 같은 동작을 다시 시도한다 -
-        후보 순서는 매번 랜덤이라(실측 확인됨) 같은 동작을 반복하는 것만으로
-        결국 격수 차례가 온다. 방향키 1번으로 대상이 바뀌는 것도 실측
-        확인됨(예전엔 방향키가 안 먹힌다고 착각해서 tab 반복으로 잘못
-        바꿨었다 - 원복).
-        마우스 클릭 방식을 최대 3번까지 재시도하고, 그래도 성공(True) 못 하면
-        이 방향키 순차 탐색으로 폴백한다."""
+        """격수 이름표(점프_name)를 마우스로 클릭해 red_tab을 세운다.
+
+        예전엔 클릭이 실패하면 esc -> tab -> 위 -> enter를 최대 20번 돌려
+        후보를 하나씩 넘겨보며 점프_user를 찾는 폴백이 있었다. 지웠다:
+          - 후보 순서가 매번 무작위라 격수가 걸릴 때까지 게임 입력을 수십 번
+            난사한다(로그의 "[TargetConfirm] attempt=N sequence=..." 반복).
+          - enter가 대상을 '확정'하는 키라, 걸러내기 전에 엉뚱한 대상을
+            잡아버리는 사고가 구조적으로 남는다.
+        클릭이 실패하면 그냥 실패로 두고 다음 주기에 다시 시도하는 편이 싸다.
+        """
         for mouse_attempt in range(1, 4):
             marker_result = self._click_warrior_marker_and_lock()
             if marker_result is True:
                 return True
             print(f"[TargetConfirm] mouse attempt={mouse_attempt}/3 result={marker_result}")
-
-        max_attempts = 20
-        for attempt in range(1, max_attempts + 1):
-            for key in ("esc", "tab", "up"):
-                if not self._press_hw_key(key, variance=0.10):
-                    return False
-                self._sleep_ui_gap(0.08)
-            if self._is_monster_target_selected():
-                # target_info는 ntab_active 없이도 항상 실시간으로 스캔되므로
-                # enter를 누르기 전에 이미 몬스터인지 알 수 있다 - enter로
-                # 확정(공격/인게이지로 이어질 수 있음)하기 전에 걸러서 다음
-                # 후보로 넘어간다. 몬스터/도사/격수 셋 다 무차별로 enter까지
-                # 눌러버리던 문제를 여기서 막는다.
-                print(f"[TargetConfirm] attempt={attempt} sequence=('esc', 'tab', 'up') result=monster (skipped enter)")
-                continue
-            if not self._press_hw_key("enter", variance=0.10):
-                return False
-            self._sleep_ui_gap(0.10)
-            sequence = ("esc", "tab", "up", "enter")
-            self.state.ntab_active = True
-            self.state.ntab_active_since = time.time()
-            try:
-                result = self._attempt_ntab_confirm(self._support_warrior_pattern)
-            finally:
-                self.state.ntab_active = False
-                self.state.ntab_active_since = 0.0
-            print(f"[TargetConfirm] attempt={attempt} sequence={sequence} result={result}")
-            if result == "user":
-                # 격수는 이미 방금 enter로 확정 선택된 상태다 - 여기서
-                # _promote_ntab_to_red_tab()(tab->tab)을 부르면 tab이 후보를
-                # 다시 무작위로 바꿔버려서(실측 확인됨) 방금 확인한 격수 대신
-                # 도사/몬스터가 걸리는 원인이 됐다. tab을 더 누르지 않고,
-                # 이미 선택된 대상의 red_tab이 뜨는지만 확인한다.
-                return self._wait_for_red_tab_lock(timeout=0.30, min_hits=1)
+        # tab으로 열린 대상박스가 남아있을 수 있으니 닫고 끝낸다.
         self._press_hw_key("esc", variance=0.10)
         return False
 
