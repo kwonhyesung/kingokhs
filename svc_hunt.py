@@ -105,12 +105,14 @@ def pick_target(monsters, my_pos, anchor, leash, sticky=None, sticky_name=None,
 
     monsters: [{"name":..., "world":(x,y)}, ...]  (state.detected_monsters_world)
     anchor  : 현재 순찰 포인트. 여기서 leash칸 밖은 쫓지 않는다.
+              None이면(순찰 중이 아님) 거리 제한 없이 보이는 놈을 쫓는다.
     sticky  : 직전에 쫓던 대상의 pos(+이름). 아직 근처에 있으면 그놈을 유지한다
               (안 그러면 비슷한 거리의 두 마리 사이에서 타겟이 매 사이클
               바뀌며 제자리에서 떨린다).
     """
     live = [m for m in monsters
-            if m.get("world") and chebyshev(anchor, m["world"]) <= leash]
+            if m.get("world")
+            and (anchor is None or chebyshev(anchor, m["world"]) <= leash)]
     if not live:
         return None
     if sticky:
@@ -308,7 +310,11 @@ def demo():
     mons = [{"name": "달걀", "world": (3, 0)}, {"name": "불귀신", "world": (1, 0)}]
     assert pick_target(mons, (0, 0), (0, 0), 6)["world"] == (1, 0)
     assert pick_target(mons, (0, 0), (0, 0), 2)["world"] == (1, 0)
-    assert pick_target([{"name": "x", "world": (9, 9)}], (0, 0), (0, 0), 6) is None
+    far = [{"name": "x", "world": (9, 9)}]
+    assert pick_target(far, (0, 0), (0, 0), 6) is None
+    # 순찰 포인트가 없으면(anchor=None) 멀어도 쫓는다 - 실측에서 8~10칸
+    # 몬스터가 leash 6에 통째로 걸러져 사냥이 멈췄다
+    assert pick_target(far, (0, 0), None, 6)["world"] == (9, 9)
     # 쫓던 놈(3,0)이 한 칸 움직여도 그놈을 유지 - 더 가까운 놈이 있어도 안 바꿈
     moved = [{"name": "달걀", "world": (4, 0)}, {"name": "불귀신", "world": (1, 0)}]
     assert pick_target(moved, (0, 0), (0, 0), 6, sticky=(3, 0))["world"] == (4, 0)

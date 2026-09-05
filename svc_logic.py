@@ -3883,12 +3883,17 @@ class LogicSvc(threading.Thread):
         self._hunt_cfg_cache = (cfg, now)
         return cfg
 
-    def _hunt_anchor(self) -> tuple:
-        """이탈 제한의 기준점. 지금 향하는 순찰 포인트, 없으면 내 자리."""
+    def _hunt_anchor(self):
+        """이탈 제한의 기준점(순찰 포인트). 없으면 None = 제한 없음.
+
+        예전엔 내 자리를 기준점으로 돌려줬는데, 그러면 순찰 중이 아닐 때도
+        leash(6칸)가 걸린다 - 실측: me=(1,13)에서 8~10칸 떨어진 처녀귀신이
+        전부 걸러져 사냥이 멈췄다. 안 쫓게 만들려는 건 '순찰 포인트에서
+        멀어지는 것'이지 '화면에 보이는 몬스터'가 아니다."""
         anchor = getattr(self.state, "nav_current_route_point", None)
         if anchor and len(anchor) == 2:
             return (int(anchor[0]), int(anchor[1]))
-        return (int(getattr(self.state, "x", 0) or 0), int(getattr(self.state, "y", 0) or 0))
+        return None
 
     def _hunt_is_stationary(self, gap: float) -> bool:
         """마지막 이동키가 나간 뒤 gap초가 지났는가.

@@ -45,6 +45,14 @@ def test_one_stray_read_in_the_middle_is_ignored():
     assert _apply(reads) == ["흉가1"]
 
 
+def test_debounced_name_is_what_leaves_the_monitor():
+    """디바운스해놓고 res_updates에 원본(map_text)을 실어보내면
+    update_from_dict가 state.current_map을 매 프레임 도로 덮어써서
+    디바운스가 통째로 무의미해진다."""
+    src = open(os.path.join(HERE, "svc_monitor.py"), encoding="utf-8").read()
+    assert 'res_updates["current_map"] = map_text' not in src,         "디바운스 안 된 원본이 state로 나간다"
+
+
 def test_monitor_actually_debounces():
     """위 규칙이 svc_monitor에 실제로 들어있는지 확인(흉내와 어긋나지 않게)."""
     src = open(os.path.join(HERE, "svc_monitor.py"), encoding="utf-8").read()

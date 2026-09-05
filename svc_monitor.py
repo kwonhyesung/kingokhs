@@ -2195,7 +2195,12 @@ class MonitorSvc(threading.Thread):
                         else:
                             self._map_candidate = ("", 0)
 
-                        res_updates["current_map"] = map_text
+                        # 위에서 3회 디바운스해놓고 여기서 원본을 실어보내면
+                        # update_from_dict가 state.current_map을 매 프레임
+                        # 도로 덮어써서 디바운스가 무의미해진다 - 실측:
+                        # '흉가1' <-> '천안궁성흉가입구'가 왕복하며 몬스터
+                        # 스캔이 켜졌다 꺼졌다 했다.
+                        res_updates["current_map"] = getattr(self.state, "current_map", "") or map_text
                         res_updates["map_name"] = map_name
                         res_updates["map_floor"] = map_floor
                         res_updates["current_floor"] = map_floor
