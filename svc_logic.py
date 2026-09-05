@@ -68,7 +68,6 @@ from support_runtime_rules import (
     should_prioritize_self_mp,
     should_prioritize_self_mp_over_party_heal,
     should_prioritize_follow_distance,
-    should_retarget_support_lock_by_hp_gain,
     should_trigger_self_hp_emergency,
     speed_up_delay,
     support_retarget_block_duration,
@@ -238,10 +237,6 @@ class LogicSvc(threading.Thread):
         self._party_direct_heal_fail_count = 0
         self._party_direct_heal_fail_cap = 2
         # redtab 재확인은 "힐 후 0.5초 동안 격수 HP 순증가가 3만 미만"일 때만 한다.
-        self._redtab_hp_gain_window_sec = 0.50
-        self._redtab_hp_gain_required = 30000
-        self._party_heal_gain_baseline_hp = 0
-        self._party_heal_gain_baseline_time = 0.0
         self._warrior_redtab_verified = False
         self._warrior_redtab_verified_hp = 0
         self.state.support_input_blocked_until = 0.0
@@ -1350,38 +1345,17 @@ class LogicSvc(threading.Thread):
             self._register_direct_heal_prepare_failure()
             return False
 
-        now = time.time()
-        if self._party_heal_gain_baseline_time <= 0.0:
-            self._party_heal_gain_baseline_hp = before_hp
-            self._party_heal_gain_baseline_time = now
-        elapsed = now - float(self._party_heal_gain_baseline_time or 0.0)
         self._last_party_hp_value = before_hp
 
         self._party_direct_heal_verified = True
         self._party_direct_heal_fail_count = 0
 
-        if should_retarget_support_lock_by_hp_gain(
-            self._party_heal_gain_baseline_hp,
-            before_hp,
-            elapsed,
-            required_gain=self._redtab_hp_gain_required,
-            window_sec=self._redtab_hp_gain_window_sec,
-        ):
-            print(
-                f"[Support] {_ts()} warrior HP gain {before_hp - self._party_heal_gain_baseline_hp} "
-                f"< {self._redtab_hp_gain_required} in {elapsed:.2f}s. Forcing retarget."
-            )
-            self._party_direct_heal_verified = False
-            self._party_direct_heal_target_prepared = False
-            self._party_heal_gain_baseline_hp = 0
-            self._party_heal_gain_baseline_time = 0.0
-            self._register_direct_heal_prepare_failure()
-            return False
-
-        if elapsed >= self._redtab_hp_gain_window_sec:
-            self._party_heal_gain_baseline_hp = before_hp
-            self._party_heal_gain_baseline_time = now
-
+        # '격수 HP가 0.5초 안에 30000만큼 안 올랐으면 red_tab이 틀린 것'이라는
+        # 추정으로 재타겟을 걸던 블록을 지웠다. 실측 로그에서 34번 발동했는데
+        # (자기 HP 상승이라는 확증 경로는 같은 기간 1번), 격수가 맞는 만큼
+        # 맞으면 HP는 원래 안 오른다 - 힐이 제대로 들어가는 중에도 계속
+        # 재타겟을 걸어서 힐이 끊겼다. red_tab이 틀렸다는 '증거'는 아래 두
+        # 가지로 충분하다: 대상이 몬스터로 바뀜 / 도사 자기 HP가 오름.
         self._party_direct_heal_target_prepared = True
         return True
 
@@ -1440,8 +1414,6 @@ class LogicSvc(threading.Thread):
         self._party_direct_heal_verified = False
         self._party_direct_heal_target_prepared = False
         self._party_direct_heal_fail_count = 0
-        self._party_heal_gain_baseline_hp = 0
-        self._party_heal_gain_baseline_time = 0.0
 
     def request_initial_direct_heal_target_prepare(self):
         self._invalidate_warrior_redtab_verification()
