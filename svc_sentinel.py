@@ -49,6 +49,7 @@ class SentinelThread(threading.Thread):
         # 진짜 해결은 사이클을 30fps에 되돌리는 것이다 - [SentinelPerf]의 단계별
         # 숫자(party/monster/item/rest)가 어디서 시간이 나가는지 말해준다.
         self._debounce_frames = 2
+        self._logged_missing_self_patterns = False
 
     def _cfg(self) -> dict:
         """config.json (5초 캐시). 예전엔 매 사이클 디스크에서 json.load 했다 -
@@ -118,6 +119,12 @@ class SentinelThread(threading.Thread):
         return set()
 
     SELF_POS_TTL = 3.0   # 캐릭터 패턴을 놓쳐도 기준점을 유지하는 시간(초)
+
+    @staticmethod
+    def _self_anchor_offset(pa_cfg: dict) -> int:
+        """이름표를 기준점으로 쓸 때 캐릭터 몸까지 내려야 하는 픽셀 수.
+        파티원을 클릭할 때 쓰는 값과 같은 값이다(config play_area.click_offset_y)."""
+        return int(pa_cfg.get("click_offset_y", 26) or 26)
 
     def _self_pattern_name(self, pa_cfg: dict) -> str:
         """자기 캐릭터를 찾을 패턴 이름. pc_roles.json의 표가 config.json을 이긴다.
@@ -266,6 +273,31 @@ class SentinelThread(threading.Thread):
                     # 보일 수 있다. 잡힌 방향 패턴을 전부 남긴다.
                     self.state.my_facing = ",".join(sorted(
                         h["name"].rsplit("_", 1)[-1] for h in self_hits))
+                else:
+                    # 방향 패턴이 하나도 없는 PC가 있다. 실측: 도사(졈프)는
+                    # party에 졈프_name/졈프_user만 있고 졈프_left/right/back/
+                    # top이 없다 - 그래서 자기 위치가 영원히 (0,0)으로 남고,
+                    # 모든 몬스터/아이템이 월드 좌표 없이 "@?"로 나오며
+                    # (로그의 "아이템 감지: 호박@?"), 줍기도 사냥 판단도
+                    # 통째로 불가능해진다. 로그는 "캐릭터 패턴 미검출" 한 줄만
+                    # 남겨서 원인이 '안 보임'인지 '패턴이 없음'인지 구분이 안 됐다.
+                    #
+                    # 이름표는 캐릭터 머리 위 click_offset_y만큼 위에 있으므로,
+                    # 그만큼 내리면 캐릭터 몸이 된다 - TargetConfirm이 파티원을
+                    # 클릭할 때 쓰는 것과 똑같은 보정이다. 방향은 알 수 없다.
+                    name_hits = [h for h in party_hits
+                                 if h["name"] == f"{self_pattern_name}_name"]
+                    if name_hits:
+                        best_name = max(name_hits, key=lambda h: h["score"])
+                        my_screen_pos = (best_name["cx"],
+                                         best_name["cy"] + self._self_anchor_offset(_pa_cfg))
+                    elif not self._logged_missing_self_patterns:
+                        self._logged_missing_self_patterns = True
+                        have = sorted(n for n in self.matcher.findtext_patterns.get("party", {})
+                                      if n.startswith(self_pattern_name))
+                        print(f"[Sentinel] self 패턴 '{self_pattern_name}'의 방향/이름표 패턴이 "
+                              f"party에 없다 (있는 것: {have or '없음'}) - 자기 위치를 못 구해서 "
+                              f"몬스터/아이템 월드 좌표가 전부 '?'가 되고 줍기/사냥 판단이 멈춘다.")
             # 몬스터에 둘러싸이면 이팩트/스프라이트가 겹쳐 캐릭터 패턴이 통째로
             # 안 잡힌다 (실측: 사냥 중 '점프_* 못 찾음'이 반복되며 사냥이 멈춤).
             # 그런데 이 값은 매 프레임 새로 찾아야 하는 값이 아니다 - 카메라가
