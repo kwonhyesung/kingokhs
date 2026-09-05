@@ -2,6 +2,8 @@ import sys
 import time
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bis_core
@@ -51,6 +53,79 @@ from support_runtime_rules import (
 )
 from bis_core import BisHardware, GameState
 from svc_logic import LogicSvc
+
+
+def test_debug_slash_hotkey_is_not_registered():
+    source = (REPO_ROOT / "svc_worker.py").read_text(encoding="utf-8")
+    assert 'HOTKEY_HANDLES["/"]' not in source
+    assert 'keyboard.on_press_key("/",' not in source
+
+
+def test_f2_does_not_run_move_test_automatically():
+    source = (REPO_ROOT / "gui_app.py").read_text(encoding="utf-8")
+    assert "self.test_move_signal()" not in source
+
+
+def test_restore_gate_diag_interval_is_three_seconds():
+    source = (REPO_ROOT / "svc_logic.py").read_text(encoding="utf-8")
+    assert "RESTORE_GATE_DIAG_INTERVAL_SEC = 3.0" in source
+
+
+def test_self_status_refresh_skips_s_before_f2(monkeypatch):
+    state = GameState()
+    state.role = "도사1"
+    state.service_active = False
+    state.nav_follow_enabled = False
+    state.auto_hunt = False
+    logic = LogicSvc(state)
+    pressed = []
+
+    monkeypatch.setattr(logic, "_is_support_lock_search_active", lambda: False)
+    monkeypatch.setattr(logic, "_is_hw_ready", lambda: True)
+    monkeypatch.setattr(logic, "_is_game_window_active", lambda: True)
+    monkeypatch.setattr(logic, "_is_self_status_visible", lambda: False)
+    monkeypatch.setattr(logic, "_press_hw_key", lambda key, **kw: pressed.append(key) or True)
+
+    assert logic._refresh_self_status_if_needed(force=True) is False
+    assert pressed == []
+
+
+def test_self_status_refresh_allows_s_after_f2(monkeypatch):
+    state = GameState()
+    state.role = "도사1"
+    state.service_active = True
+    state.nav_follow_enabled = True
+    state.auto_hunt = True
+    logic = LogicSvc(state)
+    pressed = []
+
+    monkeypatch.setattr(logic, "_is_support_lock_search_active", lambda: False)
+    monkeypatch.setattr(logic, "_is_hw_ready", lambda: True)
+    monkeypatch.setattr(logic, "_is_game_window_active", lambda: True)
+    monkeypatch.setattr(logic, "_is_self_status_visible", lambda: False)
+    monkeypatch.setattr(logic, "_press_hw_key", lambda key, **kw: pressed.append(key) or True)
+    monkeypatch.setattr(logic, "_wait_for_user_pattern", lambda *args, **kwargs: True)
+
+    assert logic._refresh_self_status_if_needed(force=True) is True
+    assert pressed == ["s"]
+
+
+def test_cooltime_refresh_skips_s_before_f2(monkeypatch):
+    state = GameState()
+    state.role = "도사1"
+    state.service_active = False
+    state.nav_follow_enabled = False
+    state.auto_hunt = False
+    logic = LogicSvc(state)
+    pressed = []
+
+    monkeypatch.setattr(logic, "_is_support_lock_search_active", lambda: False)
+    monkeypatch.setattr(logic, "_is_hw_ready", lambda: True)
+    monkeypatch.setattr(logic, "_is_game_window_active", lambda: True)
+    monkeypatch.setattr(logic, "_press_hw_key", lambda key, **kw: pressed.append(key) or True)
+
+    assert logic._refresh_self_cooltime_view("[test]") is False
+    assert pressed == []
 
 
 def test_network_role_normalization_keeps_priest2_as_udp_client():

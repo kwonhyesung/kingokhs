@@ -3313,11 +3313,6 @@ class AppView:
                 svc_worker.rotate_claude_log()
             except Exception:
                 pass
-            # ponytail: 하드웨어 신호가 실제로 게임에 먹히는지 F2를 누를
-            # 때마다 바로 눈으로 확인하기 위한 임시 진단 훅. MOVE TEST
-            # 버튼을 찾기 어렵다는 요청으로 추가함 - 원인이 확정되면(로직
-            # 문제인지 하드웨어 문제인지) 지워야 하는 임시 코드다.
-            self.test_move_signal()
         print(f"[Hotkey] {label}: ON")
         self.show_toast(f"{label}: ON")
 
