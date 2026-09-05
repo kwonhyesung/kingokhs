@@ -2210,12 +2210,15 @@ class LogicSvc(threading.Thread):
             return False
         if force_support_input:
             actual_key = display_game_hotkey(key)
-            hw.send_force(f"D:{actual_key}")
+            # 눌림이 실제로 나갔는지를 그대로 돌려준다. 예전엔 결과를 버리고
+            # 무조건 True를 돌려줘서, 호출한 쪽이 "키를 눌렀다"고 로그를 찍고
+            # 쿨다운까지 걸어놓는데 실제로는 아무것도 안 나간 경우가 있었다
+            # (실측: 공격 로그는 찍히는데 게임에선 공격이 일어나지 않음).
+            pressed = hw.send_force(f"D:{actual_key}")
             humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
             hw.send_force(f"U:{actual_key}")
-        else:
-            hw.fast_press(key, variance=variance)
-        return True
+            return pressed
+        return bool(hw.fast_press(key, variance=variance))
 
     def _sleep_ntab_gap(self):
         # N-tab 반응성을 높이되 선택 안정성은 유지하는 구간.
@@ -3961,10 +3964,17 @@ class LogicSvc(threading.Thread):
             if now >= float(getattr(self, "_warrior_next_attack_at", 0.0) or 0.0):
                 role = str(getattr(self.state, "role", "") or "")
                 attack_key = str((cfg.get("attack_key") or {}).get(role, "3"))
-                self._press_hw_key(attack_key, variance=0.08, skip_focus_guard=True)
+                struck = self._press_hw_key(attack_key, variance=0.08, skip_focus_guard=True)
                 self._warrior_next_attack_at = now + float(cfg.get("attack_repeat_sec", 0.35))
                 if now - self._last_hunt_log_time >= 1.0:
-                    print(f"[Hunt] 공격 {direction} -> {target_pos} (target_locked)")
+                    # 키가 실제로 나간 경우에만 "공격"이라고 쓴다. 예전엔 전송
+                    # 결과와 무관하게 이 줄을 찍어서, 게임에선 아무 일도 없는데
+                    # 로그만 공격했다고 말하고 있었다.
+                    if struck:
+                        print(f"[Hunt] 공격 {direction} -> {target_pos} (target_locked)")
+                    else:
+                        print(f"[Hunt] 공격키 '{attack_key}' 전송 실패 - 공격 안 나감 "
+                              f"({direction} -> {target_pos})")
                     self._last_hunt_log_time = now
             return True
 

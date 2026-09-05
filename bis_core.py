@@ -1415,6 +1415,10 @@ class BisHardware:
         with self._lock:
             command = str(cmd or "")
             if not self._is_game_window_focused_for_input() and not command.startswith("U:"):
+                # 포커스가 아니라고 판단해서 통째로 버린 경우. 이것도 지금까지
+                # 완전히 조용했다 - 게임창을 보고 있는데도 이 판정이 틀리면
+                # 모든 입력이 사라지면서 로그엔 아무 흔적도 안 남는다.
+                self._log_send_failure(f"게임창 포커스 아님으로 판단해 버림: {command}")
                 return False
             return self._deliver(command)
 
@@ -1436,32 +1440,34 @@ class BisHardware:
             except Exception:
                 pass
 
-    def humanized_press(self, key: str, variance: float = 0.15):
+    def humanized_press(self, key: str, variance: float = 0.15) -> bool:
         # HumanBehaviorSimulator로 동작 간 휴식 시간 시뮬레이션
         pause = HumanBehaviorSimulator.simulate_pause('click')
         time.sleep(pause)
-        
+
         actual_key = display_game_hotkey(key)
-        self.send(f"D:{actual_key}")
+        pressed = self.send(f"D:{actual_key}")
         humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
         self.send(f"U:{actual_key}")
+        return pressed
 
-    def fast_press(self, key: str, variance: float = 0.15):
+    def fast_press(self, key: str, variance: float = 0.15) -> bool:
         """
         Ultra-fast key press (ft.ahk-style): no HumanBehaviorSimulator pause.
         Use this for trigger reactions where speed matters.
         """
         actual_key = display_game_hotkey(key)
-        self.send(f"D:{actual_key}")
+        pressed = self.send(f"D:{actual_key}")
         humanized_sleep(TIMING_CONFIG["key_down_hold"], variance)
         self.send(f"U:{actual_key}")
+        return pressed
 
-    def force_press(self, key: str, variance: float = 0.15):
+    def force_press(self, key: str, variance: float = 0.15) -> bool:
         """포커스 체크 없이 1회 키 입력. 이동 중 테스트 마법처럼 강제 전송이 필요할 때 사용."""
         # 단발 입력은 아두이노의 K,<key> 경로가 가장 안정적이다.
         # D/U 분리보다 전송 횟수가 적고, 키업 타이밍이 짧아지는 문제를 피한다.
         actual_key = display_game_hotkey(key)
-        self.send_force(f"K,{actual_key}")
+        return self.send_force(f"K,{actual_key}")
 
     def press_with_gap(self, key: str, variance: float = 0.15):
         self.humanized_press(key, variance)

@@ -276,6 +276,7 @@ from enum import Enum, auto
 from bis_core import (
     Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep, discord_notify,
     is_game_window_active, find_game_window_any, GAME_WINDOW_TITLE_TOKENS,
+    display_game_hotkey,
 )
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc
@@ -715,6 +716,47 @@ def main(
 
                 HOTKEY_HANDLES["`"] = keyboard.on_press_key("`", lambda _event: test_patterns())
                 print("[DEBUG] ` 핫키 등록 완료 ('hb/red_tab/user_info' + 'N_tab/red_tab' 테스트용)")
+
+                def hw_selftest():
+                    """'/' 키: 하드웨어 연결만 검증한다 (esc > tab > home > tab).
+
+                    자기 자신에게 red_tab을 걸어보는 시퀀스다. 화면에서 red_tab이
+                    켜지면 '이 PC -> ESP32 -> 게임'까지 신호가 실제로 닿는다는
+                    뜻이고, 안 켜지면 그 구간이 끊긴 것이다 - 봇 로직(포커스
+                    가드/전투 플래그/이동 게이트)을 전부 건너뛰고 순수 전송만
+                    하므로, 결과가 로직 문제와 섞이지 않는다.
+
+                    각 키가 실제로 나갔는지를 키마다 따로 찍는다. 지금까지
+                    'esc>tab>tab을 했다'는 로그는 있는데 실제로 나갔는지는
+                    아무 데도 안 남아서, 안 먹힌 건지 안 보낸 건지 구분이
+                    불가능했다.
+                    """
+                    try:
+                        port = getattr(hw.ser, "port", None) if hw.ser else None
+                        is_open = bool(hw.ser and getattr(hw.ser, "is_open", False))
+                        print("[HWTest] ===== 하드웨어 자체 검증 시작 (esc > tab > home > tab) =====")
+                        print(f"[HWTest] backend={hw.get_input_backend()} port={port} open={is_open} "
+                              f"game_window_active={is_game_window_active(state)}")
+                        if not is_open:
+                            print("[HWTest] 시리얼이 열려있지 않습니다 - ESP32 연결부터 확인하세요.")
+                        results = []
+                        for key in ("esc", "tab", "home", "tab"):
+                            ok = hw.send_force(f"K,{display_game_hotkey(key)}")
+                            results.append((key, ok))
+                            print(f"[HWTest]   {key:<5} 전송 -> {'성공' if ok else '실패'}")
+                            time.sleep(0.12)
+                        sent = sum(1 for _, ok in results if ok)
+                        print(f"[HWTest] 전송 결과: {sent}/{len(results)} 성공")
+                        print(f"[HWTest] 봇이 인식한 상태: red_tab={getattr(state, 'red_tab_enabled', False)} "
+                              f"target='{getattr(state, 'target_info_text', '')}'")
+                        print("[HWTest] ===== 게임 화면에서 내 캐릭터에 red_tab이 켜졌는지 눈으로 확인하세요 =====")
+                        print("[HWTest]   켜졌다  -> PC~ESP32~게임 신호 경로 정상. 원인은 봇 로직.")
+                        print("[HWTest]   안 켜졌다 -> 신호가 게임까지 안 닿음. ESP32/USB/키매핑 문제.")
+                    except Exception as e:
+                        print(f"[HWTest] error: {e}")
+
+                HOTKEY_HANDLES["/"] = keyboard.on_press_key("/", lambda _event: hw_selftest())
+                print("[DEBUG] / 핫키 등록 완료 (하드웨어 자체 검증: esc>tab>home>tab)")
             except Exception as e:
                 print(f"[Warn] Hotkey Registration Failed: {e}")
         
