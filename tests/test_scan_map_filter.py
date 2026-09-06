@@ -122,10 +122,11 @@ def test_warrior_name_pattern_is_captured():
     prefix = LogicSvc._WARRIOR_NAME_PREFIX
     matching = [n for n in party if n.startswith(prefix)]
     assert matching, f"'{prefix}'로 시작하는 패턴이 findtext_patterns.json에 없다"
-    # 게임이 같은 이름을 상태에 따라 흰색/초록으로 그린다(실측: 밝기 251 vs 197).
-    # 밝기 이진화 패턴 하나로는 한 색밖에 못 잡으므로 색깔별로 있어야 한다 -
-    # 하나뿐이면 절반의 시간 동안 격수를 영영 못 찾는다.
-    assert len(matching) >= 2, f"이름표 색 변형이 하나뿐이다: {matching}"
+    # 밝기 패턴은 넓이의 60~70%가 '글자 주변 바닥'이라(글자가 밝고 잉크는
+    # 어두운 쪽) 격수가 불 이팩트 위로 들어가면 진짜 위치에서도 어긋난다.
+    # 색상 패턴('@'가 들어간 형식)은 지정한 색 픽셀만 보고 배경은 안 본다.
+    for n in matching:
+        assert "@" in party[n].split("$")[0], f"{n}이 밝기 패턴이다 - 배경에 흔들린다"
 
 
 def test_known_walls_file_covers_the_blocked_row():

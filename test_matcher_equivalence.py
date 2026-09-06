@@ -48,6 +48,8 @@ def demo():
     checked = hits_seen = 0
     for cat in ("monster", "item", "party", "map"):
         for name, text in pats.get(cat, {}).items():
+            if "@" in text.split("$")[0]:
+                continue   # 색상 패턴은 _template_match_color가 처리한다
             bgr, _ = _scene(text, rng)
             # 선행 '|'를 떼는 건 _parse_text_pattern의 일이다.
             # _parse_single_pattern에 그대로 넘기면 임계값이 0으로
