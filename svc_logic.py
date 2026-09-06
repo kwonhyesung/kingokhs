@@ -2367,7 +2367,12 @@ class LogicSvc(threading.Thread):
     #   2. 몬스터에 둘러싸이면 스프라이트는 이팩트에 묻히는데 이름표는 UI라
     #      안 묻힌다.
     # 이름이 곧 신원이라, 파티원 이름표가 옆에 붙어 있어도 구분이 필요 없다.
-    _WARRIOR_NAME_PATTERNS = ("점프_name",)
+    # 격수 이름표 패턴들. 게임이 같은 이름을 상태에 따라 다른 색으로 그린다
+    # (실측: 한 프레임에선 흰색 밝기 251, 13분 뒤 프레임에선 초록 밝기 197).
+    # 밝기 이진화 기반 패턴 하나로는 두 색을 다 잡을 수 없어서 색깔별로
+    # 따로 캡처하고, 여기서는 접두사로 전부 받는다 - 색이 하나 더 생겨도
+    # 패턴만 추가하면 코드는 그대로다.
+    _WARRIOR_NAME_PREFIX = "점프_name"
 
     def _get_config_roi_crop(self, frame, roi_name: str):
         """전체 프레임 대신 config.json의 roi_name 영역만 잘라 반환한다
@@ -2441,7 +2446,7 @@ class LogicSvc(threading.Thread):
         scan_crop, offset_x, offset_y = self._get_play_area_crop(frame)
         hits = [
             h for h in matcher.find_text_scan(scan_crop, "party", "USER")
-            if str(h.get("name", "")) in self._WARRIOR_NAME_PATTERNS
+            if str(h.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
         ]
         if not hits:
             # 이름표가 아예 안 보이는 상태. 게임에서 이름 상시 표시가 꺼져
