@@ -284,7 +284,21 @@ class SentinelThread(threading.Thread):
                     # 보일 수 있다. 잡힌 방향 패턴을 전부 남긴다.
                     self.state.my_facing = ",".join(sorted(
                         h["name"].rsplit("_", 1)[-1] for h in self_hits))
-                elif not self._logged_missing_self_patterns:
+                else:
+                    # 방향 패턴은 스프라이트가 이팩트/몬스터에 가려지면 통째로
+                    # 안 잡힌다. 실측 격수 로그: my_screen_pos=(0,0)이 계속돼
+                    # "[HuntIdle] 내 캐릭터 패턴을 못 찾음"으로 공격도 줍기도
+                    # 멈췄는데, 같은 프레임에서 이름표(점프_name)는 잡히고 있었다.
+                    # 이름표는 캐릭터 머리 위 click_offset_y만큼 위에 있으므로
+                    # 그만큼 내리면 몸이다 - 파티원을 클릭할 때와 같은 보정이다.
+                    tag_prefix = f"{self_pattern_name}_name"
+                    tag_hits = [h for h in party_hits
+                                if str(h.get("name", "")).startswith(tag_prefix)]
+                    if tag_hits:
+                        best_tag = max(tag_hits, key=lambda h: h["score"])
+                        my_screen_pos = (best_tag["cx"],
+                                         best_tag["cy"] + int(_pa_cfg.get("click_offset_y", 26) or 26))
+                if my_screen_pos == (0, 0) and not self._logged_missing_self_patterns:
                     # self 패턴을 설정해 놓고 한 번도 못 찾으면 조용히 넘어가지
                     # 않는다 - 그러면 격수의 사냥/줍기가 통째로 멈추는데 로그엔
                     # "캐릭터 패턴 미검출" 한 줄만 남아 원인이 '안 보임'인지
@@ -489,18 +503,22 @@ class SentinelThread(threading.Thread):
             # markers=0 drawn=0으로 계속 찍던 원인이 이것이다.
             mark_now = time.time()
             marks = [{"x": m.get("cx", 0) + pa_sx, "y": m.get("cy", 0) + pa_sy,
-                      "color": "red", "size": 12, "expiry": mark_now + 2.0} for m in monsters]
+                      "color": "red", "size": 12, "expiry": mark_now + 5.0} for m in monsters]
             off_y = int(_pa_cfg.get("click_offset_y", 26) or 26)
             marks += [{"x": h.get("cx", 0) + pa_sx, "y": h.get("cy", 0) + pa_sy + off_y,
-                       "color": "magenta", "size": 12, "expiry": mark_now + 2.0}
+                       "color": "magenta", "size": 12, "expiry": mark_now + 5.0}
                       # 이름표는 '내 이름'과 '남의 이름'이 다른 색으로 그려져서
                       # 패턴이 갈린다(점프_name = 도사 화면의 격수, 점프_name_self
                       # = 격수 화면의 자기 자신). 어느 쪽이든 클릭 지점은 같으니
                       # 접미사로 끝나는지가 아니라 포함하는지로 본다.
                       for h in party_hits if "_name" in str(h.get("name", ""))]
-            if marks:
-                with self.state._lock:
-                    self.state.visual_markers.extend(marks)
+            # 쌓지 않고 매 사이클 통째로 교체한다. 예전엔 extend라 지난
+            # 사이클 점이 남았고, 수명(2초)이 사이클(실측 1~2초)과 비슷해서
+            # 점이 깜빡였다. 교체하면 감지되는 동안 계속 떠 있고 사라질 때
+            # 바로 사라진다. 수명은 센티넬이 멈췄을 때 점이 얼어붙지 않게
+            # 하는 안전장치로만 남긴다.
+            with self.state._lock:
+                self.state.visual_markers = marks
 
             # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (테스트 중 눈으로 확인하기 위함).
             # 좌표(x,y)도 같이 찍는다 - 이름만으론 "감지는 되는데 위치가 맞는지"를

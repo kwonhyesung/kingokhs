@@ -116,8 +116,14 @@ class PatternMatcher:
             except Exception as e:
                 _monitor_log(f"[Error] findtext_patterns.json 로드 실패: {e}")
 
+    # 글자/스프라이트 모양(잉크)이 정체성이고, 그 뒤 바닥(배경)은 잡음이다.
+    # 둘에 같은 오차를 주면 정확히 거꾸로 동작한다 - 실측 프레임에서 화면에는
+    # 졈프(도사) 이름표 하나뿐인데 0.10/0.10은 점프_name/점프_name_green을
+    # 1곳씩 오탐하고(도사가 자기를 격수로 알고 클릭했다) 정작 졈프_name_white는
+    # 0곳이었다. 잉크 0.05 / 배경 0.20으로 하면 오탐 2건이 사라지고 졈프와
+    # 달걀_top이 잡힌다(전체 패턴에서 바뀌는 건 이 4개뿐, 폭발 0건).
     def find_text_scan(self, play_area_rgb: np.ndarray, category: str, ent_type: str,
-                        err1: float = 0.10, err0: float = 0.10,
+                        err1: float = 0.05, err0: float = 0.20,
                         only_names: set | None = None) -> list[dict]:
         """findtext_patterns.json의 category(map/item/monster/party/magic)에 저장된
         패턴을 전부 '|'로 결합해 한 번에 스캔한다. 각 패턴에 이미 박혀있는
