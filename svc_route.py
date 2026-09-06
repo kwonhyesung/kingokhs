@@ -1972,7 +1972,13 @@ class RouteSvc(threading.Thread):
             blockers = []
         else:
             ccx, ccy = self._get_nav_grid_pos()
-            blocked_cells = set() if portal_follow else self._get_blocked_cells()
+            # 포탈-따라가기라도 아직 문에서 멀면(접근 단계) 학습한 벽을
+            # 존중하고 BFS로 우회해야 한다. 예전엔 portal_follow면 무조건
+            # 벽을 무시(greedy)해서, 문까지 22칸 떨어진 상태에서 중간 벽에
+            # 막히면 그냥 헤딩하다 portal_follow_stuck으로 포기했다. 문 바로
+            # 앞(gap<=4)에서만 정확한 한 칸 진입을 위해 벽을 무시한다.
+            portal_far_approach = bool(portal_follow and gap > 4)
+            blocked_cells = set() if (portal_follow and not portal_far_approach) else self._get_blocked_cells()
             step_dir, next_grid, blockers = nav_pick_step_direction(
                 self.state,
                 (ccx, ccy),
@@ -1980,9 +1986,24 @@ class RouteSvc(threading.Thread):
                 dy,
                 include_entities=True,
                 blocked_cells=blocked_cells,
-                prefer_manhattan_reduction=follow_mode,
-                aggressive_follow=aggressive_follow,
+                prefer_manhattan_reduction=follow_mode or portal_far_approach,
+                aggressive_follow=aggressive_follow or portal_far_approach,
             )
+            if portal_far_approach:
+                primary_cell = _nav_step_from_dir(int(cx), int(cy),
+                                                  ("right" if dx > 0 else "left") if abs(dx) >= abs(dy)
+                                                  else ("down" if dy > 0 else "up"))
+                if step_dir is None or primary_cell in blocked_cells:
+                    detour_blocked = {c for c in blocked_cells if c != (int(tx), int(ty))}
+                    detour = hunt.path_step((int(cx), int(cy)), (int(tx), int(ty)),
+                                            detour_blocked, radius=32)
+                    if detour:
+                        now_fd = time.time()
+                        if now_fd - float(getattr(self, "_last_follow_detour_log", 0.0) or 0.0) >= 2.0:
+                            self._last_follow_detour_log = now_fd
+                            print(f"[Nav] portal 접근 우회 경로: {detour} "
+                                  f"(({cx},{cy}) -> ({tx},{ty}), 막힌칸 {len(detour_blocked)}개)")
+                        step_dir = detour
         if step_dir is None and portal_follow:
             retry_step_dir, retry_next_grid, retry_blockers = nav_pick_step_direction(
                 self.state,
@@ -2192,7 +2213,10 @@ class RouteSvc(threading.Thread):
                   f"facing={getattr(self.state, 'my_facing', '') or '?'}")
         self.state.last_move_dir = step_dir
         self._mark_nav_attempt()
-        if portal_follow:
+        if portal_follow and gap <= 4:
+            # 문 바로 앞에서만 한 칸씩 정착 대기(이중 통과 방지). 멀리서
+            # 접근하는 동안엔 이 대기가 걸리면 1칸/초로 기어가서 문에 영영
+            # 도달을 못 한다(실측: 22칸 떨어진 상태로 포탈 따라가기 시작).
             self._portal_move_settle_until = time.time() + 0.20
 
         arrived = abs(dx) <= 1 and abs(dy) <= 1

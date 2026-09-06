@@ -149,6 +149,9 @@ class LogicSvc(threading.Thread):
         # 신원 확인 단계를 넣을지. enter가 이 게임에서 채팅창을 열어버리면
         # 뒤따르는 tab/0/3 키가 채팅으로 들어가므로, 그럴 땐 이 값을 False로.
         self._warrior_lock_use_enter_confirm = True
+        # 마우스 클릭 락이 연속 실패하면(같은 오탐 좌표 반복 클릭) 잠깐 쉰다.
+        self._warrior_click_backoff_until = 0.0
+        self._warrior_click_fail_streak = 0
         self._ntab_confirm_required_hits = 1
         self._ntab_confirm_timeout = 0.42
         self._warrior_next_attack_at = 0.0
@@ -2486,9 +2489,20 @@ class LogicSvc(threading.Thread):
         # 잘라서 스캔한다 - 훨씬 작은 이미지라 훨씬 빠르다. 매치 좌표는
         # crop 기준이라 클릭 전에 play_area의 화면 offset을 다시 더해야 한다.
         scan_crop, offset_x, offset_y = self._get_play_area_crop(frame)
+        try:
+            _crop_h, _crop_w = int(scan_crop.shape[0]), int(scan_crop.shape[1])
+        except Exception:
+            _crop_h, _crop_w = 0, 0
+        _edge = 24  # play_area 경계에 딱 붙은 매치는 FindText 가장자리 오탐이다
         hits = [
             h for h in matcher.find_text_scan(scan_crop, "party", "USER")
             if str(h.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
+            and not (
+                _crop_w > 0 and _crop_h > 0 and (
+                    int(h.get("cx", 0)) < _edge or int(h.get("cx", 0)) > _crop_w - _edge
+                    or int(h.get("cy", 0)) < _edge or int(h.get("cy", 0)) > _crop_h - _edge
+                )
+            )
         ]
         if hits:
             # 후보가 둘 이상 나오는 경우는 실측 로그(37회 검출) 전체에서 한
@@ -2612,16 +2626,26 @@ class LogicSvc(threading.Thread):
         # 잡는 동안은 제자리에 선다. 클릭 좌표는 화면 좌표라, 도사가 한 걸음만
         # 움직여도 카메라가 따라 움직여서 그 좌표가 통째로 어긋난다 - 이름표를
         # 제대로 찾고도 엉뚱한 곳을 클릭하게 된다.
+        now = time.time()
+        if now < float(getattr(self, "_warrior_click_backoff_until", 0.0) or 0.0):
+            return False
         previous_follow = bool(getattr(self.state, "nav_follow_enabled", False))
         self._pause_follow_for_action(duration=self._REDTAB_HOLD_SEC)
         try:
             for mouse_attempt in range(1, 4):
                 marker_result = self._click_warrior_marker_and_lock()
                 if marker_result is True:
+                    self._warrior_click_fail_streak = 0
                     return True
                 print(f"[TargetConfirm] mouse attempt={mouse_attempt}/3 result={marker_result}")
             # tab으로 열린 대상박스가 남아있을 수 있으니 닫고 끝낸다.
             self._press_hw_key("esc", variance=0.10)
+            self._warrior_click_fail_streak = int(getattr(self, "_warrior_click_fail_streak", 0) or 0) + 1
+            if self._warrior_click_fail_streak >= 2:
+                # 같은 오탐 좌표를 무한 클릭하지 말고 3초 쉰다. 그동안 센티넬이
+                # 이름표를 다시 잡거나 격수가 움직여서 화면이 바뀌길 기다린다.
+                self._warrior_click_backoff_until = time.time() + 3.0
+                print(f"[TargetConfirm] 락 {self._warrior_click_fail_streak}연속 실패 - 3초 백오프")
             return False
         finally:
             self._restore_follow_after_action(previous_follow)
