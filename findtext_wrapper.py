@@ -279,8 +279,6 @@ class FindText:
     # 한 패턴이 이보다 많은 곳에서 맞으면 식별력이 없는 것으로 본다.
     # 진짜 개체 하나의 매칭 덩어리는 수십~수백 픽셀이다.
     MAX_RAW_HITS = 5000
-    # 짧은 변이 이 값 이하면 오차를 허용하지 않는다(정확 일치).
-    STRICT_MIN_SIDE_PX = 6
 
     def _template_match_native(self,
                              roi_bgr: np.ndarray,
@@ -324,14 +322,6 @@ class FindText:
         len1 = int(np.sum(pattern_bin))
         len0 = ph * pw - len1
 
-        # 짧은 변이 6px 이하인 패턴은 스프라이트를 담을 수 없는 크기라,
-        # 기본 허용오차(10%)로는 화면 곳곳에서 맞는다 - 실측에서 점프_right
-        # (29x4)/점프_top(36x4)이 42,000군데씩 맞아 party 스캔이 1,286ms를
-        # 먹었고, NMS를 통과해 남는 상자는 사실상 무작위였다.
-        # 버리는 대신 임계값을 최대로 올린다(오차 0 = 정확 일치). 저장소의
-        # 다른 패턴은 짧은 변이 전부 12px 이상이라 영향을 받지 않는다.
-        if min(ph, pw) <= self.STRICT_MIN_SIDE_PX:
-            err1 = err0 = 0.0
         e1_max = (len1 * int(err1 * 1024)) >> 10
         e0_max = (len0 * int(err0 * 1024)) >> 10
         if e1_max >= len1:
@@ -341,6 +331,7 @@ class FindText:
 
         out_h, out_w = sh - ph + 1, sw - pw + 1
         ok = None
+        corr1 = corr0 = None
 
         # 상관값은 0/1 곱의 합이라 항상 정수이고(패턴 넓이는 수천 이하라
         # float32가 정확히 표현한다), 그래서 round해서 int32 배열을 새로
@@ -374,17 +365,24 @@ class FindText:
         if n_hits == 0:
             return []
         if n_hits > self.MAX_RAW_HITS:
-            # 이만큼 맞는 패턴은 아무것도 식별하지 못한다. 실측: 높이가
-            # 4픽셀뿐인 점프_right(29x4)/점프_top(36x4)이 화면 곳곳에서
-            # 42,000군데씩 맞았다. 예전엔 그걸 전부 dict으로 만들어
-            # NMS(O(n^2))에 넘겼고, 살아남는 상자는 사실상 무작위였다
-            # (party 스캔이 1,286ms를 먹던 원인). 버리고 이름을 남긴다 -
-            # 그 패턴을 더 크게 다시 캡처하라는 뜻이다.
-            if comment not in self._noisy_patterns:
-                self._noisy_patterns.add(comment)
-                print(f"[FindText] 패턴 '{comment}'({pw}x{ph})이 {n_hits}군데에서 맞음 "
-                      f"- 식별력이 없어 버린다. 더 크게 다시 캡처할 것.")
-            return []
+            # 이만큼 맞으면 그 프레임에서 이 패턴은 아무것도 식별하지 못한다.
+            # 예전엔 전부 dict으로 만들어 NMS(O(n^2))에 넘겼고 살아남는 상자는
+            # 사실상 무작위였다(13,584히트 100ms, 33,578히트 446ms).
+            #
+            # 크기가 작은 패턴을 미리 엄격하게 만드는 방법을 썼다가 되돌렸다 -
+            # 폭발하지도 않는 프레임에서까지 멀쩡한 매칭을 죽일 수 있다
+            # (점프_right/top은 격수가 자기 위치를 찾는 패턴이기도 하다).
+            # 폭발한 그 프레임에서만 오차 0으로 다시 걸러본다. 상관값은 이미
+            # 계산돼 있어서 추가 비용이 없다.
+            if corr1 is not None and corr0 is not None:
+                ok = (corr1 >= len1 - 0.5) & (corr0 <= 0.5)
+                n_hits = int(np.count_nonzero(ok))
+            if n_hits == 0 or n_hits > self.MAX_RAW_HITS:
+                if comment not in self._noisy_patterns:
+                    self._noisy_patterns.add(comment)
+                    print(f"[FindText] 패턴 '{comment}'({pw}x{ph})이 이 프레임에서 "
+                          f"너무 많은 곳({n_hits})에 맞아 버린다 - 더 크게 다시 캡처할 것.")
+                return []
 
         # 오차 허용(err1/err0) 때문에 진짜 매칭 한 개가 인접 픽셀 수십~수백
         # 개로 잡힌다. 붙어있는 픽셀은 어차피 같은 매칭이므로 C쪽에서 한
