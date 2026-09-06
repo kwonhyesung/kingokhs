@@ -1183,7 +1183,15 @@ class BisHardware:
     """
     def __init__(self):
         self.ser   = None  # 시리얼 포트
-        self._lock = threading.Lock()  # 스레드 안전성
+        self._lock = threading.Lock()  # 시리얼 I/O 직렬화 (send 한 줄 단위)
+        # 키 한 번(D:<키> ... 홀드 ... U:<키>)이 통째로 끝나기 전에 다른
+        # 스레드의 키가 끼어들지 못하게 한다. RouteSvc(방향키)와 LogicSvc
+        # (3/tab/enter/esc)가 각각 press_once로 들어오는데, D와 U 사이에서
+        # 락이 풀려서 'D:left, D:3, U:left, U:3'처럼 섞였다 - 방향키가 눌린
+        # 채로 tab이 나가면 그 방향키가 캐릭터가 아니라 대상선택박스를 조작.
+        # RLock: 시퀀스(tab->enter->tab->tab)가 맨 위에서 한 번 잡고
+        # 안쪽 press_once가 재귀적으로 다시 잡아도 되게.
+        self._seq_lock = threading.RLock()
         self.state: Optional[GameState] = None  # 게임 상태
         self._auto_reconnect_enabled = True
         self._last_connect_attempt = 0
@@ -1487,15 +1495,19 @@ class BisHardware:
         emit = self.send_force if force else self.send
         if self._move_command_form == "K":
             # 단발 명령이라 duration을 못 준다 - 이 게임의 한 걸음이 곧 한 탭이다.
-            return emit(f"K,{key}")
-        pressed = emit(f"D:{key}")
-        try:
-            humanized_sleep(float(duration) if duration is not None
-                            else TIMING_CONFIG["key_down_hold"], variance)
-        finally:
-            # 키 떼기는 항상 강제로 - 포커스가 잠깐 흔들려도 눌린 채로 남으면
-            # 캐릭터가 계속 걷는다(send는 U: 를 통과시키지만 명시해 둔다).
-            self.send_force(f"U:{key}")
+            with self._seq_lock:
+                return emit(f"K,{key}")
+        # D:<키> ... 홀드 ... U:<키> 전체를 한 덩어리로 잠근다 - 이 사이에
+        # 다른 스레드의 키가 못 끼어든다.
+        with self._seq_lock:
+            pressed = emit(f"D:{key}")
+            try:
+                humanized_sleep(float(duration) if duration is not None
+                                else TIMING_CONFIG["key_down_hold"], variance)
+            finally:
+                # 키 떼기는 항상 강제로 - 포커스가 잠깐 흔들려도 눌린 채로 남으면
+                # 캐릭터가 계속 걷는다(send는 U: 를 통과시키지만 명시해 둔다).
+                self.send_force(f"U:{key}")
         return pressed
 
     def _reset_serial_buffers(self):
