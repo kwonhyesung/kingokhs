@@ -257,7 +257,15 @@ class FindText:
         gray = None
         for p in patterns:
             if p.get('mode') == 'color':
-                res = self._template_match_color(screenshot, p, err1, find_all)
+                # 색상 패턴은 '지정한 색 + 지정한 모양'을 동시에 요구해서
+                # 밝기 패턴보다 훨씬 선택적이다. 그래서 훨씬 큰 오차를 줘도
+                # 헛매칭이 안 생기고, 그 오차가 곧 '가림 허용치'가 된다 -
+                # 격수가 몬스터에 둘러싸이면 이름표 일부가 가려지는데
+                # 10%(14px)로는 그때마다 놓쳤다(실측 검출률 26/42).
+                # 실측: 0.40까지 히트가 전부 진짜 위치 한 덩어리였고 0.50에서
+                # 처음 다른 곳이 나왔다. 0.30이면 30% 가려져도 찾는다.
+                res = self._template_match_color(
+                    screenshot, p, max(err1, self.COLOR_ERR1), find_all)
             else:
                 if gray is None:
                     gray = self._to_gray(screenshot)
@@ -279,6 +287,8 @@ class FindText:
     # 한 패턴이 이보다 많은 곳에서 맞으면 식별력이 없는 것으로 본다.
     # 진짜 개체 하나의 매칭 덩어리는 수십~수백 픽셀이다.
     MAX_RAW_HITS = 5000
+    # 색상 패턴의 최소 오차 = 이름표가 이만큼 가려져도 찾는다.
+    COLOR_ERR1 = 0.40
 
     def _template_match_native(self,
                              roi_bgr: np.ndarray,
@@ -427,15 +437,21 @@ class FindText:
         mismatch1 = len1 - np.round(corr1).astype(np.int32)
         match_mask = mismatch1 <= e1_max
 
-        ys, xs = np.where(match_mask)
         comment = p.get('comment', '')
         if not find_all:
+            ys, xs = np.where(match_mask)
             if len(ys) == 0:
                 return []
             return [{'x': int(xs[0]), 'y': int(ys[0]), 'w': pw, 'h': ph, 'id': comment}]
 
-        return [{'x': int(x), 'y': int(y), 'w': pw, 'h': ph, 'id': comment}
-                for y, x in zip(ys, xs)]
+        # 흑백 경로와 같게 붙어있는 히트는 한 덩어리로 묶는다. 오차를 키우면
+        # 진짜 위치 하나가 인접 픽셀 여러 개로 잡히는데, 그걸 그대로 돌려주면
+        # 호출부가 "여러 군데서 찾았다"로 오해한다.
+        n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+            np.ascontiguousarray(match_mask).view(np.uint8), 8)
+        return [{'x': int(stats[i, cv2.CC_STAT_LEFT]), 'y': int(stats[i, cv2.CC_STAT_TOP]),
+                 'w': pw, 'h': ph, 'id': comment}
+                for i in range(1, n_labels)]
 
     def _parse_text_pattern(self, text: str) -> Optional[Dict[str, Any]]:
         """

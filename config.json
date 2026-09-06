@@ -17,7 +17,7 @@
   "monster_radius_tiles": 12,
   "grid_size": 48,
   "self_pattern_name": "",
-  "click_offset_y": 56
+  "click_offset_y": 61
  },
  "hp": {
   "sx": 1451,
