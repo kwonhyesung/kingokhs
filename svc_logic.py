@@ -2451,7 +2451,8 @@ class LogicSvc(threading.Thread):
         if not hits:
             # 이름표가 아예 안 보이는 상태. 게임에서 이름 상시 표시가 꺼져
             # 있으면 이 경로 전체가 죽으므로, 조용히 넘기지 않는다.
-            print("[TargetConfirm] 격수 이름표(점프_name)를 못 찾음 - 게임의 이름 상시 표시 설정 확인")
+            print(f"[TargetConfirm] 격수 이름표('{self._WARRIOR_NAME_PREFIX}*')를 못 찾음 "
+                  f"- 이름표가 가려졌거나(이팩트/몬스터) 게임의 이름 상시 표시가 꺼짐")
             return None
         hits.sort(key=lambda h: -float(h.get("score", 0.0) or 0.0))
         best = hits[0]

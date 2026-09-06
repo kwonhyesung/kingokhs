@@ -1,6 +1,6 @@
 {
   "item": {
-    "진호박": "|<진호박>*143$23.zUzzz1zzs03zk07y00Dw00Ts00S000A000M007k00DU00T000zU01z003z00Ty00zw01zzbDzzCTy",
+    "진호박": "|<진호박>*140$23.zUzzz1zzs03zk07y00Dw00Ts00S000A000M007k00DU00T000zU01z003z00Ty00zw01zzbDzzCTy",
     "호박": "|<호박>*105$18.w0Tk0Tk0T007007003001001007007k0Tk0Tk0Tk0Tz7zz7zz7zU"
   },
   "monster": {
@@ -44,11 +44,11 @@
     "점프_back": "|<점프_back>*120$12.U0U0zzzzs3s3U0U0U0U",
     "점프_left": "|<점프_left>*151$15.Azs0w07U0k0600D01s0z0Ts3zzU7w0z07s0w07U0w07U0w01U0A01U0A01U0A00000000000000000000000000000001U0A04",
     "점프_top": "|<점프_top>*205$36.y0000My1zw0My1zw0My603bwU",
-    "점프_right": "|<점프_right>*75$29.zzw07zzs1nzzk3Vzzzz8",
+    "점프_right": "|<점프_right>*70$29.zzw07zzs1nzzk3Vzzzz8",
     "졈프_name": "|<졈프_name>*142$32.zzznzzzzlzzzzwTzzzz3zzzb0zy0NnzzU6E00zDY0szn00/DsM02nwWU0YyAM09Djm000zzsDzzU000Tty007yM0007bs7zzs0001zzs007s0001U",
     "점프_user": "|<점프_user>*24$40.zy70000C0Q3zzks1k0kA3U7030kC7w0A31w1k0kA6k7030klUQ0A363Vk0kAk67030m00Q1yDk0007zz0000000Tzs0001U1U0006060000M0M0001U1UTzzU",
     "졈프_name_white": "|<졈프_name_white>*150$37.zzyTzzzU3DU0zk1bk0Dz63yQzzXtzCDzkUzb7zm0TnbzXXDtlzvzbk0Dz0DzzzzU1zzzznwzzzztyS00Tw0Dzzzy07zzzzzzzzw0zzzzy0TzzzzU",
-    "점프_name_c": "|<점프_name_c>@71E05A~80,F9F7F7~60$30.T1000T10k4C11zwCD0wkCTUkkTDUokvXUkkEHVzw033zw6z000DzU00ADXzwA7Xzz7z00001000U"
+    "점프_name_c": "|<점프_name_c>@6BE05F~80,71E05A~80,F9F7F7~50$29.T3000z61zsyA7zlns761bk4ADXUAMvX0EkVW3zs087znzs0071k00C1UzzQ33zyDy00004004"
   },
   "magic": {
     "금강불체": "|<금강불체>*28$72.00TU7bwTlzrvzyTz7bw01zXvzyTzbbwzty0PzyTzbXwTty0vzyTzDVw01znvzyTyDbzzzznvzwTwTbzzzzX3007szbk00TX3zzzXzbzszzXvzzzjzbzwzz1vzzzzzzw01zAv00Ty0Ty01yQP7wTszDzztwyPDyTtzby01zzvDyTtzbw03zzvDyTtzbwzzzzvU"
