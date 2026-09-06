@@ -119,8 +119,13 @@ def test_warrior_name_pattern_is_captured():
     from svc_logic import LogicSvc
 
     party = json.load(open("findtext_patterns.json", encoding="utf-8"))["party"]
-    for name in LogicSvc._WARRIOR_NAME_PATTERNS:
-        assert name in party, f"{name} 패턴이 findtext_patterns.json에 없다"
+    prefix = LogicSvc._WARRIOR_NAME_PREFIX
+    matching = [n for n in party if n.startswith(prefix)]
+    assert matching, f"'{prefix}'로 시작하는 패턴이 findtext_patterns.json에 없다"
+    # 게임이 같은 이름을 상태에 따라 흰색/초록으로 그린다(실측: 밝기 251 vs 197).
+    # 밝기 이진화 패턴 하나로는 한 색밖에 못 잡으므로 색깔별로 있어야 한다 -
+    # 하나뿐이면 절반의 시간 동안 격수를 영영 못 찾는다.
+    assert len(matching) >= 2, f"이름표 색 변형이 하나뿐이다: {matching}"
 
 
 def test_known_walls_file_covers_the_blocked_row():
