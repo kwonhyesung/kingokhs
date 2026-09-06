@@ -64,7 +64,8 @@ from typing import Tuple, Optional, Dict
 from enum import Enum, auto
 
 # 而ㅻ꼸 ?대옒???꾪룷??
-from bis_core import Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep, find_game_window_any
+from bis_core import (Skill, GameState, hw, Region, TIMING_CONFIG, humanized_sleep,
+                      find_game_window_any, is_game_window_active)
 from svc_stealth import StealthChecker
 from svc_monitor import MonitorSvc
 from svc_sentinel import SentinelThread
@@ -3670,6 +3671,41 @@ class AppView:
                     self.root.after(100, self._marker_loop)
             except tk.TclError:
                 pass
+
+    def retune_patterns_from_screen(self):
+        """'/' 키: 지금 화면으로 패턴 임계값을 다시 잡는다.
+
+        임계값은 캡처할 때 드래그한 ROI 밝기로 정해지는데, 그 값이 실전
+        화면과 어긋나면 모양이 멀쩡해도 영영 안 잡힌다(실측: 졈프_name이
+        228로 0곳, 180이면 1곳). 잡고 싶은 몬스터가 화면에 보일 때 이 키를
+        누르면 '지금은 못 찾는데 그 값이면 정확히 찾는' 패턴만 골라 고친다.
+        이미 잘 찾는 패턴과 화면에 없는 대상은 건드리지 않는다."""
+        import cv2
+        # '/'는 평소에 글자로 치는 키다. 전역 후킹이라 다른 창에서 타이핑할
+        # 때도 들어오므로, 게임창이 앞에 있을 때만 실행한다.
+        if not is_game_window_active(self.state):
+            return
+        frame = getattr(self.state, "last_play_area_rgb", None)
+        if frame is None or getattr(frame, "size", 0) == 0:
+            print("[Retune] 화면 프레임이 아직 없다 (F2로 감지를 켠 뒤 다시 시도)")
+            return
+        try:
+            import pattern_tuner
+            print("[Retune] 지금 화면으로 패턴 임계값 재조정")
+            for line in pattern_tuner.retune(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                                             apply=True):
+                print("[Retune]" + line)
+            reader_thread = getattr(self, "reader_thread", None)
+            matcher = getattr(reader_thread, "matcher", None)
+            if matcher is not None:
+                # 바꾼 값을 돌고 있는 스캐너에 바로 반영한다 - 재시작해야만
+                # 적용되면 그 자리에서 확인할 수가 없다.
+                matcher._load_findtext_patterns()
+                matcher._ft.cached_patterns.clear()
+                print("[Retune] 실행 중인 스캐너에 반영 완료")
+            self.show_toast("PATTERNS RETUNED")
+        except Exception as e:
+            print(f"[Retune] 실패: {e!r}")
 
     def _marker_diag(self):
         """점이 왜 안 보이는지 2초마다 한 줄. 한 번이라도 그려지면 멈춘다.

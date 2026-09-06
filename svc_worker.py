@@ -560,6 +560,12 @@ def main(
                     lambda _event: _dispatch_gui_hotkey(gui_instance, "F5", gui_instance.cast_f5_repeat),
                 )
                 print("[DEBUG] F5 핫키 등록 완료")
+                HOTKEY_HANDLES["slash"] = keyboard.on_press_key(
+                    "/",
+                    lambda _event: _dispatch_gui_hotkey(
+                        gui_instance, "/", gui_instance.retune_patterns_from_screen),
+                )
+                print("[DEBUG] / 핫키 등록 완료 (지금 화면으로 패턴 임계값 재조정)")
                 HOTKEY_HANDLES["f6"] = keyboard.on_press_key(
                     "f6",
                     lambda _event: _dispatch_gui_hotkey(gui_instance, "F6", gui_instance.toggle_sulsa_debuff_loop),
