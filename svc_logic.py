@@ -1574,7 +1574,17 @@ class LogicSvc(threading.Thread):
         now = time.time()
         # Unthrottled (was 1s-throttled) - a 1s gate hides the very thing
         # we need this line for: the actual gap between individual casts.
-        print(f"[Support] {_ts()} HP heal casting on warrior: key={self._party_direct_heal_key}, hp={hp_val}, direct_verified={self._party_direct_heal_verified}")
+        # 지금 '누가' 선택돼 있는지 같이 찍는다. red_tab_enabled는 '무언가
+        # 선택됨'일 뿐이라, 힐이 계속 나가는데 격수 HP가 안 오르는 상황
+        # (실측: 37초 동안 299,676 -> 299,047로 오히려 감소)에서 대상이
+        # 격수인지 도사 자신인지 구분할 방법이 로그에 없었다.
+        # user_info ROI가 읽은 이름이 '점프_user'가 아니면 힐은 딴 데로 간다.
+        print(f"[Support] {_ts()} HP heal casting on warrior: "
+              f"key={self._party_direct_heal_key}, hp={hp_val}, "
+              f"direct_verified={self._party_direct_heal_verified}, "
+              f"선택대상={self._get_current_user_pattern() or '?'}"
+              f"(raw={str(getattr(self.state, 'user_info_text', '') or '')!r} "
+              f"score={float(getattr(self.state, 'user_score', 0.0) or 0.0):.2f})")
         self._last_party_direct_heal_log_time = now
         # 이미 red_tab이 잠긴 대상에게 핫키 한 번 탭하는 것뿐이라 이동을 막을
         # 필요가 없다 (자힐 수정과 동일한 이유 - 방향키와 스킬키는 서로 다른
