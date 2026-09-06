@@ -145,6 +145,10 @@ class LogicSvc(threading.Thread):
         self._support_self_pattern = "jump2"
         self._support_warrior_pattern = "점프_user"
         self._support_wizard_pattern = "졈프_user"
+        # 격수 락 시퀀스에서 click 뒤 enter로 선택 확정 + User_info(점프_user)
+        # 신원 확인 단계를 넣을지. enter가 이 게임에서 채팅창을 열어버리면
+        # 뒤따르는 tab/0/3 키가 채팅으로 들어가므로, 그럴 땐 이 값을 False로.
+        self._warrior_lock_use_enter_confirm = True
         self._ntab_confirm_required_hits = 1
         self._ntab_confirm_timeout = 0.42
         self._warrior_next_attack_at = 0.0
@@ -800,7 +804,12 @@ class LogicSvc(threading.Thread):
             return False
         crop_result = self._get_config_roi_crop(frame, "magic_info")
         if crop_result is None:
-            return False
+            # magic_info ROI가 아직 캘리브레이션 안 됨(sx/sy/dx/dy 전부 0).
+            # 예전엔 여기서 무조건 False -> 0키를 영구히 맹목 발사했다
+            # (로그의 magic_info_roi=missing/zero). cooltime_area 스킬바에서
+            # 읽은 self_gg_detected로 폴백해서 최소한의 확인은 하게 한다.
+            # ponytail: 폴백. magic_info ROI만 잡으면 이 분기는 무의미해진다.
+            return bool(getattr(self.state, "self_gg_detected", False))
         crop, _, _ = crop_result
         hits = matcher.find_text_scan(crop, "magic", "STATUS")
         return any(str(h.get("name", "")) == "금강불체" for h in hits)
@@ -818,12 +827,18 @@ class LogicSvc(threading.Thread):
         if now - float(getattr(self, "_last_gg_check_time", 0.0) or 0.0) < 11.0:
             return False
         self._last_gg_check_time = now
+        matcher = getattr(self.state, "pattern_matcher", None)
+        frame = getattr(self.state, "last_frame", None)
+        crop_result = self._get_config_roi_crop(frame, "magic_info") if (matcher is not None and frame is not None) else None
+        # magic_info ROI가 없으면 _is_geumgang_bulche_detected가 cooltime_area의
+        # self_gg_detected로 폴백하는데, 그 값은 S를 눌러 쿨타임뷰를 갱신한
+        # 직후에만 신선하다 - 폴백일 때만 여기서 한 번 갱신해준다(ROI를
+        # 잡고 나면 이 S 입력도 안 나간다).
+        if crop_result is None:
+            self._refresh_self_cooltime_view("[Buff] self gg check (magic_info ROI 없음). Press S for cooltime.")
         detected = self._is_geumgang_bulche_detected()
         if now - float(getattr(self, "_last_gg_maintain_log_time", 0.0) or 0.0) >= 2.0:
             self._last_gg_maintain_log_time = now
-            matcher = getattr(self.state, "pattern_matcher", None)
-            frame = getattr(self.state, "last_frame", None)
-            crop_result = self._get_config_roi_crop(frame, "magic_info") if (matcher is not None and frame is not None) else None
             print(
                 f"[GGProbe] {_ts()} detected={detected} matcher={'set' if matcher is not None else 'None'} "
                 f"frame={'set' if frame is not None else 'None'} magic_info_roi={'ok' if crop_result is not None else 'missing/zero'}"
@@ -835,7 +850,8 @@ class LogicSvc(threading.Thread):
         self._last_gg_maintain_press_time = now
         self._press_hw_key("0", variance=0.10, skip_focus_guard=True)
         self.state.last_self_gg_cast_time = now
-        print("[Buff] self gg missing (magic_info). Cast 0.")
+        src = "magic_info" if crop_result is not None else "cooltime-fallback"
+        print(f"[Buff] self gg missing ({src}). Cast 0.")
         return True
 
     def _complete_self_hp_recovery_reengage(self, source_log: str) -> bool:
@@ -2425,13 +2441,12 @@ class LogicSvc(threading.Thread):
         """마우스 직접 클릭 방식(S/W, win32api - 아두이노 하드웨어 신호 아님):
         esc(다른 대상에게 걸려있을 red_tab 비활성화) -> tab(대상박스 활성화)
         -> 화면에서 격수 이름표(점프_name*)를 find_text_scan으로 찾아 그
-        아래 click_offset_y 설정값을 클릭 -> tab(=_promote_ntab_to_red_tab과
-        같은 역할의 promote/lock, enter 아님)으로 red_tab을 최종 확정한다.
+        아래 click_offset_y 설정값을 클릭 -> enter(선택 확정) -> User_info
+        ROI에서 점프_user(격수 신원) 확인 -> tab -> tab 으로 red_tab을 최종
+        확정한다. 신원이 확인 안 돼도 힐을 막지는 않고(점프_user 패턴
+        신뢰도 검증 전) 경고만 남긴 뒤 red_tab 폴백으로 진행한다.
         이름표 위치를 그대로 클릭하면 캐릭터가 안 잡힌다 - 실측으로 26px
         아래여야 잡히고, 더 내려가면 한 칸 아래 대상이 잡힌다. 현재값은 config.json의 play_area.click_offset_y다.
-        이름이 곧 신원이라(점프_name* = 격수 전용, pc_roles.json의
-        self_pattern_by_role["격수"]="점프"와 같은 이름) User_info 팝업으로
-        다시 확인할 필요가 없다.
         클릭이 실제로 이 PC의 커서를 옮기는지는 hw.click_pixel() 안에서
         GetCursorPos로 되읽어 [Click] 로그로 남긴다.
         반환값: True/False = 캐릭터를 찾아서 클릭까지 시도함(성공/실패),
@@ -2510,14 +2525,41 @@ class LogicSvc(threading.Thread):
         print(f"[TargetConfirm] character click: name={source} pos=({px},{py})")
         hw.click_pixel(px, py)
         self._sleep_ui_gap(0.03)
-        if not self._press_hw_key("tab", variance=0.10):
-            return False
-        self._sleep_ui_gap(0.03)
         # _ntab_in_progress를 켜면 _wait_for_red_tab_lock의 폴링 간격이
         # 0.03s->0.015s로 빨라진다(키보드 경로도 이미 이렇게 쓰고 있음).
         prev_ntab_in_progress = self._ntab_in_progress
         self._ntab_in_progress = True
+        prev_ntab_active = bool(getattr(self.state, "ntab_active", False))
+        prev_ntab_since = float(getattr(self.state, "ntab_active_since", 0.0) or 0.0)
+        # click 다음 enter로 선택을 '확정'하면 우상단 User_info 이름표 박스에
+        # 선택 대상의 이름이 뜬다. ntab_active를 켜야 svc_monitor가 그 ROI를
+        # party 카테고리(*_user)로 스캔한다. 여기서 점프_user가 확인돼야
+        # 진짜 격수를 잡은 것 - 안 뜨면 몬스터/딴 사람/자기 자신일 수 있다.
+        # 다만 점프_user FindText 패턴 신뢰도가 아직 검증 전이라, 미확인이어도
+        # 힐 자체를 막지는 않고 로그로만 남긴 뒤 red_tab 폴백으로 진행한다.
+        # ponytail: 미확인 시 경고 후 진행. 패턴 안정화되면 여기서 하드 리턴.
+        self.state.ntab_active = True
+        self.state.ntab_active_since = time.time()
+        identity_ok = False
         try:
+            if self._warrior_lock_use_enter_confirm and self._press_hw_key("enter", variance=0.10):
+                self._sleep_ui_gap(0.03)
+                identity_ok = self._wait_for_user_pattern(
+                    self._support_warrior_pattern, timeout=0.45
+                )
+            if identity_ok:
+                print(f"[TargetConfirm] 신원 확인 OK: {self._support_warrior_pattern}")
+            elif self._warrior_lock_use_enter_confirm:
+                seen = self._get_current_user_pattern() or (
+                    str(getattr(self.state, "user_info_text", "") or "") or "(빈값)"
+                )
+                print(f"[TargetConfirm] 신원 미확인 (User_info='{seen}') - red_tab만으로 진행")
+            # tab -> tab 으로 red_tab 최종 승격 (요청대로 2회).
+            if not self._press_hw_key("tab", variance=0.10):
+                return False
+            self._sleep_ui_gap(0.05)
+            self._press_hw_key("tab", variance=0.10)
+            self._sleep_ui_gap(0.03)
             if not self._wait_for_red_tab_lock(timeout=0.20, min_hits=1):
                 return False
             # red_tab_enabled는 '무언가 선택됨'이라는 뜻일 뿐 '격수가 선택됨'이
@@ -2531,6 +2573,8 @@ class LogicSvc(threading.Thread):
             return True
         finally:
             self._ntab_in_progress = prev_ntab_in_progress
+            self.state.ntab_active = prev_ntab_active
+            self.state.ntab_active_since = prev_ntab_since
 
     def _confirm_and_lock_warrior_target(self) -> bool:
         """격수 이름표(점프_name)를 마우스로 클릭해 red_tab을 세운다.

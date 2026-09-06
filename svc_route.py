@@ -266,6 +266,11 @@ class RouteSvc(threading.Thread):
         except Exception:
             self._patrol_point_timeout = 15.0
         self._blocked_cell_hits: dict[tuple[int, int], int] = {}
+        # _forget_neighbours로 '잘못된 벽'이라 판단해 지운 칸은 잠깐 재학습을
+        # 막는다 - 안 그러면 다음 stuck 사이클이 곧바로 같은 칸을 다시
+        # 막힘으로 찍어 mark/clear를 무한 반복한다(로그의 '4칸 해제' 도배).
+        self._navmem_forgiven_until: dict[tuple[int, int], float] = {}
+        self._navmem_forgive_sec = 2.5
         self._blocked_cell_base_ttl = 6.0
         self._blocked_cell_max_ttl = 18.0
         self._blocked_cell_wall_ttl = 300.0   # 벽은 안 움직인다
@@ -380,8 +385,11 @@ class RouteSvc(threading.Thread):
         attempts = int(getattr(self, "_support_follow_escape_attempts", 0) or 0)
         self._support_follow_escape_attempts = attempts + 1
         # 같은 자리에서 반복 실패할수록(진전 없음) 더 멀리, 더 빠르게 밀어붙여서
-        # 장애물 폭을 실제로 벗어나게 한다. 1회차 0.13s -> 3회차부터 0.35s 상한.
-        escape_duration = min(0.13 + 0.08 * attempts, 0.35)
+        # 장애물 폭을 실제로 벗어나게 한다. 1회차 0.22s -> 3회차부터 0.45s 상한.
+        # 예전 0.13s 시작값은 게임의 한 칸 이동 최소 홀드 시간보다 짧아서
+        # 첫 twitch가 캐릭터를 아예 안 움직여 stuck 루프를 스스로 유지했다.
+        # ponytail: 상수 튜닝. 실측 이동 홀드 시간에 맞춰 조정.
+        escape_duration = min(0.22 + 0.08 * attempts, 0.45)
         if attempts >= 1:
             # 회피가 2회 연속 진전 없이 실패한 지점 자체(주저앉은 칸)를 몇 초간
             # 막힌 칸으로 기억해서, 나중에 다시 여기로 되돌아오려는 경로를 피한다.
@@ -400,14 +408,17 @@ class RouteSvc(threading.Thread):
     def _forget_neighbours(self, cx: int, cy: int):
         """지금 칸의 상하좌우 '막힘' 기억을 지운다(맵 학습 벽은 안 건드린다)."""
         cleared = []
+        now = time.time()
         for direction in ("up", "down", "left", "right"):
             cell = _nav_step_from_dir(cx, cy, direction)
+            # 지웠든 아니든, 이 4칸은 잠깐 재학습을 막는다(mark/clear 무한반복 차단).
+            self._navmem_forgiven_until[cell] = now + self._navmem_forgive_sec
             if self._blocked_cells_until.pop(cell, None) is not None:
                 self._blocked_cell_hits.pop(cell, None)
                 cleared.append(cell)
         if cleared:
             print(f"[NavMem] ({cx},{cy}) 사방이 막힘으로 기억됨 - 잘못된 기억으로 보고 "
-                  f"{len(cleared)}칸 해제: {cleared}")
+                  f"{len(cleared)}칸 해제: {cleared} (재학습 {self._navmem_forgive_sec}s 억제)")
 
     def _forget_blocked_cells_on_map_change(self):
         """맵이 바뀌면 벽 기억을 버린다. 좌표계가 맵마다 달라서, 안 버리면
@@ -428,6 +439,8 @@ class RouteSvc(threading.Thread):
         for cell in expired:
             self._blocked_cells_until.pop(cell, None)
             self._blocked_cell_hits.pop(cell, None)
+        for cell in [c for c, until in self._navmem_forgiven_until.items() if until <= now]:
+            self._navmem_forgiven_until.pop(cell, None)
 
     def _get_blocked_cells(self) -> set[tuple[int, int]]:
         """지나갈 수 없는 칸 전부. 학습한 것 + 설정에 적어둔 것(벽/포탈).
@@ -564,6 +577,12 @@ class RouteSvc(threading.Thread):
         self._prune_blocked_cells()
         self._forget_blocked_cells_on_map_change()
         cell = (int(gx), int(gy))
+        forgiven_until = float(self._navmem_forgiven_until.get(cell, 0.0) or 0.0)
+        if forgiven_until > time.time():
+            # 방금 '잘못된 벽'으로 지운 칸 - 억제창 동안은 다시 안 찍는다.
+            return
+        if forgiven_until:
+            self._navmem_forgiven_until.pop(cell, None)
         hits = int(self._blocked_cell_hits.get(cell, 0)) + 1
         self._blocked_cell_hits[cell] = hits
         # 몬스터가 서 있어서 막힌 칸은 곧 비워지므로 짧게 잡는다. 진짜 벽은
@@ -678,12 +697,20 @@ class RouteSvc(threading.Thread):
         if follow_navigation_active and follow_target:
             tx, ty = follow_target
             follow_gap = follow_manhattan_gap(int(tx), int(ty), int(self.state.x), int(self.state.y))
+            # 예전값 0.35/0.55/1.00s는 '키 입력 -> 한 칸 이동 -> 화면 캡처 ->
+            # 좌표 OCR'이 실제로 완료되는 시간(약 1s 이상)보다 짧아서, 아직
+            # 움직이는 중인데 '멈췄다'로 오판했다. 그 오판이 escape twitch를
+            # 남발하고(각 twitch가 또 진짜 이동을 방해) 없는 벽을 학습해
+            # (WallMem confirmed -> 나중에 walked로 취소) 길을 스스로 막았다.
+            # 격수가 멀수록(gap 큼) 더 빨리 우회 판단을 해야 하니 한계는
+            # 짧게 두되, 한 스텝이 등록될 시간은 확보한다.
+            # ponytail: 상수 튜닝. 근본은 인식 주기(2.6s)라 그게 빨라지면 더 내려도 됨.
             if follow_gap >= 4:
-                stuck_time_limit = min(stuck_time_limit, 0.35)
+                stuck_time_limit = min(stuck_time_limit, 1.2)
             elif follow_gap >= 2:
-                stuck_time_limit = min(stuck_time_limit, 0.55)
+                stuck_time_limit = min(stuck_time_limit, 1.6)
             else:
-                stuck_time_limit = min(stuck_time_limit, 1.00)
+                stuck_time_limit = min(stuck_time_limit, 2.2)
         if self._nav_attempt_started_at > 0.0 and (now - self._nav_attempt_started_at) >= stuck_time_limit:
             if bool(getattr(self, "_portal_follow_active", False)):
                 if (now - float(getattr(self, "_last_portal_follow_log_time", 0.0) or 0.0)) >= 0.8:
