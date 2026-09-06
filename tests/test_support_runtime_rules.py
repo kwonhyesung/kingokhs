@@ -177,7 +177,7 @@ def test_software_input_backend_translates_force_key_command(monkeypatch):
     assert events == [("press", "3"), ("release", "3")]
 
 
-def test_priest2_f2_watchdog_restores_follow_service_mode():
+def test_priest2_f2_watchdog_restores_follow_service_mode(monkeypatch):
     state = GameState()
     state.role = "도사2"
     state.network_role = "도사2"
@@ -186,6 +186,7 @@ def test_priest2_f2_watchdog_restores_follow_service_mode():
     state.service_active = False
 
     logic = LogicSvc(state)
+    monkeypatch.setattr(logic, "_is_game_window_active", lambda: True)
 
     assert logic._restore_dosa_service_if_follow_autohunt() is True
     assert state.service_active is True
@@ -609,6 +610,18 @@ def test_self_recovery_retarget_keeps_follow_block_short():
     assert support_retarget_block_duration(False) == 2.4
 
 
+def test_redtab_click_fallback_does_not_stop_follow_for_seconds():
+    assert LogicSvc._REDTAB_HOLD_SEC <= 0.3
+
+
+def test_redtab_click_path_uses_short_waits():
+    source = (REPO_ROOT / "svc_logic.py").read_text(encoding="utf-8")
+    assert LogicSvc._NAMETAG_WAIT_SEC <= 0.5
+    assert "self._sleep_ui_gap(0.01)" in source
+    assert source.count("self._sleep_ui_gap(0.03)") >= 4
+    assert "_wait_for_red_tab_lock(timeout=0.20, min_hits=1)" in source
+
+
 def test_target_box_clear_waits_for_support_targeting_to_finish():
     assert should_clear_target_box_after_support_stuck(True, False, False) is True
     assert should_clear_target_box_after_support_stuck(True, True, False) is False
@@ -621,3 +634,134 @@ def test_support_lock_requires_hp_gain_after_heal():
     assert confirm_support_lock_by_hp_gain(100000, 100000) is False
     assert confirm_support_lock_by_hp_gain(100000, 95000) is False
 
+
+def test_failed_self_mp_attempt_does_not_reacquire_warrior_redtab(monkeypatch):
+    state = GameState()
+    state.role = "도사"
+    state.network_role = "도사"
+    state.service_active = True
+    state.nav_follow_enabled = True
+    state.mp = 30000
+    state.hp = 200000
+    state.good_hp = 100000
+
+    logic = LogicSvc(state)
+    logic._party_direct_heal_target_prepared = True
+    logic._party_direct_heal_verified = True
+    calls = []
+
+    monkeypatch.setattr("svc_logic.humanized_sleep", lambda *args, **kwargs: None)
+    monkeypatch.setattr(logic, "_set_support_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(logic, "_clear_support_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(logic, "_cast_self_mp_recovery_fast", lambda trigger_mp=None: True)
+    monkeypatch.setattr(
+        logic,
+        "_reacquire_warrior_red_tab_after_emergency",
+        lambda moving_follow=False: calls.append(moving_follow) or True,
+    )
+
+    assert logic._execute_self_mp_recovery_and_retarget(
+        {"hp": 100000, "good_hp": 1100000},
+        trigger_mp=30000,
+    ) is True
+    assert calls == []
+    assert logic._party_direct_heal_target_prepared is True
+    assert logic._party_direct_heal_verified is True
+
+
+def test_successful_self_mp_reacquires_redtab_then_heals_warrior(monkeypatch):
+    state = GameState()
+    state.role = "도사"
+    state.network_role = "도사"
+    state.service_active = True
+    state.nav_follow_enabled = True
+    state.mp = 30000
+    state.hp = 200000
+    state.good_hp = 100000
+
+    logic = LogicSvc(state)
+    calls = []
+
+    def cast_mp(trigger_mp=None):
+        state.mp = 80000
+        return True
+
+    monkeypatch.setattr("svc_logic.humanized_sleep", lambda *args, **kwargs: None)
+    monkeypatch.setattr(logic, "_set_support_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(logic, "_clear_support_phase", lambda *args, **kwargs: None)
+    monkeypatch.setattr(logic, "_cast_self_mp_recovery_fast", cast_mp)
+    monkeypatch.setattr(
+        logic,
+        "_reacquire_warrior_red_tab_after_emergency",
+        lambda moving_follow=False: calls.append("retarget") or True,
+    )
+    monkeypatch.setattr(
+        logic,
+        "_recover_party_hp",
+        lambda snapshot: calls.append(("heal", snapshot["hp"])) or True,
+    )
+
+    assert logic._execute_self_mp_recovery_and_retarget(
+        {"hp": 100000, "good_hp": 1100000},
+        trigger_mp=30000,
+    ) is True
+    assert calls == ["retarget", ("heal", 100000)]
+
+
+def test_warrior_body_pattern_is_not_clicked_when_name_tag_is_missing(monkeypatch):
+    state = GameState()
+    state.pattern_matcher = type(
+        "Matcher",
+        (),
+        {"find_text_scan": lambda self, crop, category, ent_type: [
+            {"name": "점프_right", "cx": 100, "cy": 200, "score": 1.0}
+        ]},
+    )()
+    state.last_frame = type("Frame", (), {"size": 1})()
+    logic = LogicSvc(state)
+    clicked = []
+
+    monkeypatch.setattr("svc_logic.humanized_sleep", lambda *args, **kwargs: None)
+    monkeypatch.setattr("svc_logic.hw.move_cursor", lambda *args, **kwargs: True)
+    monkeypatch.setattr("svc_logic.hw.click_pixel", lambda x, y: clicked.append((x, y)) or True)
+    monkeypatch.setattr(logic, "_press_hw_key", lambda *args, **kwargs: True)
+    monkeypatch.setattr(logic, "_get_play_area_crop", lambda frame: ("crop", 10, 20))
+    monkeypatch.setattr(logic, "_wait_for_red_tab_lock", lambda timeout=None, min_hits=None: True)
+    monkeypatch.setattr(logic, "_is_monster_target_selected", lambda: False)
+
+    assert logic._click_warrior_marker_and_lock() is None
+    assert clicked == []
+
+
+def test_warrior_name_click_does_not_create_magenta_marker(monkeypatch):
+    state = GameState()
+    state.x = 10
+    state.y = 10
+    state.my_screen_pos = (500, 500)
+    state.other_pc_data["warrior"] = {
+        "role": "격수",
+        "x": 11,
+        "y": 10,
+        "_received_at": time.time(),
+    }
+    state.pattern_matcher = type(
+        "Matcher",
+        (),
+        {"find_text_scan": lambda self, crop, category, ent_type: [
+            {"name": "점프_name_c", "cx": 538, "cy": 393, "score": 1.0},
+        ]},
+    )()
+    state.last_frame = type("Frame", (), {"size": 1})()
+    logic = LogicSvc(state)
+
+    monkeypatch.setattr("svc_logic.humanized_sleep", lambda *args, **kwargs: None)
+    monkeypatch.setattr("svc_logic.hw.move_cursor", lambda *args, **kwargs: True)
+    monkeypatch.setattr("svc_logic.hw.click_pixel", lambda x, y: True)
+    monkeypatch.setattr("svc_logic.click_offset_y", lambda: 87)
+    monkeypatch.setattr(logic, "_press_hw_key", lambda *args, **kwargs: True)
+    monkeypatch.setattr(logic, "_get_play_area_crop", lambda frame: ("crop", 0, 0))
+    monkeypatch.setattr(logic, "_wait_for_red_tab_lock", lambda timeout=None, min_hits=None: True)
+    monkeypatch.setattr(logic, "_is_monster_target_selected", lambda: False)
+
+    assert logic._click_warrior_marker_and_lock() is True
+    assert [m for m in state.visual_markers if m.get("color") == "magenta"] == []

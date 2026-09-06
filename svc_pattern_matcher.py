@@ -122,7 +122,7 @@ class PatternMatcher:
     # 주변 바닥이다. 그래서 err1을 조이는 건 '글자'가 아니라 '바닥'을 조이는
     # 것이었고, 바닥이 불꽃으로 바뀌자 진짜 이름표까지 못 찾게 됐다.
     def find_text_scan(self, play_area_rgb: np.ndarray, category: str, ent_type: str,
-                        err1: float = 0.10, err0: float = 0.10,
+                        err1: float | None = None, err0: float | None = None,
                         only_names: set | None = None) -> list[dict]:
         """findtext_patterns.json의 category(map/item/monster/party/magic)에 저장된
         패턴을 전부 '|'로 결합해 한 번에 스캔한다. 각 패턴에 이미 박혀있는

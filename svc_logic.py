@@ -1071,17 +1071,21 @@ class LogicSvc(threading.Thread):
                     return True
             if self.state.role not in ("도사", "도사1", "도사2") or not bool(getattr(self.state, "service_active", False)):
                 return True
-            if support_target is None:
-                support_target = self._get_support_target_data()
-            if not support_target:
-                print(f"{source_log} no warrior telemetry. Skip retarget in moving MP flow.")
+            if not mp_actually_rose:
+                print(f"{source_log} MP cast failed. Keep warrior red_tab state unchanged.")
                 return True
-            # Moving MP flow intentionally skips immediate ESC>TAB>TAB.
-            # Retarget only when the next warrior-heal path actually needs it.
-            self._party_direct_heal_target_prepared = False
-            self._party_direct_heal_verified = False
-            print(f"{source_log} moving flow complete. Retarget deferred until warrior heal.")
-            return True
+            if mp_actually_rose:
+                red_tab_reacquired = self._reacquire_warrior_red_tab_after_emergency(moving_follow=True)
+                if not red_tab_reacquired:
+                    self._party_heal_blocked_until = time.time() + 0.15
+                    print(f"{source_log} red_tab reacquire failed after MP cast. Follow remains active.")
+                else:
+                    print(f"{source_log} red_tab reacquired after MP cast. Follow remains active.")
+                    if support_target is None:
+                        support_target = self._get_support_target_data()
+                    if support_target:
+                        self._recover_party_hp(support_target)
+                return True
         finally:
             self._clear_support_phase(expected="mp_recover")
 
@@ -1450,7 +1454,7 @@ class LogicSvc(threading.Thread):
             return True
         self._party_direct_heal_target_prepared = True
         self._last_party_hp_support_time = 0.0
-        print("[Support] 자동사냥 초기 direct target prepared: esc -> tab -> tab")
+        print("[Support] 자동사냥 초기 direct target prepared.")
         return True
 
     def _handle_box_collision_reprepare_request(self) -> bool:
@@ -2387,9 +2391,9 @@ class LogicSvc(threading.Thread):
     # 관측 사이에 최대 3칸(144px) 움직였으므로 넉넉히 잡으면 안 된다.
     _NAMETAG_REUSE_SEC = 0.6
     # 그만큼 새 관측이 나올 때까지 기다려 보는 시간(센티넬 한 사이클 남짓).
-    _NAMETAG_WAIT_SEC = 1.2
+    _NAMETAG_WAIT_SEC = 0.4
     # red_tab을 잡는 동안 따라가기를 멈춰두는 시간.
-    _REDTAB_HOLD_SEC = 2.5
+    _REDTAB_HOLD_SEC = 0.25
 
     def _get_config_roi_crop(self, frame, roi_name: str):
         """전체 프레임 대신 config.json의 roi_name 영역만 잘라 반환한다
@@ -2441,17 +2445,17 @@ class LogicSvc(threading.Thread):
         # 있다 - 먼저 비활성화하고 시작해야 한다.
         if not self._press_hw_key("esc", variance=0.10):
             return None
-        self._sleep_ui_gap(0.02)
+        self._sleep_ui_gap(0.03)
         if not self._press_hw_key("tab", variance=0.10):
             return None
-        self._sleep_ui_gap(0.02)
+        self._sleep_ui_gap(0.03)
 
         # 이전 시도(클릭)로 커서가 격수 캐릭터 위에 그대로 남아있으면, 커서
         # 아이콘이 캐릭터/패턴을 가려서 스캔이 계속 실패하는 원인이 된다 -
         # 스캔 직전에 화면 구석(0,0)으로 미리 빼두고, 캡처가 그 상태를
         # 반영할 시간을 준 뒤 프레임을 다시 읽는다.
         hw.move_cursor(0, 0)
-        self._sleep_ui_gap(0.03)
+        self._sleep_ui_gap(0.01)
         refreshed_frame = getattr(self.state, "last_frame", None)
         if refreshed_frame is not None:
             frame = refreshed_frame
@@ -2466,7 +2470,9 @@ class LogicSvc(threading.Thread):
             if str(h.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
         ]
         if hits:
-            hits.sort(key=lambda h: -float(h.get("score", 0.0) or 0.0))
+            # 후보가 둘 이상 나오는 경우는 실측 로그(37회 검출) 전체에서 한
+            # 번도 없었다 - 점프_name*은 격수만 가진 이름이라 정상 상황에서
+            # 하나뿐이다. 첫 번째를 그대로 쓴다.
             best = hits[0]
             px = int(best.get("cx", 0)) + offset_x
             py = int(best.get("cy", 0)) + offset_y + click_offset_y()
@@ -2495,7 +2501,7 @@ class LogicSvc(threading.Thread):
                 # 이름표가 아예 안 보이는 상태. 게임에서 이름 상시 표시가 꺼져
                 # 있으면 이 경로 전체가 죽으므로, 조용히 넘기지 않는다.
                 print(f"[TargetConfirm] 격수 이름표('{self._WARRIOR_NAME_PREFIX}*')를 못 찾음 "
-                      f"- 이름표가 가려졌거나(이팩트/몬스터) 게임의 이름 상시 표시가 꺼짐")
+                      f"- 이름표가 가려졌거나 화면 밖입니다")
                 return None
             tag = max(fresh, key=lambda t: float(t.get("at", 0.0) or 0.0))
             px, py = int(tag["x"]), int(tag["y"])
@@ -2511,7 +2517,7 @@ class LogicSvc(threading.Thread):
         prev_ntab_in_progress = self._ntab_in_progress
         self._ntab_in_progress = True
         try:
-            if not self._wait_for_red_tab_lock(timeout=0.30, min_hits=1):
+            if not self._wait_for_red_tab_lock(timeout=0.20, min_hits=1):
                 return False
             # red_tab_enabled는 '무언가 선택됨'이라는 뜻일 뿐 '격수가 선택됨'이
             # 아니다. 몬스터가 이미 잡혀 있으면 격수를 클릭하지도 않고 성공으로

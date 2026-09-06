@@ -234,7 +234,10 @@ class ROIIndicator(tk.Toplevel):
                 if m["expiry"] > now:
                     r = m.get("size", 10) // 2
                     color = m.get("color", "red")
-                    self.canvas.create_oval(m["x"] - r, m["y"] - r, m["x"] + r, m["y"] + r, fill=color, outline="white", width=1)
+                    if color == "magenta":
+                        continue
+                    else:
+                        self.canvas.create_oval(m["x"] - r, m["y"] - r, m["x"] + r, m["y"] + r, fill=color, outline="white", width=1)
                     drawn += 1
             return drawn
         except Exception as e:

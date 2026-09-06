@@ -222,17 +222,27 @@ class FindText:
 
     def find_text(self,
                   text: str,
-                  x1: int = 0, y1: int = 0, 
+                  x1: int = 0, y1: int = 0,
                   x2: int = 0, y2: int = 0,
-                  err1: float = 0.1, err0: float = 0.1,
+                  err1: Optional[float] = None, err0: Optional[float] = None,
                   screenshot: Optional[np.ndarray] = None,
                   find_all: bool = True) -> List[Dict[str, Any]]:
         """
         화면에서 텍스트 패턴 찾기
-        """
+
+        err1/err0을 None으로 두면(호출부가 지정하지 않으면) 모드별 기본값을
+        쓴다 - 밝기(native) 0.1/0.1, 색상(color) COLOR_ERR1(가림 허용치).
+        숫자를 명시하면 그 값을 그대로 쓴다(색상 모드도 예외 없음).
+        예전엔 색상 모드에 max(err1, COLOR_ERR1)로 무조건 하한을 걸어서,
+        exact-match를 요구하며 err1=0.0을 넘긴 호출(단위 테스트, ft.py 수동
+        튜닝 도구)까지 조용히 0.40으로 뻥튀기됐다 - "정밀하게 봐 달라"는
+        명시적 요청을 배경(가림) 대응용 기본값이 덮어쓴 것이 원인이었다."""
         # DLL 엔진이 활성화되어 있고 screenshot이 없으면 (전체 화면 검색)
         if self.dll_engine and screenshot is None:
-            return self.dll_engine.find_text(text, x1, y1, x2, y2, err1, err0, find_all)
+            return self.dll_engine.find_text(
+                text, x1, y1, x2, y2,
+                0.1 if err1 is None else err1,
+                0.1 if err0 is None else err0, find_all)
 
         # 패턴 파싱 및 캐싱 (Native 엔진용)
         if text not in self.cached_patterns:
@@ -263,13 +273,17 @@ class FindText:
                 # 격수가 몬스터에 둘러싸이면 이름표 일부가 가려지는데
                 # 10%(14px)로는 그때마다 놓쳤다(실측 검출률 26/42).
                 # 실측: 0.40까지 히트가 전부 진짜 위치 한 덩어리였고 0.50에서
-                # 처음 다른 곳이 나왔다. 0.30이면 30% 가려져도 찾는다.
-                res = self._template_match_color(
-                    screenshot, p, max(err1, self.COLOR_ERR1), find_all)
+                # 처음 다른 곳이 나왔다. 이 기본값은 err1을 지정하지 않은
+                # 호출에만 적용된다(위 docstring 참고) - 명시적으로 더 낮은
+                # 값을 요청하면 그대로 존중한다.
+                eff_err1 = self.COLOR_ERR1 if err1 is None else err1
+                res = self._template_match_color(screenshot, p, eff_err1, find_all)
             else:
                 if gray is None:
                     gray = self._to_gray(screenshot)
-                res = self._template_match_native(screenshot, p, err1, err0, find_all,
+                eff_err1 = 0.1 if err1 is None else err1
+                eff_err0 = 0.1 if err0 is None else err0
+                res = self._template_match_native(screenshot, p, eff_err1, eff_err0, find_all,
                                                   gray=gray)
             results.extend(res)
             if not find_all and results:
