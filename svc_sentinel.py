@@ -502,8 +502,8 @@ class SentinelThread(threading.Thread):
             # 순간 이미 2초 전에 만료된 상태가 된다 - GUI가 [MarkerDiag]
             # markers=0 drawn=0으로 계속 찍던 원인이 이것이다.
             mark_now = time.time()
-            marks = [{"x": m.get("cx", 0) + pa_sx, "y": m.get("cy", 0) + pa_sy,
-                      "color": "red", "size": 12, "expiry": mark_now + 5.0} for m in monsters]
+            # 몬스터 빨강 도트는 요청에 따라 제거. 오버레이에 아무 점도 안 그린다.
+            marks = []
             off_y = int(_pa_cfg.get("click_offset_y", 26) or 26)
             # 격수 이름표는 점프_name* 계열이다(pc_roles.json의
             # self_pattern_by_role["격수"]="점프"와 같은 이름). 도사 자신의

@@ -758,6 +758,7 @@ def test_warrior_click_uses_jeompeu_name_not_jyeompeu_name(monkeypatch):
     monkeypatch.setattr(logic, "_get_play_area_crop", lambda frame: ("crop", 10, 20))
     monkeypatch.setattr(logic, "_wait_for_red_tab_lock", lambda timeout=None, min_hits=None: True)
     monkeypatch.setattr(logic, "_is_monster_target_selected", lambda: False)
+    monkeypatch.setattr(logic, "_wait_for_user_pattern", lambda *a, **k: True)
 
     assert logic._click_warrior_marker_and_lock() is True
     assert clicked == [(110, 207)]
@@ -785,6 +786,7 @@ def test_warrior_click_accepts_jeompeu_name_variant_suffix(monkeypatch):
     monkeypatch.setattr(logic, "_get_play_area_crop", lambda frame: ("crop", 10, 20))
     monkeypatch.setattr(logic, "_wait_for_red_tab_lock", lambda timeout=None, min_hits=None: True)
     monkeypatch.setattr(logic, "_is_monster_target_selected", lambda: False)
+    monkeypatch.setattr(logic, "_wait_for_user_pattern", lambda *a, **k: True)
 
     assert logic._click_warrior_marker_and_lock() is True
     assert clicked == [(260, 257)]
@@ -826,6 +828,7 @@ def test_warrior_name_click_does_not_create_magenta_marker(monkeypatch):
     monkeypatch.setattr(logic, "_get_play_area_crop", lambda frame: ("crop", 0, 0))
     monkeypatch.setattr(logic, "_wait_for_red_tab_lock", lambda timeout=None, min_hits=None: True)
     monkeypatch.setattr(logic, "_is_monster_target_selected", lambda: False)
+    monkeypatch.setattr(logic, "_wait_for_user_pattern", lambda *a, **k: True)
 
     assert logic._click_warrior_marker_and_lock() is True
     assert [m for m in state.visual_markers if m.get("color") == "magenta"] == []

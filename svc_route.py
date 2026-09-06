@@ -2102,8 +2102,16 @@ class RouteSvc(threading.Thread):
         support_targeting = bool(getattr(self.state, "support_targeting_active", False)) or bool(
             getattr(self.state, "red_tab_promotion_active", False)
         )
+        # 대상선택박스(tab으로 열림)가 켜져 있으면 방향키가 캐릭터가 아니라
+        # 박스를 조작한다 - 그 상태로 hold_move를 보내면 "따라가는데 안 움직임".
+        # ntab_active_since가 2s 넘게 묵었으면 닫혔는데 플래그만 남은 것으로
+        # 보고 무시한다(영구 이동 정지 방지).
+        ntab_since = float(getattr(self.state, "ntab_active_since", 0.0) or 0.0)
+        ntab_box_open = bool(getattr(self.state, "ntab_active", False)) and (
+            ntab_since <= 0.0 or (time.time() - ntab_since) < 2.0
+        )
         hw_combat_busy = bool(getattr(self.state, "is_combat_busy", False))
-        if in_combat or input_blocked or support_targeting or hw_combat_busy:
+        if in_combat or input_blocked or support_targeting or hw_combat_busy or ntab_box_open:
             if portal_follow and (time.time() - float(getattr(self, "_last_portal_move_block_log_time", 0.0) or 0.0)) >= 1.0:
                 print(
                     f"[NavBlock] portal-follow movement withheld: in_combat={in_combat} "
@@ -2124,7 +2132,8 @@ class RouteSvc(threading.Thread):
                 print(
                     f"[NavBlock] {time.strftime('%H:%M:%S', time.localtime(now_block))}.{int(now_block % 1 * 1000):03d} "
                     f"follow movement withheld: in_combat={in_combat} input_blocked={input_blocked} "
-                    f"block_left={block_left:.2f}s support_targeting={support_targeting} is_combat_busy={hw_combat_busy}"
+                    f"block_left={block_left:.2f}s support_targeting={support_targeting} "
+                    f"is_combat_busy={hw_combat_busy} ntab_box_open={ntab_box_open}"
                 )
                 self._last_follow_move_block_log_time = now_block
             return False

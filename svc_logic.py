@@ -2447,8 +2447,9 @@ class LogicSvc(threading.Thread):
         -> 화면에서 격수 이름표(점프_name*)를 find_text_scan으로 찾아 그
         아래 click_offset_y 설정값을 클릭 -> enter(선택 확정) -> User_info
         ROI에서 점프_user(격수 신원) 확인 -> tab -> tab 으로 red_tab을 최종
-        확정한다. 신원이 확인 안 돼도 힐을 막지는 않고(점프_user 패턴
-        신뢰도 검증 전) 경고만 남긴 뒤 red_tab 폴백으로 진행한다.
+        확정한다. 신원이 격수가 아니면(졈프_user/jump2 등) 이번 시도를 버리고
+        finally에서 대상선택박스를 esc로 닫은 뒤 다음 주기에 다시 시도한다.
+        (enter가 채팅창을 여는 게임이면 _warrior_lock_use_enter_confirm=False)
         이름표 위치를 그대로 클릭하면 캐릭터가 안 잡힌다 - 실측으로 26px
         아래여야 잡히고, 더 내려가면 한 칸 아래 대상이 잡힌다. 현재값은 config.json의 play_area.click_offset_y다.
         클릭이 실제로 이 PC의 커서를 옮기는지는 hw.click_pixel() 안에서
@@ -2545,19 +2546,26 @@ class LogicSvc(threading.Thread):
         self.state.ntab_active = True
         self.state.ntab_active_since = time.time()
         identity_ok = False
+        locked_ok = False
         try:
-            if self._warrior_lock_use_enter_confirm and self._press_hw_key("enter", variance=0.10):
+            if self._warrior_lock_use_enter_confirm:
+                if not self._press_hw_key("enter", variance=0.10):
+                    return False
                 self._sleep_ui_gap(0.03)
                 identity_ok = self._wait_for_user_pattern(
                     self._support_warrior_pattern, timeout=0.45
                 )
-            if identity_ok:
+                if not identity_ok:
+                    seen = self._get_current_user_pattern() or (
+                        str(getattr(self.state, "user_info_text", "") or "") or "(빈값)"
+                    )
+                    # 클릭이 격수가 아닌 다른 대상(술사 졈프_user / 도사 자신
+                    # jump2 등)을 잡았다. 여기서 red_tab을 승격시키면 힐/부활이
+                    # 엉뚱한 대상에게 나간다 - 이번 시도는 버리고(대상선택박스는
+                    # finally에서 esc로 닫는다) 다음 주기에 다시 클릭한다.
+                    print(f"[TargetConfirm] 신원 미확인 (User_info='{seen}') - 격수 락 실패로 처리, 재시도")
+                    return False
                 print(f"[TargetConfirm] 신원 확인 OK: {self._support_warrior_pattern}")
-            elif self._warrior_lock_use_enter_confirm:
-                seen = self._get_current_user_pattern() or (
-                    str(getattr(self.state, "user_info_text", "") or "") or "(빈값)"
-                )
-                print(f"[TargetConfirm] 신원 미확인 (User_info='{seen}') - red_tab만으로 진행")
             # tab -> tab 으로 red_tab 최종 승격 (요청대로 2회).
             if not self._press_hw_key("tab", variance=0.10):
                 return False
@@ -2574,11 +2582,21 @@ class LogicSvc(threading.Thread):
             if self._is_monster_target_selected():
                 print("[TargetConfirm] 클릭 후에도 대상이 몬스터다 - 격수 락 실패로 처리")
                 return False
+            locked_ok = True
             return True
         finally:
             self._ntab_in_progress = prev_ntab_in_progress
             self.state.ntab_active = prev_ntab_active
             self.state.ntab_active_since = prev_ntab_since
+            if not locked_ok:
+                # 실패로 끝나면 tab으로 열린 대상선택박스가 그대로 남아서,
+                # 이후 방향키가 캐릭터가 아니라 그 박스를 조작한다(=따라가기가
+                # 안 먹는 원인). esc로 확실히 닫고, 눌린 채로 남은 키도 뗀다.
+                try:
+                    self._press_hw_key("esc", variance=0.10, skip_focus_guard=True)
+                    hw.stop_all_inputs(repeat=1, delay=0.02)
+                except Exception:
+                    pass
 
     def _confirm_and_lock_warrior_target(self) -> bool:
         """격수 이름표(점프_name)를 마우스로 클릭해 red_tab을 세운다.
