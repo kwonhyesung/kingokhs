@@ -152,6 +152,9 @@ class LogicSvc(threading.Thread):
         # 마우스 클릭 락이 연속 실패하면(같은 오탐 좌표 반복 클릭) 잠깐 쉰다.
         self._warrior_click_backoff_until = 0.0
         self._warrior_click_fail_streak = 0
+        # 클릭했더니 격수가 아니라 도사 자신/딴 대상이 잡힌 화면 좌표들.
+        # (x, y, 기록시각) - 이 근처에 뜬 점프_name* 매치는 유령으로 보고 스킵.
+        self._recent_bad_click_spots: list[tuple[int, int, float]] = []
         self._ntab_confirm_required_hits = 1
         self._ntab_confirm_timeout = 0.42
         self._warrior_next_attack_at = 0.0
@@ -2503,13 +2506,48 @@ class LogicSvc(threading.Thread):
         wdx = wdy = 0
         try:
             _wt = self.state.get_fresh_remote_data_by_role("격수")
-            if isinstance(_wt, dict) and _wt:
-                wdx = int(_wt.get("x", _wt.get("pos_x", 0)) or 0) - int(getattr(self.state, "x", 0) or 0)
-                wdy = int(_wt.get("y", _wt.get("pos_y", 0)) or 0) - int(getattr(self.state, "y", 0) or 0)
+            _dsx = int(getattr(self.state, "x", 0) or 0)
+            _dsy = int(getattr(self.state, "y", 0) or 0)
+            if isinstance(_wt, dict) and _wt and _dsx and _dsy:
+                _wx = int(_wt.get("x", _wt.get("pos_x", 0)) or 0)
+                _wy = int(_wt.get("y", _wt.get("pos_y", 0)) or 0)
+                # 격수/도사 좌표가 둘 다 유효할 때만 방향을 신뢰한다.
+                # 하나라도 0이면(OCR 미검출) 방향이 거꾸로 나와 오히려
+                # 진짜 이름표를 버리거나 유령을 통과시킨다.
+                if _wx and _wy:
+                    wdx = _wx - _dsx
+                    wdy = _wy - _dsy
         except Exception:
             wdx = wdy = 0
 
+        # 최근에 '클릭했더니 격수가 아니었던' 화면 좌표들(15초 이내).
+        _now_bad = time.time()
+        self._recent_bad_click_spots = [
+            (bx, by, bt) for (bx, by, bt) in self._recent_bad_click_spots if _now_bad - bt <= 15.0
+        ]
+        _bad_spots_screen = [(bx, by) for (bx, by, _bt) in self._recent_bad_click_spots]
+
+        _raw_all = matcher.find_text_scan(scan_crop, "party", "USER")
+        # 도사 자기 이름표(졈프_name*). FindText가 '졈프'를 '점프'로 오인해도
+        # 원래 위치엔 보통 졈프_name 매치도 같이 뜬다 - 그 근처 점프_name*은 오탐.
+        _self_hits = [h for h in _raw_all if str(h.get("name", "")).startswith("졈프_name")]
+
+        def _near_self(cx_rel: int, cy_rel: int) -> bool:
+            return any(
+                abs(cx_rel - int(s.get("cx", 0))) <= 45 and abs(cy_rel - int(s.get("cy", 0))) <= 22
+                for s in _self_hits
+            )
+
+        def _near_bad_spot(cx_rel: int, cy_rel: int) -> bool:
+            sx = cx_rel + offset_x
+            sy = cy_rel + offset_y + click_offset_y()
+            return any(abs(sx - bx) <= 35 and abs(sy - by) <= 35 for (bx, by) in _bad_spots_screen)
+
         def _hit_plausible(cx_rel: int, cy_rel: int) -> bool:
+            if _near_bad_spot(cx_rel, cy_rel):
+                return False
+            if _self_hits and _near_self(cx_rel, cy_rel):
+                return False
             if _crop_w <= 0 or _crop_h <= 0:
                 return True
             if cx_rel < _edge or cx_rel > _crop_w - _edge:
@@ -2527,7 +2565,7 @@ class LogicSvc(threading.Thread):
             return True
 
         _raw_warrior_hits = [
-            h for h in matcher.find_text_scan(scan_crop, "party", "USER")
+            h for h in _raw_all
             if str(h.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
         ]
         hits = [
@@ -2536,7 +2574,9 @@ class LogicSvc(threading.Thread):
         ]
         if _raw_warrior_hits and not hits:
             rej = [(int(h.get("cx", 0)), int(h.get("cy", 0))) for h in _raw_warrior_hits]
-            print(f"[TargetConfirm] 유령 매치 거부: {rej} (격수 방향 wdx={wdx} wdy={wdy}, crop={_crop_w}x{_crop_h})")
+            selfp = [(int(s.get("cx", 0)), int(s.get("cy", 0))) for s in _self_hits]
+            print(f"[TargetConfirm] 유령 매치 거부: {rej} (졈프_name={selfp} bad_spots={_bad_spots_screen} "
+                  f"wdx={wdx} wdy={wdy} crop={_crop_w}x{_crop_h})")
         if hits:
             # 후보가 둘 이상 나오는 경우는 실측 로그(37회 검출) 전체에서 한
             # 번도 없었다 - 점프_name*은 격수만 가진 이름이라 정상 상황에서
@@ -2578,8 +2618,10 @@ class LogicSvc(threading.Thread):
             tag = max(fresh, key=lambda t: float(t.get("at", 0.0) or 0.0))
             px, py = int(tag["x"]), int(tag["y"])
             source = f"{tag['name']}(센티넬 {now_tag - float(tag['at']):.1f}초 전)"
-        print(f"[TargetConfirm] character click: name={source} pos=({px},{py})")
+        print(f"[TargetConfirm] character click: name={source} pos=({px},{py}) "
+              f"(wdx={wdx} wdy={wdy} raw={len(_raw_warrior_hits)} self={len(_self_hits)})")
         hw.click_pixel(px, py)
+        _clicked_px, _clicked_py = px, py
         self._sleep_ui_gap(0.03)
         # _ntab_in_progress를 켜면 _wait_for_red_tab_lock의 폴링 간격이
         # 0.03s->0.015s로 빨라진다(키보드 경로도 이미 이렇게 쓰고 있음).
@@ -2614,7 +2656,13 @@ class LogicSvc(threading.Thread):
                     # jump2 등)을 잡았다. 여기서 red_tab을 승격시키면 힐/부활이
                     # 엉뚱한 대상에게 나간다 - 이번 시도는 버리고(대상선택박스는
                     # finally에서 esc로 닫는다) 다음 주기에 다시 클릭한다.
-                    print(f"[TargetConfirm] 신원 미확인 (User_info='{seen}') - 격수 락 실패로 처리, 재시도")
+                    # 그리고 이 클릭 좌표를 15초간 블랙리스트에 올려, 다음
+                    # 스캔이 같은 유령 좌표를 또 클릭하지 않게 한다.
+                    self._recent_bad_click_spots.append((_clicked_px, _clicked_py, time.time()))
+                    if len(self._recent_bad_click_spots) > 8:
+                        self._recent_bad_click_spots = self._recent_bad_click_spots[-8:]
+                    print(f"[TargetConfirm] 신원 미확인 (User_info='{seen}') @({_clicked_px},{_clicked_py}) "
+                          f"- 격수 락 실패, 좌표 블랙리스트 15s, 재시도")
                     return False
                 print(f"[TargetConfirm] 신원 확인 OK: {self._support_warrior_pattern}")
             # tab -> tab 으로 red_tab 최종 승격 (요청대로 2회).
