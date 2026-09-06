@@ -271,6 +271,7 @@ class RouteSvc(threading.Thread):
         # 막힘으로 찍어 mark/clear를 무한 반복한다(로그의 '4칸 해제' 도배).
         self._navmem_forgiven_until: dict[tuple[int, int], float] = {}
         self._navmem_forgive_sec = 2.5
+        self._last_follow_detour_log = 0.0
         self._blocked_cell_base_ttl = 6.0
         self._blocked_cell_max_ttl = 18.0
         self._blocked_cell_wall_ttl = 300.0   # 벽은 안 움직인다
@@ -1946,6 +1947,27 @@ class RouteSvc(threading.Thread):
                 self._log_portal_move_block(
                     f"all 4 directions in blocked_cells_roi: primary={primary_dir} secondary={secondary_dir}"
                 )
+            # 여기까지의 step_dir은 '메모리상 안 막힌 아무 한 칸'일 뿐, 벽
+            # 뒤에 있는 격수로 이어지는 경로가 아니다. 목표 쪽 1차 방향이
+            # 막혀 있으면(=우회가 필요한 상황) 학습한 벽을 장애물로 삼아
+            # BFS로 우회로의 첫 스텝을 구해 그걸 쓴다. greedy + 수직 twitch
+            # 만으로는 벽을 절대 못 돌아간다(실측: 격수가 벽 2칸 뒤에서 죽어
+            # 있는데 도사가 같은 벽에 14번 연속 헤딩).
+            # ponytail: follow에서도 hunt.path_step 재사용. A*는 불필요(격자 좁음).
+            primary_cell = _nav_step_from_dir(int(cx), int(cy), primary_dir)
+            if (not picked_unblocked) or (primary_cell in blocked_cells_roi):
+                detour_blocked = {c for c in blocked_cells_roi if c != (int(tx), int(ty))}
+                detour = hunt.path_step(
+                    (int(cx), int(cy)), (int(tx), int(ty)), detour_blocked, radius=24
+                )
+                if detour:
+                    now_fd = time.time()
+                    if now_fd - float(getattr(self, "_last_follow_detour_log", 0.0) or 0.0) >= 2.0:
+                        self._last_follow_detour_log = now_fd
+                        print(f"[Nav] follow 우회 경로: {detour} "
+                              f"(({cx},{cy}) -> ({tx},{ty}), greedy={step_dir}, "
+                              f"막힌칸 {len(detour_blocked)}개)")
+                    step_dir = detour
             next_grid = (int(cx), int(cy))
             blockers = []
         else:
