@@ -1307,6 +1307,24 @@ class RouteSvc(threading.Thread):
                 self._warrior_trail = self._warrior_trail[-12:]
 
         transition_prev = event_prev or prev
+        # event_prev(격수가 보낸 coord_transition의 "from")가 격수를 마지막으로
+        # 추적한 위치(prev)에서 터무니없이 멀면, 그건 포탈 '들어간 자리'가
+        # 아니라 이미 새 맵의 스폰 좌표다(격수 PC가 "from"을 워프 후에 찍음).
+        # from_map_sig 가드가 못 걸러낸 케이스 - 실측: 붙어서 따라가던 중
+        # (37,19) 근처였는데 event_prev=(3,1)로 튀어서 도사가 옛 맵의
+        # (3,1)까지 33칸을 걸어가려다 벽에 막힘. 이럴 땐 prev(격수의 실제
+        # 직전 위치 = 포탈 근처)를 접근 목표로 쓴다.
+        if (
+            event_prev is not None
+            and prev
+            and is_plausible_map_coord(prev[0], prev[1])
+            and follow_manhattan_gap(event_prev[0], event_prev[1], prev[0], prev[1]) > 12
+        ):
+            print(
+                f"[PortalFollow] event_prev={event_prev} is {follow_manhattan_gap(event_prev[0], event_prev[1], prev[0], prev[1])} "
+                f"tiles from last tracked pos {prev} - post-warp coord, using {prev} as approach target"
+            )
+            transition_prev = prev
         # Right after finishing a real crossing, the warrior PC's own
         # map-name OCR can still be settling for a moment - a bare
         # map_changed/map_info_changed reading (no coord jump, no explicit
