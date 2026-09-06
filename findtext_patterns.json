@@ -10,7 +10,7 @@
     "처녀귀신_top": "|<처녀귀신_top>*129$18.0T00T06TA6TA6TA60A60A00000000000000060A60A7Uw7Uw1Uk1UkU00U00s01s03s03zUzzUzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz7zw7zw7zw1zk1zk0T00T00T00T00T00T00T00T00T00T00T0UT0UT0sT3sT3U",
     "달걀_left": "|<달걀_left>*100$37.7U00003k00001s000000S00000D0000000000000000000000000000001U00000k00000M00000A000006000003000001U00000kM0000MA0000060000M30000A1U000s0w000Q0S00A01n00600tU00060k00030M00000A0003060001U30007A1U003a0k0DbAsNk7naQAs3UQ3aQ1kC1nC0s70Nb0Q3U03UC1k01k7k00062",
     "달걀_right": "|<달걀_right>*121$17.03w07u0340680wT1ty3mz01y00zUFz0Uzb1zCDyQTwsztlzz3zy7UwD1sS3kw7VsD3kS7Uw3sM7kkDUET0UzU1z03zU7T0Cy9s3Hk6zU3z07y0zw1zsDzsTzkzzzzzzzzyTzwzk7zUDz03y07w087kEDUbUx",
-    "달걀_back": "|<달걀_back>*120$66.DzU0000003zDzU0000003zDzU0000003z3zU000000Dy3zU000000Dy3zs000000Dy3zs000000Dy3zs000000Ds3zz000000zs3zz000000zsnzzk00007zsnzzk00007zsU",
+    "달걀_back": "|<달걀_back>*110$66.DzU0000003zDzU0000003zDzU0000003z3zU000000Dy3zU000000Dy3zs000000Dy3zs000000Dy3zs000000Ds3zz000000zs3zz000000zsnzzk00007zsnzzk00007zsU",
     "달걀_top": "|<달걀_top>*169$40.U0zzw0603zzk0M0Dzz01U07zk0600Tz00S01zw07s01y00TU07s01zU0000Ty00001zzk003zzz000Dzzzy0zzzzzs3zzs",
     "불귀신_top": "|<불귀신_top>*195$35.z0600zy0A01zw0y00zs1w01zkDs01zUTk03y0zU07w1z00DU3y00T03w00y07s01k07000U0C001",
     "불귀신_back": "|<불귀신_back>*185$48.001z0000001z0000001w0000001w0000001w0000000A0601000A060100000S0300000S030zU03y030zU03y030zU0Ds010zs0Ds01U",
@@ -19,7 +19,7 @@
     "갈산신_left": "|<갈산신_left>*30$21.6Q00nU06M00n0060k0k600Tk03y000l0w6Q7UnU06T00ns0ST03nz3tzsTDz3tzzzzzzzzTXz3wTsyDnzlyTTz0Pzs3000M003000M00T003s07z00zw",
     "갈산신_right": "|<갈산신_right>*45$18.wDawDawlawlazk6zk6TzUTzUDk03kS3kSnk0nk0kw0kw0wDVwDVzzVzzzzzz3yT3yTADaADaU1sU1sU00U00U00zk0zk0zzVzzVzzzzzzzzy3zy3zy0Dz0Dz03t03t01s01s01s00M00M00S00S00T00TU",
     "갈산신_top": "|<갈산신_top>*42$28.s00S5y01sLs07VsTD7bVwwSLU07zS00Txs0DzrU0zzy03zzs0zVzU3y7bUzUSS3y1s",
-    "불귀신_left": "|<불귀신_left>*175$23.00z001y001w003s0030M060k0A1w003s007w00Ds007w07Ds0CTw0Q7s3sDk7k7UzUD1zk00z"
+    "불귀신_left": "|<불귀신_left>*180$23.00z001y001w003s0030M060k0A1w003s007w00Ds007w07Ds0CTw0Q7s3sDk7k7UzUD1zk00z"
   },
   "map": {
     "부여천안궁성": "|<부여천안궁성>*165$120.zwzk7tw07bs1wzzznztz00zXbtw07blswzzznztz00zbU1zlzbnwQzzznzlszwzDk1zlzbnyQzzznzkzzwzDntzls7nyQ7zznzUzzwzDntzks7nwQ7zznzYT00zDntzYTblwwy000T67zzzDntz6Dbs0wz000wD3zzzDltwD3bw3wzznzwTrzzzDk1wTbbzzwzznzzzz007bU1xzzbzzwzznzzzz007X7tzzzbzzwzy0Tzw0U",
@@ -47,8 +47,8 @@
     "점프_right": "|<점프_right>*70$29.zzw07zzs1nzzk3Vzzzz8",
     "졈프_name": "|<졈프_name>*142$32.zzznzzzzlzzzzwTzzzz3zzzb0zy0NnzzU6E00zDY0szn00/DsM02nwWU0YyAM09Djm000zzsDzzU000Tty007yM0007bs7zzs0001zzs007s0001U",
     "점프_user": "|<점프_user>*24$40.zy70000C0Q3zzks1k0kA3U7030kC7w0A31w1k0kA6k7030klUQ0A363Vk0kAk67030m00Q1yDk0007zz0000000Tzs0001U1U0006060000M0M0001U1UTzzU",
-    "졈프_name_white": "|<졈프_name_white>*150$37.zzyTzzzU3DU0zk1bk0Dz63yQzzXtzCDzkUzb7zm0TnbzXXDtlzvzbk0Dz0DzzzzU1zzzznwzzzztyS00Tw0Dzzzy07zzzzzzzzw0zzzzy0TzzzzU",
-    "점프_name_c": "|<점프_name_c>@6BE05F~80,71E05A~80,F9F7F7~50$29.T3000z61zsyA7zlns761bk4ADXUAMvX0EkVW3zs087znzs0071k00C1UzzQ33zyDy00004004"
+    "졈프_name_white": "|<졈프_name_white>*145$37.zzyTzzzU3DU0zk1bk0Dz63yQzzXtzCDzkUzb7zm0TnbzXXDtlzvzbk0Dz0DzzzzU1zzzznwzzzztyS00Tw0Dzzzy07zzzzzzzzw0zzzzy0TzzzzU",
+    "점프_name_c": "|<점프_name_c>@66EF5F~85,6BE05F~85,71E05A~85$29.02001y4003w8DzlUk6C3DUAA7D0MMr20klb41XU28Dzk7k087zU00A3000M23zyMQ000zs004"
   },
   "magic": {
     "금강불체": "|<금강불체>*28$72.00TU7bwTlzrvzyTz7bw01zXvzyTzbbwzty0PzyTzbXwTty0vzyTzDVw01znvzyTyDbzzzznvzwTwTbzzzzX3007szbk00TX3zzzXzbzszzXvzzzjzbzwzz1vzzzzzzw01zAv00Ty0Ty01yQP7wTszDzztwyPDyTtzby01zzvDyTtzbw03zzvDyTtzbwzzzzvU"

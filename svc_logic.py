@@ -2469,7 +2469,17 @@ class LogicSvc(threading.Thread):
         prev_ntab_in_progress = self._ntab_in_progress
         self._ntab_in_progress = True
         try:
-            return self._wait_for_red_tab_lock(timeout=0.30, min_hits=1)
+            if not self._wait_for_red_tab_lock(timeout=0.30, min_hits=1):
+                return False
+            # red_tab_enabled는 '무언가 선택됨'이라는 뜻일 뿐 '격수가 선택됨'이
+            # 아니다. 몬스터가 이미 잡혀 있으면 격수를 클릭하지도 않고 성공으로
+            # 보고돼서 재시도조차 안 했다 - 실측 로그는 "confirmed red_tab"인데
+            # 화면의 선택 상자는 바닥의 몬스터에 있었다("단 한 번도 격수에
+            # 안 걸렸다"의 정체).
+            if self._is_monster_target_selected():
+                print("[TargetConfirm] 클릭 후에도 대상이 몬스터다 - 격수 락 실패로 처리")
+                return False
+            return True
         finally:
             self._ntab_in_progress = prev_ntab_in_progress
 
