@@ -436,6 +436,9 @@ class GameState:
     ocr_fps: float = 0.0
     ocr_preview_img: Optional[np.ndarray] = None
     visual_markers: List[Dict[str, Any]] = field(default_factory=list)
+    # 센티넬이 마지막으로 본 이름표 클릭 지점들 [{name, x, y, at}, ...].
+    # TargetConfirm이 자기 스캔에 실패했을 때 물려받는다.
+    party_nametag_hits: List[Dict[str, Any]] = field(default_factory=list)
     
     # GUI 업데이트 큐 (비동기 통신용)
     gui_update_queue: 'queue.Queue' = field(default_factory=lambda: queue.Queue(maxsize=1), init=False, repr=False)

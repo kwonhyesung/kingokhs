@@ -2383,6 +2383,9 @@ class LogicSvc(threading.Thread):
     # 따로 캡처하고, 여기서는 접두사로 전부 받는다 - 색이 하나 더 생겨도
     # 패턴만 추가하면 코드는 그대로다.
     _WARRIOR_NAME_PREFIX = "점프_name"
+    # 센티넬이 본 이름표 위치를 이 시간 안이면 재사용한다(격수는 한 사이클에
+    # 한 칸 이상 못 움직이고, 클릭 뒤 red_tab 확인이 한 번 더 걸러준다).
+    _NAMETAG_REUSE_SEC = 1.5
 
     def _get_config_roi_crop(self, frame, roi_name: str):
         """전체 프레임 대신 config.json의 roi_name 영역만 잘라 반환한다
@@ -2458,17 +2461,32 @@ class LogicSvc(threading.Thread):
             h for h in matcher.find_text_scan(scan_crop, "party", "USER")
             if str(h.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
         ]
-        if not hits:
-            # 이름표가 아예 안 보이는 상태. 게임에서 이름 상시 표시가 꺼져
-            # 있으면 이 경로 전체가 죽으므로, 조용히 넘기지 않는다.
-            print(f"[TargetConfirm] 격수 이름표('{self._WARRIOR_NAME_PREFIX}*')를 못 찾음 "
-                  f"- 이름표가 가려졌거나(이팩트/몬스터) 게임의 이름 상시 표시가 꺼짐")
-            return None
-        hits.sort(key=lambda h: -float(h.get("score", 0.0) or 0.0))
-        best = hits[0]
-        px = int(best.get("cx", 0)) + offset_x
-        py = int(best.get("cy", 0)) + offset_y + click_offset_y()
-        print(f"[TargetConfirm] character click: name={best.get('name')} pos=({px},{py}) score={best.get('score')}")
+        if hits:
+            hits.sort(key=lambda h: -float(h.get("score", 0.0) or 0.0))
+            best = hits[0]
+            px = int(best.get("cx", 0)) + offset_x
+            py = int(best.get("cy", 0)) + offset_y + click_offset_y()
+            source = str(best.get("name"))
+        else:
+            # 여기서는 esc/tab을 누른 뒤 화면을 딱 한 번 본다. 하필 그 순간
+            # 이름표가 몬스터/이팩트에 가려지면 실패한다 - 실측 로그에서
+            # 센티넬이 17번 찾는 동안 이 경로는 9번 못 찾았다. 센티넬은 매
+            # 사이클 보고 있으니 방금 본 위치를 그대로 쓴다. 격수는 한 사이클
+            # 안에 한 칸 이상 움직이지 않고, 클릭 뒤 red_tab 확인이 또 있다.
+            now_tag = time.time()
+            fresh = [t for t in (getattr(self.state, "party_nametag_hits", []) or [])
+                     if str(t.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
+                     and now_tag - float(t.get("at", 0.0) or 0.0) <= self._NAMETAG_REUSE_SEC]
+            if not fresh:
+                # 이름표가 아예 안 보이는 상태. 게임에서 이름 상시 표시가 꺼져
+                # 있으면 이 경로 전체가 죽으므로, 조용히 넘기지 않는다.
+                print(f"[TargetConfirm] 격수 이름표('{self._WARRIOR_NAME_PREFIX}*')를 못 찾음 "
+                      f"- 이름표가 가려졌거나(이팩트/몬스터) 게임의 이름 상시 표시가 꺼짐")
+                return None
+            tag = max(fresh, key=lambda t: float(t.get("at", 0.0) or 0.0))
+            px, py = int(tag["x"]), int(tag["y"])
+            source = f"{tag['name']}(센티넬 {now_tag - float(tag['at']):.1f}초 전)"
+        print(f"[TargetConfirm] character click: name={source} pos=({px},{py})")
         hw.click_pixel(px, py)
         self._sleep_ui_gap(0.03)
         if not self._press_hw_key("tab", variance=0.10):

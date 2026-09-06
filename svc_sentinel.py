@@ -517,8 +517,18 @@ class SentinelThread(threading.Thread):
             # 점이 깜빡였다. 교체하면 감지되는 동안 계속 떠 있고 사라질 때
             # 바로 사라진다. 수명은 센티넬이 멈췄을 때 점이 얼어붙지 않게
             # 하는 안전장치로만 남긴다.
+            # 이름표 클릭 지점을 시각과 함께 남긴다. TargetConfirm은 esc/tab을
+            # 누른 뒤 딱 한 번만 화면을 보는데, 하필 그 순간 이름표가 가려지면
+            # 실패한다(실측 로그: 센티넬은 17번 찾는 동안 TargetConfirm은 9번
+            # 못 찾음). 센티넬은 매 사이클 보고 있으니, 방금 본 위치를 물려준다.
+            tags = [{"name": str(h.get("name", "")),
+                     "x": h.get("cx", 0) + pa_sx,
+                     "y": h.get("cy", 0) + pa_sy + off_y,
+                     "at": mark_now}
+                    for h in party_hits if "_name" in str(h.get("name", ""))]
             with self.state._lock:
                 self.state.visual_markers = marks
+                self.state.party_nametag_hits = tags
 
             # 콘솔 확인용: 감지된 이름 집합이 바뀔 때만 1줄 출력 (테스트 중 눈으로 확인하기 위함).
             # 좌표(x,y)도 같이 찍는다 - 이름만으론 "감지는 되는데 위치가 맞는지"를
