@@ -1553,9 +1553,11 @@ class LogicSvc(threading.Thread):
             self._set_combat_busy(previous_busy)
 
     def _revive_warrior_if_dead(self, snapshot: dict | None) -> bool:
-        """격수 HP가 0(사망)이면 일반 힐키(3)로는 못 살린다 - 5키를 2번 눌러
+        """격수 HP가 0(사망)이면 일반 힐키(3)로는 못 살린다 - red_tab이 격수에
+        걸린 상태에서 부활키 '5' -> 게임 내 확정 핫키 'e' 순으로 눌러
         부활시키고 곧바로 힐을 이어서 시전한다. red_tab이 아직 안 잡혀
-        있으면(재확인 중) 부활 키도 소용없으니 정상 재확인 경로로 넘긴다."""
+        있으면(_party_direct_heal_verified=False, 재확인 중) 부활도 소용없으니
+        정상 재확인 경로로 넘긴다."""
         if not snapshot:
             return False
         if int(snapshot.get("hp", 0) or 0) > 0:
@@ -1568,11 +1570,13 @@ class LogicSvc(threading.Thread):
         if now - float(getattr(self, "_last_warrior_revive_time", 0.0) or 0.0) < self._warrior_revive_cooldown:
             return False
         self._last_warrior_revive_time = now
-        print(f"[Support] {_ts()} warrior HP=0. Casting revive: key=5 x2, then heal.")
-        for _ in range(2):
-            if not self._press_hw_key("5", variance=0.10):
-                return True
-            self._sleep_ui_gap(random.uniform(0.10, 0.16))
+        print(f"[Support] {_ts()} warrior HP=0. Casting revive: key=5 -> e, then heal.")
+        if not self._press_hw_key("5", variance=0.10):
+            return True
+        self._sleep_ui_gap(random.uniform(0.10, 0.16))
+        if not self._press_hw_key("e", variance=0.10):
+            return True
+        self._sleep_ui_gap(random.uniform(0.10, 0.16))
         self._cast_party_direct_heal(snapshot)
         return True
 
