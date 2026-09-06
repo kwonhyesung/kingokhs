@@ -2383,9 +2383,13 @@ class LogicSvc(threading.Thread):
     # 따로 캡처하고, 여기서는 접두사로 전부 받는다 - 색이 하나 더 생겨도
     # 패턴만 추가하면 코드는 그대로다.
     _WARRIOR_NAME_PREFIX = "점프_name"
-    # 센티넬이 본 이름표 위치를 이 시간 안이면 재사용한다(격수는 한 사이클에
-    # 한 칸 이상 못 움직이고, 클릭 뒤 red_tab 확인이 한 번 더 걸러준다).
-    _NAMETAG_REUSE_SEC = 1.5
+    # 센티넬이 본 이름표 위치를 이 시간 안이면 쓴다. 격수는 실측에서 연속
+    # 관측 사이에 최대 3칸(144px) 움직였으므로 넉넉히 잡으면 안 된다.
+    _NAMETAG_REUSE_SEC = 0.6
+    # 그만큼 새 관측이 나올 때까지 기다려 보는 시간(센티넬 한 사이클 남짓).
+    _NAMETAG_WAIT_SEC = 1.2
+    # red_tab을 잡는 동안 따라가기를 멈춰두는 시간.
+    _REDTAB_HOLD_SEC = 2.5
 
     def _get_config_roi_crop(self, frame, roi_name: str):
         """전체 프레임 대신 config.json의 roi_name 영역만 잘라 반환한다
@@ -2473,10 +2477,20 @@ class LogicSvc(threading.Thread):
             # 센티넬이 17번 찾는 동안 이 경로는 9번 못 찾았다. 센티넬은 매
             # 사이클 보고 있으니 방금 본 위치를 그대로 쓴다. 격수는 한 사이클
             # 안에 한 칸 이상 움직이지 않고, 클릭 뒤 red_tab 확인이 또 있다.
-            now_tag = time.time()
-            fresh = [t for t in (getattr(self.state, "party_nametag_hits", []) or [])
-                     if str(t.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
-                     and now_tag - float(t.get("at", 0.0) or 0.0) <= self._NAMETAG_REUSE_SEC]
+            # 오래된 좌표는 쓰면 안 된다. 실측: 연속 관측 사이에 격수가 2칸
+            # 이상 움직인 경우가 8회, 최대 3칸(=144px)이었다. 그래서 '방금 본
+            # 것'만 쓰고, 없으면 센티넬이 다시 볼 때까지 잠깐 기다린다.
+            # 따라가기는 위에서 멈춰놨으므로 기다리는 동안 화면이 흔들리지 않는다.
+            fresh = []
+            wait_until = time.time() + self._NAMETAG_WAIT_SEC
+            while True:
+                now_tag = time.time()
+                fresh = [t for t in (getattr(self.state, "party_nametag_hits", []) or [])
+                         if str(t.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
+                         and now_tag - float(t.get("at", 0.0) or 0.0) <= self._NAMETAG_REUSE_SEC]
+                if fresh or now_tag >= wait_until:
+                    break
+                time.sleep(0.05)
             if not fresh:
                 # 이름표가 아예 안 보이는 상태. 게임에서 이름 상시 표시가 꺼져
                 # 있으면 이 경로 전체가 죽으므로, 조용히 넘기지 않는다.
@@ -2522,14 +2536,22 @@ class LogicSvc(threading.Thread):
             잡아버리는 사고가 구조적으로 남는다.
         클릭이 실패하면 그냥 실패로 두고 다음 주기에 다시 시도하는 편이 싸다.
         """
-        for mouse_attempt in range(1, 4):
-            marker_result = self._click_warrior_marker_and_lock()
-            if marker_result is True:
-                return True
-            print(f"[TargetConfirm] mouse attempt={mouse_attempt}/3 result={marker_result}")
-        # tab으로 열린 대상박스가 남아있을 수 있으니 닫고 끝낸다.
-        self._press_hw_key("esc", variance=0.10)
-        return False
+        # 잡는 동안은 제자리에 선다. 클릭 좌표는 화면 좌표라, 도사가 한 걸음만
+        # 움직여도 카메라가 따라 움직여서 그 좌표가 통째로 어긋난다 - 이름표를
+        # 제대로 찾고도 엉뚱한 곳을 클릭하게 된다.
+        previous_follow = bool(getattr(self.state, "nav_follow_enabled", False))
+        self._pause_follow_for_action(duration=self._REDTAB_HOLD_SEC)
+        try:
+            for mouse_attempt in range(1, 4):
+                marker_result = self._click_warrior_marker_and_lock()
+                if marker_result is True:
+                    return True
+                print(f"[TargetConfirm] mouse attempt={mouse_attempt}/3 result={marker_result}")
+            # tab으로 열린 대상박스가 남아있을 수 있으니 닫고 끝낸다.
+            self._press_hw_key("esc", variance=0.10)
+            return False
+        finally:
+            self._restore_follow_after_action(previous_follow)
 
     def _promote_ntab_to_red_tab(self) -> bool:
         self.state.red_tab_promotion_active = True
