@@ -505,17 +505,14 @@ class SentinelThread(threading.Thread):
             marks = [{"x": m.get("cx", 0) + pa_sx, "y": m.get("cy", 0) + pa_sy,
                       "color": "red", "size": 12, "expiry": mark_now + 5.0} for m in monsters]
             off_y = int(_pa_cfg.get("click_offset_y", 26) or 26)
-            # 격수 이름표만 문다 - 예전엔 "_name" in name으로 걸러서 도사
-            # 자신의 이름표(졈프_name*)까지 같이 마젠타로 찍었다. 어느 쪽이든
-            # 클릭 지점 계산식은 같아서 겉으로는 티가 안 났지만, 도사 화면에
-            # 도사 자신 위에도 점이 뜨는 건 진단용으로 오해를 살 수 있었다.
+            # 격수 이름표는 점프_name* 계열이다(pc_roles.json의
+            # self_pattern_by_role["격수"]="점프"와 같은 이름). 도사 자신의
+            # 이름표(졈프_name*)는 여기서 제외한다 - 섞이면 클릭 캐시가
+            # 도사 자신을 가리키게 된다.
             warrior_hits = [
                 h for h in party_hits
                 if str(h.get("name", "")).startswith("점프_name")
             ]
-            marks += [{"x": h.get("cx", 0) + pa_sx, "y": h.get("cy", 0) + pa_sy + off_y,
-                       "color": "magenta", "size": 12, "expiry": mark_now + 5.0}
-                      for h in warrior_hits]
             # 쌓지 않고 매 사이클 통째로 교체한다. 예전엔 extend라 지난
             # 사이클 점이 남았고, 수명(2초)이 사이클(실측 1~2초)과 비슷해서
             # 점이 깜빡였다. 교체하면 감지되는 동안 계속 떠 있고 사라질 때

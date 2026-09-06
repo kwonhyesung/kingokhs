@@ -733,6 +733,70 @@ def test_warrior_body_pattern_is_not_clicked_when_name_tag_is_missing(monkeypatc
     assert clicked == []
 
 
+def test_warrior_click_uses_jeompeu_name_not_jyeompeu_name(monkeypatch):
+    """점프_name*(격수)만 클릭 대상이다 - 졈프_name*(도사 자신)은 후보에서
+    빠져야 한다. 이게 반대로 되면 도사가 자기 자신을 클릭해 red_tab을
+    스스로에게 건다(실측 로그로 확인된 회귀: character click: name=졈프_name)."""
+    state = GameState()
+    state.pattern_matcher = type(
+        "Matcher",
+        (),
+        {"find_text_scan": lambda self, crop, category, ent_type: [
+            {"name": "졈프_name", "cx": 300, "cy": 200, "score": 999.0},
+            {"name": "점프_name_c", "cx": 100, "cy": 100, "score": 1.0},
+        ]},
+    )()
+    state.last_frame = type("Frame", (), {"size": 1})()
+    logic = LogicSvc(state)
+    clicked = []
+
+    monkeypatch.setattr("svc_logic.humanized_sleep", lambda *args, **kwargs: None)
+    monkeypatch.setattr("svc_logic.hw.move_cursor", lambda *args, **kwargs: True)
+    monkeypatch.setattr("svc_logic.hw.click_pixel", lambda x, y: clicked.append((x, y)) or True)
+    monkeypatch.setattr("svc_logic.click_offset_y", lambda: 87)
+    monkeypatch.setattr(logic, "_press_hw_key", lambda *args, **kwargs: True)
+    monkeypatch.setattr(logic, "_get_play_area_crop", lambda frame: ("crop", 10, 20))
+    monkeypatch.setattr(logic, "_wait_for_red_tab_lock", lambda timeout=None, min_hits=None: True)
+    monkeypatch.setattr(logic, "_is_monster_target_selected", lambda: False)
+
+    assert logic._click_warrior_marker_and_lock() is True
+    assert clicked == [(110, 207)]
+
+
+def test_warrior_click_accepts_jeompeu_name_variant_suffix(monkeypatch):
+    """점프_name_ 로 시작하는 색 변형(예: 점프_name_c)도 전부 후보다."""
+    state = GameState()
+    state.pattern_matcher = type(
+        "Matcher",
+        (),
+        {"find_text_scan": lambda self, crop, category, ent_type: [
+            {"name": "점프_name_c", "cx": 250, "cy": 150, "score": 1.0},
+        ]},
+    )()
+    state.last_frame = type("Frame", (), {"size": 1})()
+    logic = LogicSvc(state)
+    clicked = []
+
+    monkeypatch.setattr("svc_logic.humanized_sleep", lambda *args, **kwargs: None)
+    monkeypatch.setattr("svc_logic.hw.move_cursor", lambda *args, **kwargs: True)
+    monkeypatch.setattr("svc_logic.hw.click_pixel", lambda x, y: clicked.append((x, y)) or True)
+    monkeypatch.setattr("svc_logic.click_offset_y", lambda: 87)
+    monkeypatch.setattr(logic, "_press_hw_key", lambda *args, **kwargs: True)
+    monkeypatch.setattr(logic, "_get_play_area_crop", lambda frame: ("crop", 10, 20))
+    monkeypatch.setattr(logic, "_wait_for_red_tab_lock", lambda timeout=None, min_hits=None: True)
+    monkeypatch.setattr(logic, "_is_monster_target_selected", lambda: False)
+
+    assert logic._click_warrior_marker_and_lock() is True
+    assert clicked == [(260, 257)]
+
+
+def test_logger_handles_game_log_permission_error_with_retry():
+    source = (REPO_ROOT / "background_threads.py").read_text(encoding="utf-8")
+    assert "except PermissionError" in source
+    assert "_append_csv_row_with_retry(LOG_FILE, row)" in source
+    assert "_append_csv_row_with_retry(LOG_FILE_STR, row_str)" in source
+
+
 def test_warrior_name_click_does_not_create_magenta_marker(monkeypatch):
     state = GameState()
     state.x = 10

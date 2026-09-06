@@ -2424,13 +2424,14 @@ class LogicSvc(threading.Thread):
     def _click_warrior_marker_and_lock(self) -> bool | None:
         """마우스 직접 클릭 방식(S/W, win32api - 아두이노 하드웨어 신호 아님):
         esc(다른 대상에게 걸려있을 red_tab 비활성화) -> tab(대상박스 활성화)
-        -> 화면에서 격수 이름표(점프_name)를 find_text_scan으로 찾아 그
+        -> 화면에서 격수 이름표(점프_name*)를 find_text_scan으로 찾아 그
         아래 click_offset_y 설정값을 클릭 -> tab(=_promote_ntab_to_red_tab과
         같은 역할의 promote/lock, enter 아님)으로 red_tab을 최종 확정한다.
         이름표 위치를 그대로 클릭하면 캐릭터가 안 잡힌다 - 실측으로 26px
         아래여야 잡히고, 더 내려가면 한 칸 아래 대상이 잡힌다. 현재값은 config.json의 play_area.click_offset_y다.
-        이름이 곧 신원이라(점프_name = 격수 전용) User_info 팝업으로 다시
-        확인할 필요가 없다.
+        이름이 곧 신원이라(점프_name* = 격수 전용, pc_roles.json의
+        self_pattern_by_role["격수"]="점프"와 같은 이름) User_info 팝업으로
+        다시 확인할 필요가 없다.
         클릭이 실제로 이 PC의 커서를 옮기는지는 hw.click_pixel() 안에서
         GetCursorPos로 되읽어 [Click] 로그로 남긴다.
         반환값: True/False = 캐릭터를 찾아서 클릭까지 시도함(성공/실패),

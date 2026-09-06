@@ -89,6 +89,20 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(SCRIPT_DIR, "game_log.csv")
 LOG_FILE_STR = os.path.join(SCRIPT_DIR, "game_log_str.csv")
 
+
+def _append_csv_row_with_retry(path, row, retries=3, delay=0.2):
+    attempts = max(1, int(retries))
+    for attempt in range(attempts):
+        try:
+            with open(path, 'a', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(row)
+            return True
+        except PermissionError:
+            if attempt == attempts - 1:
+                print(f"[Log] CSV locked, skip this row: {path}")
+                return False
+            time.sleep(delay)
+
 # hw??svc_kernel?먯꽌 ?꾪룷?몃맖
 # AIController??LogicSvc濡??泥대맖
 # GameState??svc_kernel?먯꽌 ?꾪룷?몃맖
@@ -129,9 +143,7 @@ class LoggerThread(threading.Thread):
             data = self.state.get_all()
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
             row = [ts, data["hp"], data["mp"], data["exp"], data["money"], data["x"], data["y"]]
-            with open(LOG_FILE, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(row)
+            _append_csv_row_with_retry(LOG_FILE, row)
 
             row_str = [
                 ts,
@@ -139,9 +151,7 @@ class LoggerThread(threading.Thread):
                 data.get("hp_str", ""), data.get("mp_str", ""), data.get("exp_str", ""), data.get("money_str", ""),
                 data.get("x_str", ""), data.get("y_str", ""),
             ]
-            with open(LOG_FILE_STR, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(row_str)
+            _append_csv_row_with_retry(LOG_FILE_STR, row_str)
 
             time.sleep(1)
 
