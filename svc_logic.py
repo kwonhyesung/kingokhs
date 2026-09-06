@@ -2572,20 +2572,55 @@ class LogicSvc(threading.Thread):
             h for h in _raw_warrior_hits
             if _hit_plausible(int(h.get("cx", 0)), int(h.get("cy", 0)))
         ]
-        if _raw_warrior_hits and not hits:
-            rej = [(int(h.get("cx", 0)), int(h.get("cy", 0))) for h in _raw_warrior_hits]
-            selfp = [(int(s.get("cx", 0)), int(s.get("cy", 0))) for s in _self_hits]
-            print(f"[TargetConfirm] 유령 매치 거부: {rej} (졈프_name={selfp} bad_spots={_bad_spots_screen} "
-                  f"wdx={wdx} wdy={wdy} crop={_crop_w}x{_crop_h})")
-        if hits:
-            # 후보가 둘 이상 나오는 경우는 실측 로그(37회 검출) 전체에서 한
-            # 번도 없었다 - 점프_name*은 격수만 가진 이름이라 정상 상황에서
-            # 하나뿐이다. 첫 번째를 그대로 쓴다.
+        # 실측: 점프_name 패턴이 화면 100곳 이상에서 매칭됨(raw=101~176).
+        # 그중 hits[0]을 그냥 쓰면 매 시도 딴 곳을 클릭 -> 도사 자신 선택.
+        # 격수의 화면상 예상 위치를 계산해서 거기서 제일 가까운 매치를 쓴다.
+        #   기준점(anchor): 도사 자기 이름표(졈프_name)가 잡혔으면 그걸,
+        #                   아니면 play_area crop 중앙을 대충 쓴다.
+        #   예상 격수 위치 = anchor + (wdx, wdy) * grid_px
+        # 예상 위치에서 5칸(240px) 넘게 떨어진 매치밖에 없으면 스캔이 진짜
+        # 격수를 못 찾은 것 -> 클릭 안 하고 None (호출부가 키보드 폴백).
+        _grid_px = 48
+        _anchor = None
+        if _self_hits:
+            _sh = min(_self_hits, key=lambda s: abs(int(s.get("cx", 0)) - _crop_w / 2.0))
+            _anchor = (int(_sh.get("cx", 0)), int(_sh.get("cy", 0)))
+        elif _crop_w > 0 and _crop_h > 0:
+            _anchor = (_crop_w / 2.0, _crop_h / 2.0)
+        _localizable = bool(_anchor and (wdx != 0 or wdy != 0) and abs(wdx) <= 40 and abs(wdy) <= 40)
+        if hits and _localizable:
+            _exp_x = _anchor[0] + wdx * _grid_px
+            _exp_y = _anchor[1] + wdy * _grid_px
+            best = min(hits, key=lambda h: (int(h.get("cx", 0)) - _exp_x) ** 2
+                                           + (int(h.get("cy", 0)) - _exp_y) ** 2)
+            _dist = ((int(best.get("cx", 0)) - _exp_x) ** 2 + (int(best.get("cy", 0)) - _exp_y) ** 2) ** 0.5
+            _limit = 240 if _self_hits else 340   # crop-중앙 어림잡기는 오차가 더 크다
+            if _dist > _limit:
+                print(f"[TargetConfirm] 스캔이 격수 예상위치({int(_exp_x)},{int(_exp_y)})에서 "
+                      f"{int(_dist)}px 떨어진 매치만 냄(raw={len(_raw_warrior_hits)} anchor={_anchor}) "
+                      f"- 클릭 안 함, 키보드 폴백")
+                self._press_hw_key("esc", variance=0.10, skip_focus_guard=True)
+                return None
+            px = int(best.get("cx", 0)) + offset_x
+            py = int(best.get("cy", 0)) + offset_y + click_offset_y()
+            source = f"{best.get('name')}(예상위치근접 {int(_dist)}px)"
+        elif hits and len(hits) <= 3:
+            # 텔레메트리 못 쓰는데 후보가 적으면 예전처럼 첫 번째.
             best = hits[0]
             px = int(best.get("cx", 0)) + offset_x
             py = int(best.get("cy", 0)) + offset_y + click_offset_y()
             source = str(best.get("name"))
-        else:
+        elif hits:
+            print(f"[TargetConfirm] 매치 {len(hits)}개인데 격수 위치를 특정 못 함 "
+                  f"(wdx={wdx} wdy={wdy}) - 클릭 안 함, 키보드 폴백")
+            self._press_hw_key("esc", variance=0.10, skip_focus_guard=True)
+            return None
+        if _raw_warrior_hits and not hits:
+            rej = [(int(h.get("cx", 0)), int(h.get("cy", 0))) for h in _raw_warrior_hits[:8]]
+            selfp = [(int(s.get("cx", 0)), int(s.get("cy", 0))) for s in _self_hits]
+            print(f"[TargetConfirm] 유령 매치 거부: raw={len(_raw_warrior_hits)} {rej} (졈프_name={selfp} "
+                  f"bad_spots={_bad_spots_screen} wdx={wdx} wdy={wdy} crop={_crop_w}x{_crop_h})")
+        if not hits:
             # 여기서는 esc/tab을 누른 뒤 화면을 딱 한 번 본다. 하필 그 순간
             # 이름표가 몬스터/이팩트에 가려지면 실패한다 - 실측 로그에서
             # 센티넬이 17번 찾는 동안 이 경로는 9번 못 찾았다. 센티넬은 매
@@ -2717,14 +2752,27 @@ class LogicSvc(threading.Thread):
         previous_follow = bool(getattr(self.state, "nav_follow_enabled", False))
         self._pause_follow_for_action(duration=self._REDTAB_HOLD_SEC)
         try:
+            none_count = 0
             for mouse_attempt in range(1, 4):
                 marker_result = self._click_warrior_marker_and_lock()
                 if marker_result is True:
                     self._warrior_click_fail_streak = 0
                     return True
+                if marker_result is None:
+                    none_count += 1
                 print(f"[TargetConfirm] mouse attempt={mouse_attempt}/3 result={marker_result}")
             # tab으로 열린 대상박스가 남아있을 수 있으니 닫고 끝낸다.
             self._press_hw_key("esc", variance=0.10)
+            # 클릭이 진짜 격수 이름표를 못 찾은 경우(None) - 스캔이 100+개
+            # 유령을 내는 상태다. 마우스로 더 시도해봐야 소용없으니 키보드
+            # tab->tab 승격으로 폴백한다(스캔에 안 의존). 몬스터가 잡히면 실패.
+            if none_count >= 2:
+                if self._ensure_warrior_red_tab_via_ntab():
+                    if not self._is_monster_target_selected():
+                        print("[TargetConfirm] 마우스 실패 - 키보드 tab>tab 폴백 성공")
+                        self._warrior_click_fail_streak = 0
+                        return True
+                    print("[TargetConfirm] 키보드 폴백도 몬스터 선택 - 실패")
             self._warrior_click_fail_streak = int(getattr(self, "_warrior_click_fail_streak", 0) or 0) + 1
             if self._warrior_click_fail_streak >= 2:
                 # 같은 오탐 좌표를 무한 클릭하지 말고 3초 쉰다. 그동안 센티넬이
