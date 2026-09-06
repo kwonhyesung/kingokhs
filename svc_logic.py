@@ -155,10 +155,6 @@ class LogicSvc(threading.Thread):
         # 클릭했더니 격수가 아니라 도사 자신/딴 대상이 잡힌 화면 좌표들.
         # (x, y, 기록시각) - 이 근처에 뜬 점프_name* 매치는 유령으로 보고 스킵.
         self._recent_bad_click_spots: list[tuple[int, int, float]] = []
-        # 도사 자신의 화면 앵커(play_area crop 기준 좌표). 카메라가 도사를
-        # 따라다녀서 거의 안 변한다 - 락 성공할 때마다 러닝평균으로 학습.
-        # 격수 예상 화면위치 = 앵커 + (wdx,wdy)*48.
-        self._dosa_screen_anchor: tuple[float, float] | None = None
         self._ntab_confirm_required_hits = 1
         self._ntab_confirm_timeout = 0.42
         self._warrior_next_attack_at = 0.0
@@ -2577,53 +2573,52 @@ class LogicSvc(threading.Thread):
             if _hit_plausible(int(h.get("cx", 0)), int(h.get("cy", 0)))
         ]
         # 실측: 점프_name 패턴이 화면 100곳 이상에서 매칭됨(raw=101~176).
-        # 그중 hits[0]을 그냥 쓰면 매 시도 딴 곳을 클릭 -> 도사 자신 선택.
-        # 격수의 화면상 예상 위치를 계산해서 거기서 제일 가까운 매치를 쓴다.
-        #   기준점(anchor): 도사 자기 이름표(졈프_name)가 잡혔으면 그걸,
-        #                   아니면 play_area crop 중앙을 대충 쓴다.
-        #   예상 격수 위치 = anchor + (wdx, wdy) * grid_px
-        # 예상 위치에서 5칸(240px) 넘게 떨어진 매치밖에 없으면 스캔이 진짜
-        # 격수를 못 찾은 것 -> 클릭 안 하고 None (호출부가 키보드 폴백).
-        _grid_px = 48
-        # 앵커 우선순위: 학습된 도사 화면 앵커 > 도사 이름표(졈프_name) > crop 중앙.
-        _anchor = None
-        _anchor_src = ""
-        _learned_anchor = getattr(self, "_dosa_screen_anchor", None)
-        if _learned_anchor is not None:
-            _anchor = (_learned_anchor[0], _learned_anchor[1])
-            _anchor_src = "learned"
-        elif _self_hits:
-            _sh = min(_self_hits, key=lambda s: abs(int(s.get("cx", 0)) - _crop_w / 2.0))
-            _anchor = (int(_sh.get("cx", 0)), int(_sh.get("cy", 0)))
-            _anchor_src = "졈프_name"
-        elif _crop_w > 0 and _crop_h > 0:
-            _anchor = (_crop_w / 2.0, _crop_h / 2.0)
-            _anchor_src = "crop중앙"
-        _localizable = bool(_anchor and (wdx != 0 or wdy != 0) and abs(wdx) <= 40 and abs(wdy) <= 40)
-        if hits and _localizable:
-            _exp_x = _anchor[0] + wdx * _grid_px
-            _exp_y = _anchor[1] + wdy * _grid_px
-            best = min(hits, key=lambda h: (int(h.get("cx", 0)) - _exp_x) ** 2
-                                           + (int(h.get("cy", 0)) - _exp_y) ** 2)
-            _dist = ((int(best.get("cx", 0)) - _exp_x) ** 2 + (int(best.get("cy", 0)) - _exp_y) ** 2) ** 0.5
-            _limit = {"learned": 170, "졈프_name": 240}.get(_anchor_src, 340)
-            if _dist > _limit:
-                print(f"[TargetConfirm] 스캔이 격수 예상위치({int(_exp_x)},{int(_exp_y)})[{_anchor_src}]에서 "
-                      f"{int(_dist)}px 떨어진 매치만 냄(raw={len(_raw_warrior_hits)}) - 클릭 안 함, 키보드 폴백")
+        # hits[0]을 그냥 쓰면 매 시도 딴 곳 클릭 -> 도사 자신 선택.
+        # 이 게임은 카메라가 캐릭터를 안 따라가고 맵뷰가 고정이라, 격수의
+        # grid(x,y)에서 화면 위치를 바로 계산할 수 있다(bis_vision _calc_grid의
+        # 역: crop_x = gx*48 + 24, crop 원점 = config play_area.sx/sy = offset).
+        # 이름표는 타일 중심보다 위라 y는 half-tile을 안 더한다. y 원점 오차가
+        # 있을 수 있어(_calc_grid 기본 sy=28 vs config 50) 거리에서 y 가중을
+        # 낮춘다. 가장 가까운 매치가 그래도 멀면 스캔이 격수를 못 찾은 것
+        # -> 클릭 안 하고 None (호출부가 키보드 tab>tab 폴백).
+        _grid_size = 48.0
+        _wgx = _wgy = None
+        try:
+            _wt2 = self.state.get_fresh_remote_data_by_role("격수")
+            if isinstance(_wt2, dict) and _wt2:
+                _gx = int(_wt2.get("x", _wt2.get("pos_x", -1)) or -1)
+                _gy = int(_wt2.get("y", _wt2.get("pos_y", -1)) or -1)
+                if 0 <= _gx <= 60 and 0 <= _gy <= 60:
+                    _wgx, _wgy = _gx, _gy
+        except Exception:
+            _wgx = _wgy = None
+
+        if hits and _wgx is not None and _crop_w > 0:
+            _exp_cx = _wgx * _grid_size + _grid_size / 2.0
+            _exp_cy = _wgy * _grid_size
+            def _wd2(h):
+                dxp = int(h.get("cx", 0)) - _exp_cx
+                dyp = (int(h.get("cy", 0)) - _exp_cy) * 0.5   # y 원점 오차 흡수
+                return dxp * dxp + dyp * dyp
+            best = min(hits, key=_wd2)
+            _dist = _wd2(best) ** 0.5
+            if _dist > 120:
+                print(f"[TargetConfirm] 격수 grid({_wgx},{_wgy})->예상crop({int(_exp_cx)},{int(_exp_cy)})에서 "
+                      f"{int(_dist)}px(가중) 떨어진 매치만 냄(raw={len(_raw_warrior_hits)}) - 클릭 안 함, 키보드 폴백")
                 self._press_hw_key("esc", variance=0.10, skip_focus_guard=True)
                 return None
             px = int(best.get("cx", 0)) + offset_x
             py = int(best.get("cy", 0)) + offset_y + click_offset_y()
-            source = f"{best.get('name')}(앵커={_anchor_src} 근접 {int(_dist)}px)"
+            source = f"{best.get('name')}(격수grid근접 {int(_dist)}px)"
         elif hits and len(hits) <= 3:
-            # 텔레메트리 못 쓰는데 후보가 적으면 예전처럼 첫 번째.
+            # 격수 grid를 못 받았는데 후보가 적으면 예전처럼 첫 번째.
             best = hits[0]
             px = int(best.get("cx", 0)) + offset_x
             py = int(best.get("cy", 0)) + offset_y + click_offset_y()
             source = str(best.get("name"))
         elif hits:
-            print(f"[TargetConfirm] 매치 {len(hits)}개인데 격수 위치를 특정 못 함 "
-                  f"(wdx={wdx} wdy={wdy}) - 클릭 안 함, 키보드 폴백")
+            print(f"[TargetConfirm] 매치 {len(hits)}개인데 격수 grid를 못 받음 "
+                  f"- 클릭 안 함, 키보드 폴백")
             self._press_hw_key("esc", variance=0.10, skip_focus_guard=True)
             return None
         if _raw_warrior_hits and not hits:
@@ -2711,26 +2706,6 @@ class LogicSvc(threading.Thread):
                           f"- 격수 락 실패, 좌표 블랙리스트 15s, 재시도")
                     return False
                 print(f"[TargetConfirm] 신원 확인 OK: {self._support_warrior_pattern}")
-                # 이 클릭이 진짜 격수였다. clicked - (wdx,wdy)*48 = 도사 자신의
-                # 화면 앵커(카메라가 도사를 따라다녀서 거의 안 변하는 값).
-                # 성공할 때마다 이걸 러닝평균으로 학습해서, 다음부터는 유령
-                # 스캔에 안 기대고 이 앵커로 격수 예상 위치를 잡는다.
-                try:
-                    if (wdx != 0 or wdy != 0) and abs(wdx) <= 40 and abs(wdy) <= 40:
-                        _a_cx = (_clicked_px - offset_x) - wdx * 48
-                        _a_cy = (_clicked_py - offset_y - click_offset_y()) - wdy * 48
-                        prev_a = getattr(self, "_dosa_screen_anchor", None)
-                        if prev_a is None:
-                            self._dosa_screen_anchor = (float(_a_cx), float(_a_cy))
-                        else:
-                            self._dosa_screen_anchor = (
-                                prev_a[0] * 0.7 + _a_cx * 0.3,
-                                prev_a[1] * 0.7 + _a_cy * 0.3,
-                            )
-                        print(f"[TargetConfirm] 도사 화면 앵커 갱신: "
-                              f"({int(self._dosa_screen_anchor[0])},{int(self._dosa_screen_anchor[1])})")
-                except Exception:
-                    pass
             # tab -> tab 으로 red_tab 최종 승격 (요청대로 2회).
             if not self._press_hw_key("tab", variance=0.10):
                 return False
