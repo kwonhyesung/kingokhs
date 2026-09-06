@@ -2494,16 +2494,49 @@ class LogicSvc(threading.Thread):
         except Exception:
             _crop_h, _crop_w = 0, 0
         _edge = 24  # play_area 경계에 딱 붙은 매치는 FindText 가장자리 오탐이다
-        hits = [
+
+        # 격수 텔레메트리(grid x,y)로 '방향 상식' 체크. 격수가 도사보다
+        # 확실히 아래(wdy>=2)면 그 이름표가 화면 위쪽 1/3에 뜰 수는 없다 -
+        # 거기 뜬 점프_name*은 도사 자기 이름 '졈프'의 오탐(졈↔점)이거나
+        # 상단 파티 HUD 텍스트다. 실측: 격수가 dx=3 dy=3인데 클릭이 매번
+        # 화면 최상단 (1160,128) -> 도사 자신(졈프_user)이 선택됨.
+        wdx = wdy = 0
+        try:
+            _wt = self.state.get_fresh_remote_data_by_role("격수")
+            if isinstance(_wt, dict) and _wt:
+                wdx = int(_wt.get("x", _wt.get("pos_x", 0)) or 0) - int(getattr(self.state, "x", 0) or 0)
+                wdy = int(_wt.get("y", _wt.get("pos_y", 0)) or 0) - int(getattr(self.state, "y", 0) or 0)
+        except Exception:
+            wdx = wdy = 0
+
+        def _hit_plausible(cx_rel: int, cy_rel: int) -> bool:
+            if _crop_w <= 0 or _crop_h <= 0:
+                return True
+            if cx_rel < _edge or cx_rel > _crop_w - _edge:
+                return False
+            if cy_rel < _edge or cy_rel > _crop_h - _edge:
+                return False
+            if wdy >= 2 and cy_rel < _crop_h * 0.30:
+                return False
+            if wdy <= -2 and cy_rel > _crop_h * 0.70:
+                return False
+            if wdx >= 2 and cx_rel < _crop_w * 0.30:
+                return False
+            if wdx <= -2 and cx_rel > _crop_w * 0.70:
+                return False
+            return True
+
+        _raw_warrior_hits = [
             h for h in matcher.find_text_scan(scan_crop, "party", "USER")
             if str(h.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
-            and not (
-                _crop_w > 0 and _crop_h > 0 and (
-                    int(h.get("cx", 0)) < _edge or int(h.get("cx", 0)) > _crop_w - _edge
-                    or int(h.get("cy", 0)) < _edge or int(h.get("cy", 0)) > _crop_h - _edge
-                )
-            )
         ]
+        hits = [
+            h for h in _raw_warrior_hits
+            if _hit_plausible(int(h.get("cx", 0)), int(h.get("cy", 0)))
+        ]
+        if _raw_warrior_hits and not hits:
+            rej = [(int(h.get("cx", 0)), int(h.get("cy", 0))) for h in _raw_warrior_hits]
+            print(f"[TargetConfirm] 유령 매치 거부: {rej} (격수 방향 wdx={wdx} wdy={wdy}, crop={_crop_w}x{_crop_h})")
         if hits:
             # 후보가 둘 이상 나오는 경우는 실측 로그(37회 검출) 전체에서 한
             # 번도 없었다 - 점프_name*은 격수만 가진 이름이라 정상 상황에서
@@ -2528,7 +2561,11 @@ class LogicSvc(threading.Thread):
                 now_tag = time.time()
                 fresh = [t for t in (getattr(self.state, "party_nametag_hits", []) or [])
                          if str(t.get("name", "")).startswith(self._WARRIOR_NAME_PREFIX)
-                         and now_tag - float(t.get("at", 0.0) or 0.0) <= self._NAMETAG_REUSE_SEC]
+                         and now_tag - float(t.get("at", 0.0) or 0.0) <= self._NAMETAG_REUSE_SEC
+                         # 센티넬 이름표도 같은 유령 매치가 섞일 수 있다 - 같은
+                         # 방향 상식 체크를 건다(t["x"/"y"]는 화면좌표라 crop 기준으로 환산).
+                         and _hit_plausible(int(t.get("x", 0)) - offset_x,
+                                            int(t.get("y", 0)) - offset_y - click_offset_y())]
                 if fresh or now_tag >= wait_until:
                     break
                 time.sleep(0.05)
