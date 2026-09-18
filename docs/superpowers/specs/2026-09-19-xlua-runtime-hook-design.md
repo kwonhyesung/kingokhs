@@ -12,8 +12,8 @@
 | xlua.dll | `msw_Data\Plugins\x86_64\xlua.dll`, Lua 5.3 기반 |
 | xlua.dll export | **487개 전부 `_mlNNN`으로 난독화** (`check_wrapper_version` 하나만 예외). `GetProcAddress`로 Lua 함수를 못 찾음 → **런타임 시그니처 스캔** |
 | 후킹 대상 | `luaL_loadbufferx(L, buff, sz, name, mode)` — 게임은 C#에서 `xluaL_loadbuffer`로 바이트를 넘기므로 이 함수를 지난다. (`lua_load`는 이 빌드에서 호출자에 인라인돼 후킹 불가. 전체 커버가 필요하면 `luaD_protectedparser`, 10절 ALT) |
-| Lua 형태 | 평문 텍스트 (바이트코드 아님) |
-| 교체 대상 | 로드되는 Lua 청크 내용 안의 문자열 |
+| Lua 형태 | 평문 청크는 전부 빈 서버 stub, 실제 로직은 Lua 5.3 바이트코드 (11절) |
+| 교체 대상 | 평문 청크 내 문자열 치환, 또는 청크 통째 교체(`이름|@파일`, 바이트코드 포함) |
 | 주입 방식 | 별도 인젝터 exe (`CreateRemoteThread` + `LoadLibraryW`), 발견 후 2초 대기 |
 | 안티치트 | 없음. 단 넥슨 약관상 클라이언트 개조는 금지 → 본인 학습/본인 월드 범위에서만 |
 | 프로젝트 위치 | `C:\Users\kwon\Desktop\luahook\` 별도 git 저장소 |
@@ -37,8 +37,8 @@
                                            ① buff[0..sz)를 std::string으로 복사 (버퍼가 이미 주어짐)
                                            ② 로그 기록
                                            ③ (옵션) 원문 덤프
-                                           ④ 규칙 매칭 → 문자열 치환
-                                           ⑤ 치환된 문자열의 data/size로 원본 luaL_loadbufferx 호출
+                                           ④ 규칙: whole(정확일치→파일 내용) / 문자열 치환(평문만)
+                                           ⑤ 원본 호출 (whole이면 mode=nullptr)
                                            ⑥ 반환값 로그
 ```
 
@@ -49,7 +49,7 @@ luahook/
   injector.cpp        인젝터. 약 60줄
   hook.cpp            DLL 본체. 약 200줄 (시그니처 스캔 포함)
   rules.txt           교체 규칙 + 옵션. 재빌드 없이 수정
-  build.bat           vcvars64 호출 + cl 두 번 (+ `test` 인자로 셀프테스트)
+  build.bat           vcvars64 호출 + cl 세 번 (MinHook 객체 별도 컴파일) (+ `test` 인자로 셀프테스트)
   minhook/            MinHook v1.3.4 원본 그대로 (MIT). src/*.c + include/MinHook.h
   tools/find_sig.py   시그니처 추출 스크립트 (pefile + capstone). 게임 업데이트 시 재실행
   README.md           사용법 5줄
@@ -131,7 +131,7 @@ MeramNeighborInfo.OnEnterMap|@my\OnEnterMap.lua
 
 ```
 [12:34:56.789] === attached pid=1234 base=C:\Users\kwon\Desktop\luahook\out ===
-[12:34:56.790] rules: 3, dump=1
+[12:34:56.790] rules: 3, dump=1, log=1
 [12:34:58.011] xlua.dll found at 00007FF8... text=00007FF8...+0x9A000
 [12:34:58.012] luaL_loadbufferx @ 00007FF8... (sig match 1)
 [12:34:58.013] hook ready
@@ -139,7 +139,7 @@ MeramNeighborInfo.OnEnterMap|@my\OnEnterMap.lua
 [12:35:01.501] DUMP dump/main.lua
 [12:35:01.501] REPLACED rule=1 n=1
 [12:35:01.502] RULE_MISS rule=2
-[12:35:01.503] RESULT rc=0
+[12:35:01.503] RESULT rc=0 name=@main.lua
 [12:35:02.100] BYTECODE name=chunk size=9931
 [12:35:02.101] DUMP dump/chunk_3A1F02BC.luac
 [12:35:02.102] REPLACED rule=3 whole size=512
