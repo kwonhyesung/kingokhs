@@ -199,4 +199,22 @@ copy /Y rules.txt out\
 
 ## 10. 시그니처 (스파이크 결과)
 
-_스파이크 완료 후 기록._
+- xlua.dll SHA-256 앞 16자: `2663440a12f5f474` (1,445,856 bytes, 2026-08-18)
+- string RVA `0x128588` → f_parser `0x135a0` (checkmode 인라인, 오류 블록은 `0x13773` 콜드 조각) → luaD_protectedparser `0x137d0` → lua_load `0x2dd0` (독립 복사본)
+- **후킹 대상 변경: `lua_load` → `luaD_protectedparser`.** 이 빌드는 `lua_load`가 호출자 대부분에 **인라인**돼 있어 "모든 로드가 지나는 한 함수"가 아니다. `luaD_protectedparser` 호출자 4개:
+  | RVA | 정체 | 비고 |
+  |---|---|---|
+  | `0x2dd0` | 독립 `lua_load` | 호출자 `luaB_load`(`0x8950`, `load(function)` 경로) 하나뿐. export 아님 |
+  | `0x63d0` | `luaL_loadbufferx` (lua_load 인라인, `getS` 리더 `0x63b0`) | export 4개(`_ml482 _ml94 _ml390 _ml173`) 포함 호출자 8개 — 게임 스크립트 주 경로 |
+  | `0x5ed0` | `luaL_loadfilex` (lua_load 인라인, `"=stdin"`) | |
+  | `0xf100` | `db_debug` (lua_load 인라인, `"lua_debug> "`) | |
+  네 경로가 전부 지나는 유일한 지점이 `luaD_protectedparser`이므로 여기를 후킹한다. 시그니처 사슬(2·3단계)이 이 함수를 정확히 하나로 특정한다.
+- 후킹 함수 시그니처 (Lua 5.3 `ldo.c`/`lzio.h`, `0x63d0` 디스어셈블로 필드 배치 확인):
+  ```c
+  struct ZIO { size_t n; const char* p; lua_Reader reader; void* data; lua_State* L; };  // 0x28 bytes
+  int luaD_protectedparser(lua_State* L, ZIO* z, const char* name, const char* mode);      // name은 이미 "?" 치환됨(NULL 아님)
+  ```
+  4.2의 reader 소비는 ZIO 기준: 먼저 `z->p[0..n)` 버퍼를 취하고, 이어서 `z->reader(L, z->data, &sz)`를 NULL/0까지 반복. 치환 후 `z->n/z->p`를 우리 버퍼로, `z->reader`를 NULL 반환 리더로 바꿔 원본 호출.
+- `LUA_LOAD_SIG = "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 57 41 54 41 55 41 56 41 57 48 81 EC ?? ?? ?? ?? 0F B7 A9 C4 00 00 00"` (luaD_protectedparser, 파일 전체 1회 매치)
+- 대안 `luaL_loadbufferx`(`0x63d0`) 시그니처 — reader 없이 `(L, buff, size, name, mode)`를 직접 받아 더 단순하지만 `loadfilex`/`load(function)` 경로를 놓침: `4C 8B DC 53 48 83 EC 60 4D 89 43 C0 48 8D 05 ?? ?? ?? ?? 49 89 43 D8 4C 8D 05 ?? ?? ?? ?? 49 8D 43 B8`
+- 추출: `python tools/find_sig.py` (2026-09-19). 스크립트 조정 2건: `.pdata`의 `UNW_FLAG_CHAININFO` 조각을 원 함수로 귀속, 어디서도 참조되지 않는 죽은 `checkmode` 복사본(`0x13530`) 제외.
