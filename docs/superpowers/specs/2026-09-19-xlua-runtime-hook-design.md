@@ -96,11 +96,13 @@ int luaL_loadbufferx(lua_State* L, const char* buff, size_t sz, const char* name
 3. `orig(L, chunk.data(), chunk.size(), name, mode)` 호출.
 4. 반환값(0=성공, 그 외 문법 오류 등)을 `RESULT rc=N` 로그. 에러 메시지 문자열은 `lua_tolstring`도 난독화라 생략 (`ponytail: 필요해지면 lua_tolstring 시그니처도 뽑기`).
 
-`process` 로직:
-1. 첫 바이트가 `\x1b`(바이트코드)면 `BYTECODE skip` 로그 후 원문 그대로 반환.
-2. 로그: `LOAD name=<name> size=<sz>`. name NULL이면 `(null)`.
-3. `dump=1`이면 `dump/<sanitized name>.lua`에 원문 저장. sanitize: `\ / : * ? " < > |` → `_`, 선두 `@`/`=` 제거. 같은 이름은 덮어씀.
-4. 규칙 순회: `name`에 `rule.name`이 **부분 문자열로 포함**되면 후보. 후보 규칙마다 `find`를 **전부** `replace`로 치환. 0회면 `RULE_MISS rule=i`, 1회 이상이면 `REPLACED rule=i n=<횟수>` 로그.
+`process` 로직 (반환값: 청크 전체가 교체됐는가 — true면 원본 호출 시 `mode=nullptr`로 넘겨 텍스트도 허용):
+1. 첫 바이트가 `\x1b`면 바이트코드. 로그: `BYTECODE name=<name> size=<sz>` (평문이면 `LOAD name=<name> size=<sz>`). name NULL이면 `(null)`.
+2. `dump=1`이면 `dump/<sanitized name>.<lua|luac>`에 원문 저장 (평문은 `.lua`, 바이트코드는 `.luac`). 같은 이름·같은 내용이면 다시 쓰지 않고, 같은 이름·다른 내용이면 `<name>_<fnv1a 8자리hex>.<ext>`로 따로 저장 (세션 동안 이름→해시 맵 유지).
+3. 규칙 순회:
+   - `whole` 규칙(`이름|@파일`): `name`이 **정확히** 일치하면 청크 전체를 규칙의 `replace`(파일 내용, worker가 미리 읽어둠)로 바꾸고 즉시 `true` 반환 (`REPLACED rule=i whole size=<len>` 로그). 바이트코드 청크에도 적용.
+   - 문자열 규칙(`이름|찾을|바꿀`): **평문 청크에만** 적용(바이트코드면 건너뜀). `name`에 `rule.name`이 부분 문자열로 포함되면 후보. 후보 규칙마다 `find`를 전부 `replace`로 치환. 0회면 `RULE_MISS rule=i`, 1회 이상이면 `REPLACED rule=i n=<횟수>` 로그.
+4. 규칙을 다 돌고도 통째 교체가 없었으면 `false` 반환.
 
 **스레드 안전**: 로그 파일 쓰기는 `std::mutex` 하나로 감싼다. (`ponytail: 전역 락 하나. 성능 문제 될 일 없음.`)
 
@@ -115,11 +117,13 @@ log=1
 main.lua|local debug = false|local debug = true
 main.lua|return 10|return 999
 ui/shop|price =|price = 0 *
+MeramNeighborInfo.OnEnterMap|@my\OnEnterMap.lua
 ```
 
 - `key=value` 줄은 옵션. `dump` (0/1, 기본 **1**), `log` (0/1, 기본 1).
-- `name|find|replace` 줄이 규칙. `|`는 정확히 2개. `find`/`replace`에 `|`가 들어가는 경우는 지원 안 함.
-- 이스케이프: `\n`, `\t`, `\\` 세 가지만. 여러 줄 치환용.
+- 규칙 1) `name|find|replace` — `name`이 부분 문자열로 포함되면 적용, 평문 청크에만. `|`는 정확히 2개. `find`/`replace`에 `|`가 들어가는 경우는 지원 안 함.
+- 규칙 2) `name|@경로` — `name`이 **정확히** 일치하면 청크 전체를 `경로` 파일 내용(평문 Lua)으로 교체. 바이트코드 청크에도 적용. 상대경로는 hook.dll 폴더 기준. 파일 내용은 worker가 주입 시 1회 읽어 캐싱.
+- 이스케이프(규칙 1만): `\n`, `\t`, `\\` 세 가지만. 여러 줄 치환용.
 - UTF-8, BOM 있으면 제거.
 - 주입 시 1회 파싱. 바꾸면 게임 재시작 + 재주입.
 
@@ -176,7 +180,7 @@ copy /Y rules.txt out\
 
 | 항목 | 이유 |
 |---|---|
-| 바이트코드 청크 처리 | 평문 확인됨. 바이트코드면 디컴파일이 필요한 별개 프로젝트. `BYTECODE skip` 로그만 |
+| 바이트코드 **디컴파일**(덤프·통째 교체는 지원) | 실제 클라이언트 로직이 대부분 바이트코드(11절). 덤프해서 unluac 등 외부 도구로 디컴파일 후 `이름|@파일` 규칙으로 교체. 디스어셈블/디컴파일 자체는 DLL 범위 밖 |
 | 정규식 치환, `|` 이스케이프 | 학습엔 문자열 치환으로 충분. 필요 시 20줄 |
 | rules.txt 핫리로드 | 게임 재시작으로 대체 |
 | 인젝터 자동 재주입 / GUI | 더블클릭으로 대체 |
@@ -214,3 +218,12 @@ copy /Y rules.txt out\
 - **Primary** `LOADBUFFERX_SIG = "4C 8B DC 53 48 83 EC 60 4D 89 43 C0 48 8D 05 ?? ?? ?? ?? 49 89 43 D8 4C 8D 05 ?? ?? ?? ?? 49 8D 43 B8"` (luaL_loadbufferx `0x63d0`, 파일 전체 1회 매치)
 - **ALT** (전체 경로 커버용, 향후) `PROTECTEDPARSER_SIG = "48 8B C4 48 89 58 08 48 89 68 10 48 89 70 18 57 41 54 41 55 41 56 41 57 48 81 EC ?? ?? ?? ?? 0F B7 A9 C4 00 00 00"` (luaD_protectedparser `0x137d0`, 1회 매치). 시그니처: `int luaD_protectedparser(lua_State* L, ZIO* z, const char* name, const char* mode)`, `struct ZIO { size_t n; const char* p; lua_Reader reader; void* data; lua_State* L; }` (0x28 bytes, `0x63d0` 디스어셈블로 확인). 이걸 쓰면 `z->p[0..n)` + `z->reader` 루프로 원문을 모으고 `z->n/p/reader`를 우리 버퍼로 바꿔 원본 호출.
 - 추출: `python tools/find_sig.py` (2026-09-19). 스크립트 조정: `.pdata`의 `UNW_FLAG_CHAININFO` 조각을 원 함수로 귀속, 어디서도 참조되지 않는 죽은 `checkmode` 복사본(`0x13530`) 제외, 4단계를 "호출자 중 `'?'` 참조 + export 호출자 있는 함수 = luaL_loadbufferx"로 판별.
+
+## 11. 통합 테스트 결과 (2026-09-19)
+
+- 실제 게임(msw.exe)에 주입해 `dump=1, log=1`로 상당 시간 플레이하며 수집.
+- 총 21,191건 로드. 평문(`LOAD`) 14,852건, 바이트코드(`BYTECODE`) 6,339건.
+- 평문 14,852건은 **전부** `return function(...) end` 형태의 빈 stub — 실제 로직이 아니다.
+- 바이트코드 6,339건이 실제 클라이언트 로직. 청크 이름이 `chunk`로 동일한 것이 13,255개 → 이름만으로 덤프 파일을 구분할 수 없어 (A)의 이름_해시 충돌 처리가 필요했던 근거.
+- 시그니처(`LOADBUFFERX_SIG`, `base+0x63D0`)는 세션 내내 안정적으로 1회 매치, 후킹 유지.
+- 크래시·행 없음. 게임 정상 동작 확인.
