@@ -100,11 +100,11 @@ int luaL_loadbufferx(lua_State* L, const char* buff, size_t sz, const char* name
 1. 첫 바이트가 `\x1b`면 바이트코드. 로그: `BYTECODE name=<name> size=<sz>` (평문이면 `LOAD name=<name> size=<sz>`). name NULL이면 `(null)`.
 2. `dump=1`이면 `dump/<sanitized name>.<lua|luac>`에 원문 저장 (평문은 `.lua`, 바이트코드는 `.luac`). 같은 이름·같은 내용이면 다시 쓰지 않고, 같은 이름·다른 내용이면 `<name>_<fnv1a 8자리hex>.<ext>`로 따로 저장 (세션 동안 이름→해시 맵 유지).
 3. 규칙 순회:
-   - `whole` 규칙(`이름|@파일`): `name`이 **정확히** 일치하면 청크 전체를 규칙의 `replace`(파일 내용, worker가 미리 읽어둠)로 바꾸고 즉시 `true` 반환 (`REPLACED rule=i whole size=<len>` 로그). 바이트코드 청크에도 적용.
+   - `whole` 규칙(`이름|@파일`): `name`이 **정확히** 일치하고 `replace`가 비어있지 않으면 청크 전체를 규칙의 `replace`(파일 내용, worker가 미리 읽어둠)로 바꾸고 즉시 `true` 반환 (`REPLACED rule=i whole size=<len>` 로그). 바이트코드 청크에도 적용. 파일이 없거나 비어 있었으면(`replace`가 빈 문자열) 원본 청크를 그대로 두고 다음 규칙으로 넘어간다 — worker의 시작 시 `ERROR ... file empty or missing` 로그로 이미 알 수 있음.
    - 문자열 규칙(`이름|찾을|바꿀`): **평문 청크에만** 적용(바이트코드면 건너뜀). `name`에 `rule.name`이 부분 문자열로 포함되면 후보. 후보 규칙마다 `find`를 전부 `replace`로 치환. 0회면 `RULE_MISS rule=i`, 1회 이상이면 `REPLACED rule=i n=<횟수>` 로그.
 4. 규칙을 다 돌고도 통째 교체가 없었으면 `false` 반환.
 
-**스레드 안전**: 로그 파일 쓰기는 `std::mutex` 하나로 감싼다. (`ponytail: 전역 락 하나. 성능 문제 될 일 없음.`)
+**스레드 안전**: 로그 파일 쓰기와 덤프 이름→해시 맵(`g_dumped`)은 같은 `std::mutex` 하나로 감싼다. (`ponytail: 전역 락 하나. 성능 문제 될 일 없음.`)
 
 **예외**: 후킹 함수 전체를 `try/catch(...)`로 감싼다. 실패 시 `ERROR` 로그 + 원래 인자 그대로 원본에 전달.
 
@@ -140,6 +140,10 @@ MeramNeighborInfo.OnEnterMap|@my\OnEnterMap.lua
 [12:35:01.501] REPLACED rule=1 n=1
 [12:35:01.502] RULE_MISS rule=2
 [12:35:01.503] RESULT rc=0
+[12:35:02.100] BYTECODE name=chunk size=9931
+[12:35:02.101] DUMP dump/chunk_3A1F02BC.luac
+[12:35:02.102] REPLACED rule=3 whole size=512
+[12:35:02.103] RESULT rc=0
 ```
 
 ## 5. 시그니처 확보 (스파이크, 구현 전 1회)
