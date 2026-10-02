@@ -2770,6 +2770,13 @@ class AppView:
 
     def _refresh_state_spells_from_db(self):
         """Synchronize the active spell database into GameState.spells."""
+        def _parse_cooldown(value) -> float:
+            # spells_config.json의 "cooldown"(초, 선택). 없거나 잘못되면 0 = 쿨다운 없음.
+            try:
+                return max(0.0, float(value or 0))
+            except (TypeError, ValueError):
+                return 0.0
+
         if not hasattr(self, "state") or self.state is None:
             return
 
@@ -2789,6 +2796,7 @@ class AppView:
                 spell_char=slot or None,
                 enable_red_tab=bool(s.get("enable_red_tab", False)),
                 category=str(s.get("category", "OTHER") or "OTHER").strip() or "OTHER",
+                cooldown=_parse_cooldown(s.get("cooldown", 0)),
             ))
 
     def sync_slots_from_db(self):

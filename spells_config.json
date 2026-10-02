@@ -26,7 +26,7 @@
     {
         "name": "헬파이어",
         "target_type": "대상선택형",
-        "use": false,
+        "use": true,
         "enable_red_tab": false,
         "slot": "d",
         "category": "공격"
